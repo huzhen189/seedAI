@@ -14,6 +14,11 @@ export default defineConfig({
         target: process.env.VITE_API_TARGET || 'http://localhost:7101',
         changeOrigin: true,
       },
+      // 登录/注册等鉴权接口也代理到业务服务(同源,Cookie 可随请求自动携带)
+      '/auth': {
+        target: process.env.VITE_API_TARGET || 'http://localhost:7101',
+        changeOrigin: true,
+      },
     },
   },
 })

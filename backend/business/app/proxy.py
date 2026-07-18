@@ -1,10 +1,11 @@
 """生成代理:业务服务作为唯一对外入口。
 
 - 前端永不直接触达 AI 服务。
-- M0 匿名:GET /api/chat 不需要登录即可对话(对应文档 §3.7 / §5)。
+- 鉴权门禁:GET /api/chat 需登录(依赖 get_current_user,从 HttpOnly Cookie
+  取 JWT);未登录返回 401(文档 §3.7 / §5 / §2.1)。
 - 这里负责把前端的 GET 请求翻译成 AI 服务的 POST /generate,并把 SSE 帧
   透明透传回去;同时转发取消信号到 AI 的 POST /cancel。
-- 鉴权 / 限流 / 用量计量在此拦截(匿名场景仅做匿名计量,登录可扩展)。
+- 鉴权 / 限流 / 用量计量在此拦截(已登录用户按真实 user_id 计量)。
 
 SSE 透传策略:上游 AI 返回的是标准 SSE 文本帧(event:/data: 行 + 空行)。
 我们用 httpx 以原始字节流读取,再以 StreamingResponse 原样吐出,保证
@@ -15,16 +16,14 @@ import json
 import uuid
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from .config import settings
 from .metrics import record_model_usage
+from .security import CurrentUser, get_current_user
 
 router = APIRouter(prefix="/api", tags=["generate"])
-
-# 匿名用户的计量 id(-1 表示未登录,与登录用户 id 区分)
-_ANON_USER_ID = -1
 
 
 def _parse_messages(request: Request) -> list:
@@ -64,19 +63,20 @@ async def list_models():
 @router.get("/chat")
 async def chat(
     request: Request,
+    user: CurrentUser = Depends(get_current_user),
     model: str = Query("hy3", description="模型 id,默认主模型 hy3"),
     trace_id: str | None = Query(None, description="前端生成的链路 id,用于取消"),
 ):
-    """匿名 SSE 对话端点(文档 §3.7 / §5)。
+    """登录后 SSE 对话端点(文档 §3.7 / §5 / §2.1)。
 
-    前端: GET /api/chat?model=<id>&messages=<JSON>&trace_id=<id>
-    业务: 翻译成 POST {ai}/generate,逐帧透传 SSE。
+    前端: GET /api/chat?model=<id>&messages=<JSON>&trace_id=<id>(需携带登录 Cookie)
+    业务: 校验 JWT → 翻译成 POST {ai}/generate,逐帧透传 SSE。
     """
     messages = _parse_messages(request)
     tid = trace_id or uuid.uuid4().hex
 
-    # 匿名计量(登录后可替换为真实 user id)
-    await record_model_usage(_ANON_USER_ID, model)
+    # 已登录用户按真实 user_id 计量
+    await record_model_usage(user.id, model)
 
     payload = {"model_id": model, "messages": messages, "trace_id": tid}
 

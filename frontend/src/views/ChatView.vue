@@ -11,6 +11,8 @@ import {
   sendFeedback,
   type ChatCallbacks,
 } from '../api/chat'
+import { useAuth } from '../composables/useAuth'
+import AuthPanel from '../components/AuthPanel.vue'
 import type { ChatMessage, ModelInfo } from '../types'
 
 const models = ref<ModelInfo[]>([])
@@ -30,6 +32,9 @@ const errorMsg = ref('')
 const traceId = ref('')
 const esRef = ref<EventSource | null>(null)
 const rating = ref<'' | 'up' | 'down'>('')
+
+// 登录态(模块级单例,跨组件共享)
+const { user, ready, init, doLogout } = useAuth()
 
 function genTraceId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
@@ -116,17 +121,22 @@ async function rate(r: 'up' | 'down') {
 }
 
 onMounted(async () => {
+  // 先确认登录态;未登录时由 AuthPanel 拦截,不拉模型也不允许对话
+  await init()
   const m = await fetchModels()
   if (m.length) models.value = m
 })
 </script>
 
 <template>
-  <div class="app">
+  <AuthPanel v-if="ready && !user" />
+
+  <div v-else-if="ready && user" class="app">
     <header class="topbar">
       <div class="brand">SeedAI · 建站助手</div>
       <div class="right">
-        <span class="anon">匿名体验</span>
+        <span class="user">{{ user.username }}</span>
+        <button class="logout" @click="doLogout">退出</button>
         <ModelSelector :models="models" v-model:model="model" />
       </div>
     </header>
@@ -172,6 +182,8 @@ onMounted(async () => {
       <ChatInput v-model:value="input" :generating="generating" @send="send" @stop="stop" />
     </footer>
   </div>
+
+  <div v-else class="loading-screen">加载中…</div>
 </template>
 
 <style scoped>
@@ -204,6 +216,28 @@ onMounted(async () => {
   border: 1px solid var(--border);
   padding: 3px 8px;
   border-radius: 999px;
+}
+.user {
+  font-size: 13px;
+  color: var(--brand);
+  font-weight: 600;
+}
+.logout {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+.loading-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted);
+  font-size: 14px;
 }
 .body {
   flex: 1;

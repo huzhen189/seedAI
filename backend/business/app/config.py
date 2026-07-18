@@ -10,8 +10,15 @@ class Settings(BaseSettings):
 
     # 数据层
     redis_url: str = "redis://redis:6379/0"
-    # M0 默认用 SQLite 便于本地直跑;docker-compose 注入 MySQL(aiomysql)
+    # 主 DB URL(MySQL/SQLite 均可);docker-compose 注入 mysql+aiomysql。
+    # 本地若未显式给 DATABASE_URL 但给了 MYSQL_URL,则回退采用(见 model_post_init)。
     database_url: str = "sqlite+aiosqlite:///./seedai.db"
+    mysql_url: str = ""
+
+    def model_post_init(self, __context) -> None:
+        # 兼容旧键 MYSQL_URL:仅在仍取 SQLite 默认值且提供了 MYSQL_URL 时切换
+        if self.database_url.startswith("sqlite") and self.mysql_url:
+            self.database_url = self.mysql_url
 
     # JWT
     jwt_secret: str = "dev-secret-change-me"
@@ -27,6 +34,8 @@ class Settings(BaseSettings):
     preview_domain: str = "seedhtml.huzhen.net.cn"
     # 鉴权 Cookie 域(空=按宿主;生产设为 .huzhen.net.cn 或主站域,预览子域不持有)
     cookie_domain: str = ""
+    # Cookie 是否仅 HTTPS(生产 true;本地 http 开发设 false 才能写入)
+    cookie_secure: bool = False
 
     # CORS(前端 origin,逗号分隔;默认含本地与站点域)
     cors_origins: str = "http://localhost:7100,http://seedai.huzhen.net.cn:7100"

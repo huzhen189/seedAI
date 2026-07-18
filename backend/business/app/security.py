@@ -4,12 +4,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import settings
 
 _bearer = HTTPBearer(auto_error=False)
+
+# 鉴权 Cookie 名(文档 §2.1:HttpOnly + Secure + SameSite)
+ACCESS_COOKIE = "access_token"
+REFRESH_COOKIE = "refresh_token"
 
 
 # ---------- 密码 ----------
@@ -59,15 +63,21 @@ class CurrentUser:
 
 
 def get_current_user(
+    request: Request,
     creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ) -> CurrentUser:
-    if creds is None:
+    # 1) HttpOnly Cookie(前端同源自动携带,SSE/页面均可用,文档 §2.1)
+    token = request.cookies.get(ACCESS_COOKIE)
+    # 2) 兼容 Bearer(便于 API 调试 / 非浏览器客户端)
+    if not token and creds is not None:
+        token = creds.credentials
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing bearer token",
+            detail="Missing authentication",
         )
     try:
-        payload = decode_token(creds.credentials)
+        payload = decode_token(token)
         if payload.get("type") != "access":
             raise ValueError("not an access token")
         return CurrentUser(int(payload["sub"]), payload.get("role", "user"))
