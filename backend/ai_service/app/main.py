@@ -130,3 +130,12 @@ async def cancel(req: Request):
         await get_queue().set_cancel(trace_id)
         return {"ok": True, "trace_id": trace_id}
     return {"ok": False, "error": "missing trace_id"}
+
+
+# 本地直跑入口:python backend/ai_service/app/main.py
+# 锁定端口为 settings.ai_service_port(默认 7102),避免回退到 uvicorn 默认 8000。
+# 生产/docker 由 Dockerfile 的 `uvicorn ... --port 7102` 启动,不走此分支。
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=settings.ai_service_port)

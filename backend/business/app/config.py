@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     # 服务间通信:业务服务唯一对外,AI 服务仅内网
     ai_service_url: str = "http://ai-service:7102"
 
+    # 业务服务自身监听端口(本地直跑 uvicorn 默认 8000,此处显式锁定 7101;
+    # docker-compose 也会注入 BUSINESS_API_PORT=7101 覆盖;main.py __main__ 块使用)
+    business_api_port: int = 7101
+
     # 数据层
     redis_url: str = "redis://redis:6379/0"
     # 主 DB URL(MySQL/SQLite 均可);docker-compose 注入 mysql+aiomysql。

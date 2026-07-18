@@ -47,3 +47,12 @@ async def health():
 app.include_router(auth_router)
 app.include_router(proxy_router)
 app.include_router(admin_router)
+
+
+# 本地直跑入口:python backend/business/app/main.py
+# 锁定端口为 settings.business_api_port(默认 7101),避免回退到 uvicorn 默认 8000。
+# 生产/docker 由 Dockerfile 的 `uvicorn ... --port 7101` 启动,不走此分支。
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=settings.business_api_port)

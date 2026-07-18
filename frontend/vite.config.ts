@@ -6,6 +6,9 @@ import vue from '@vitejs/plugin-vue'
 export default defineConfig({
   plugins: [vue()],
   server: {
+    // host:true 允许通过域名(如 seedai.huzhen.net.cn)/局域网 IP 访问 dev server,
+    // 否则 vite 默认只绑 localhost,域名访问会被拒。
+    host: true,
     port: 7100,
     proxy: {
       '/api': {
