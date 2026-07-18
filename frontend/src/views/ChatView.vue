@@ -4,7 +4,6 @@ import ThoughtTrail from '../components/ThoughtTrail.vue'
 import PreviewPane from '../components/PreviewPane.vue'
 import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
-import AuthPanel from '../components/AuthPanel.vue'
 import SettingsPanel from '../components/SettingsPanel.vue'
 import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
 import { useAuth } from '../composables/useAuth'
@@ -30,7 +29,6 @@ const esRef = ref<EventSource | null>(null)
 const rating = ref<'' | 'up' | 'down'>('')
 
 const showSettings = ref(false)
-const showAuth = ref(false)
 const pendingSend = ref(false)
 
 const auth = useAuth()
@@ -83,7 +81,7 @@ async function send() {
   if (!text || generating.value) return
   if (!auth.user.value) {
     pendingSend.value = true
-    showAuth.value = true
+    auth.openLogin()
     return
   }
   const pid = projectStore.currentProjectId
@@ -224,7 +222,7 @@ watch(
   () => auth.user,
   (u) => {
     if (u) {
-      showAuth.value = false
+      auth.closeLogin()
       if (pendingSend.value) {
         pendingSend.value = false
         send()
@@ -295,7 +293,6 @@ watch(
       <PreviewPane :html="generatedHtml" :url="previewUrl" :loading="generating" />
     </div>
 
-    <AuthPanel v-if="showAuth" @close="showAuth = false" />
     <SettingsPanel v-if="showSettings" @close="showSettings = false" />
   </div>
 </template>

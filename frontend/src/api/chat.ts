@@ -1,4 +1,5 @@
 import type { ChatMessage, ModelInfo, NodeEvent, ThinkEvent } from '../types'
+import { notifyAuthRequired } from '../stores/auth'
 
 export interface ChatCallbacks {
   onNode?: (data: NodeEvent) => void
@@ -58,9 +59,21 @@ export function startChat(opts: StartChatOptions): EventSource {
     const me = e as MessageEvent
     if (me.data) {
       const d = safeParse(me.data)
-      opts.cb.onError?.(d.message || me.data)
+      const msg = String(d.message || me.data)
+      // 鉴权失败(后端经 SSE error 事件下发 AUTH_REQUIRED / "Missing authentication"):
+      // 主动弹出登录框,并给出明确提示。
+      const isAuthErr =
+        d.code === 'AUTH_REQUIRED' ||
+        /missing authentication|not authenticated|未登录|invalid or expired token|^\s*401\b/i.test(msg)
+      if (isAuthErr) {
+        notifyAuthRequired()
+        opts.cb.onError?.('登录已失效，请重新登录')
+      } else {
+        opts.cb.onError?.(msg)
+      }
     } else {
-      opts.cb.onError?.('连接中断')
+      // 无 data:多为网络中断;若用户态本应在登录态,也提示重新登录。
+      opts.cb.onError?.('连接中断，请检查网络或重新登录')
     }
     es.close()
   })

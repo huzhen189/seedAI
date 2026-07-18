@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useAuth } from '../composables/useAuth'
+import { useAuthStore } from '../stores/auth'
 
-const emit = defineEmits<{ close: [] }>()
-const { doLogin, doRegister } = useAuth()
+const store = useAuthStore()
 
 const mode = ref<'login' | 'register'>('login')
 const username = ref('')
@@ -23,16 +22,16 @@ async function submit() {
   busy.value = true
   try {
     if (mode.value === 'login') {
-      await doLogin(username.value.trim(), password.value)
+      await store.login(username.value.trim(), password.value)
     } else {
-      await doRegister(
+      await store.register(
         username.value.trim(),
         password.value,
         email.value.trim() || undefined,
         nickname.value.trim() || undefined,
       )
     }
-    // 登录成功由父组件 watch(user) 关闭弹窗,此处不重复关闭
+    // 登录/注册成功:store 已自动关闭弹窗(loginOpen=false),无需手动
   } catch (e: any) {
     err.value = e?.message || '操作失败'
   } finally {
@@ -42,9 +41,9 @@ async function submit() {
 </script>
 
 <template>
-  <div class="auth-mask" @click.self="emit('close')">
+  <div v-if="store.loginOpen" class="auth-mask" @click.self="store.closeLogin()">
     <div class="auth-card">
-      <button class="close-x" @click="emit('close')" aria-label="关闭">×</button>
+      <button class="close-x" @click="store.closeLogin()" aria-label="关闭">×</button>
       <div class="title">SeedAI · {{ mode === 'login' ? '登录' : '注册' }}</div>
       <div class="sub">登录后才能开始对话</div>
 

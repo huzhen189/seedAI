@@ -6,7 +6,7 @@ import * as authApi from '../api/auth'
 
 export function useAuth() {
   const store = useAuthStore()
-  const { user } = storeToRefs(store)
+  const { user, loginOpen } = storeToRefs(store)
 
   async function doUpdateUser(p: {
     nickname?: string
@@ -21,10 +21,13 @@ export function useAuth() {
 
   return {
     user,
+    loginOpen,
     init: store.init,
     login: store.login,
     register: store.register,
     logout: store.logout,
+    openLogin: store.openLogin,
+    closeLogin: store.closeLogin,
     doLogin: store.login,
     doRegister: store.register,
     doLogout: store.logout,

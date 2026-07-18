@@ -12,7 +12,6 @@ const auth = useAuthStore()
 const projectStore = useProjectStore()
 const convStore = useConversationStore()
 
-const showAuth = ref(false)
 const showSettings = ref(false)
 const searchText = ref('')
 
@@ -68,11 +67,11 @@ function logout() {
         <button class="btn" @click="showSettings = true">设置</button>
         <button class="btn" @click="logout">退出</button>
       </template>
-      <button v-else class="login" @click="showAuth = true">登录 / 注册</button>
+      <button v-else class="login" @click="auth.openLogin()">登录 / 注册</button>
     </div>
   </header>
 
-  <AuthPanel v-if="showAuth" @close="showAuth = false" />
+  <AuthPanel />
   <SettingsPanel v-if="showSettings" @close="showSettings = false" />
 </template>
 

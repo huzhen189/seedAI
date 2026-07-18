@@ -1,4 +1,5 @@
 import type { Conversation, Project, SearchItem } from '../types'
+import { notifyAuthRequired } from '../stores/auth'
 
 async function j(method: string, path: string, body?: unknown): Promise<any> {
   const r = await fetch(path, {
@@ -9,6 +10,11 @@ async function j(method: string, path: string, body?: unknown): Promise<any> {
   })
   if (!r.ok) {
     const text = await r.text().catch(() => '')
+    if (r.status === 401) {
+      // 鉴权失效:主动弹出登录框,并给出明确提示
+      notifyAuthRequired()
+      throw new Error('登录已失效，请重新登录')
+    }
     throw new Error(text || `HTTP ${r.status}`)
   }
   if (r.status === 204) return null

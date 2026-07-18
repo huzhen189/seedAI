@@ -1,8 +1,9 @@
 """生成代理:业务服务作为唯一对外入口。
 
 - 前端永不直接触达 AI 服务。
-- 鉴权门禁:GET /api/chat 需登录(依赖 get_current_user,从 HttpOnly Cookie
-  取 JWT);未登录返回 401(文档 §3.7 / §5 / §2.1)。
+- 鉴权门禁:GET /api/chat 需登录(从 HttpOnly Cookie 取 JWT);未登录时下发
+  SSE error 事件(code=AUTH_REQUIRED, message="Missing authentication"),而非 JSON 401,
+  以便前端 EventSource 识别并主动弹出登录框(文档 §3.7 / §5 / §2.1)。
 - 这里负责把前端的 GET 请求翻译成 AI 服务的 POST /generate,并把 SSE 帧
   透明透传回去;同时转发取消信号到 AI 的 POST /cancel。
 - 鉴权 / 限流 / 用量计量在此拦截(已登录用户按真实 user_id 计量)。
@@ -23,6 +24,7 @@ from datetime import datetime
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,11 +32,56 @@ from .config import settings
 from .db import get_db
 from .metrics import record_model_usage
 from .models import Conversation, Message
-from .security import CurrentUser, get_current_user
+from .security import ACCESS_COOKIE, CurrentUser, decode_token
 
 router = APIRouter(prefix="/api", tags=["generate"])
 
 logger = logging.getLogger("proxy")
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+async def _resolve_user(request: Request) -> CurrentUser | None:
+    """手动解析登录态(避免直接调用带 Depends 的 get_current_user)。
+
+    返回 None 表示未登录 / token 无效;前端据此收到 SSE auth error 事件。
+    """
+    token = request.cookies.get(ACCESS_COOKIE)
+    if not token:
+        try:
+            creds = await _bearer(request)
+            if creds is not None:
+                token = creds.credentials
+        except Exception:
+            token = None
+    if not token:
+        return None
+    try:
+        payload = decode_token(token)
+        if payload.get("type") != "access":
+            return None
+        return CurrentUser(int(payload["sub"]), payload.get("role", "user"))
+    except Exception:
+        return None
+
+
+def _sse_auth_error() -> StreamingResponse:
+    """鉴权失败时返回一条 SSE error 事件(而非 JSON 401)。
+
+    浏览器 EventSource 读不到 HTTP 401 状态码,只能解析 SSE 帧;
+    故用标准 SSE 帧下发 AUTH_REQUIRED,前端即可主动弹出登录框。
+    """
+
+    async def gen():
+        yield 'event: error\n'
+        yield 'data: {"message":"Missing authentication","code":"AUTH_REQUIRED"}\n\n'
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
 
 
 def _parse_messages(request: Request) -> list:
@@ -74,7 +121,6 @@ async def list_models():
 @router.get("/chat")
 async def chat(
     request: Request,
-    user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     model: str = Query("hy3", description="模型 id,默认主模型 hy3"),
     conversation_id: int = Query(..., description="会话 id,必填(前端先建会话)"),
@@ -85,7 +131,14 @@ async def chat(
     前端: GET /api/chat?model=<id>&conversation_id=<cid>&messages=<JSON>&trace_id=<id>
           (需携带登录 Cookie)
     业务: 校验 JWT → 翻译成 POST {ai}/generate,逐帧透传 SSE → 流结束落库。
+    鉴权失败:返回 SSE error 事件(code=AUTH_REQUIRED),而非 JSON 401,
+    以便前端 EventSource 识别并主动弹出登录框。
     """
+    # 手动解析登录态;未登录则下发 SSE auth error(浏览器读不到 401 状态码)。
+    user = await _resolve_user(request)
+    if user is None:
+        return _sse_auth_error()
+
     messages = _parse_messages(request)
     tid = trace_id or uuid.uuid4().hex
 
