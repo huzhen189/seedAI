@@ -34,3 +34,7 @@ seedai.db
 
 # ===== 本地 Agent 工作记忆(非项目产物) =====
 .workbuddy/
+
+# ===== Vite 配置编译产物(勿手生成 .js 副本:Vite 优先加载 .js 会静默覆盖 .ts) =====
+frontend/vite.config.js
+frontend/vite.config.d.ts
