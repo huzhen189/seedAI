@@ -20,6 +20,7 @@ node_modules/
 out/
 dist/
 build/
+*.tsbuildinfo
 
 # ===== 编辑器 / 系统 =====
 .DS_Store

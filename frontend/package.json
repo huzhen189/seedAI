@@ -9,9 +9,15 @@
     "preview": "vite preview --port 3000"
   },
   "dependencies": {
-    "vue": "^3.4.21"
+    "dompurify": "^3.4.12",
+    "highlight.js": "^11.11.1",
+    "marked": "^18.0.6",
+    "pinia": "^4.0.2",
+    "vue": "^3.4.21",
+    "vue-router": "^4.6.4"
   },
   "devDependencies": {
+    "@types/node": "^26.1.1",
     "@vitejs/plugin-vue": "^5.0.4",
     "typescript": "^5.4.5",
     "vite": "^5.2.0",

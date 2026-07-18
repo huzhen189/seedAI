@@ -9,6 +9,7 @@ from .auth import router as auth_router
 from .config import settings
 from .db import init_db
 from .metrics import record_request
+from .projects import router as projects_router
 from .proxy import router as proxy_router
 from .reconciler import start_reconciler
 
@@ -46,6 +47,7 @@ async def health():
 # 路由装配
 app.include_router(auth_router)
 app.include_router(proxy_router)
+app.include_router(projects_router)
 app.include_router(admin_router)
 
 

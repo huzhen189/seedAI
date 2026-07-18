@@ -1,5 +1,6 @@
 """Pydantic 请求/响应模型。"""
-from pydantic import BaseModel, EmailStr, Field
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class RegisterReq(BaseModel):
@@ -21,6 +22,7 @@ class TokenResp(BaseModel):
 
 
 class UserResp(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     username: str
     nickname: str = ""
@@ -40,3 +42,55 @@ class UpdateMeReq(BaseModel):
 
 class RefreshReq(BaseModel):
     refresh_token: str
+
+
+# ---------- 项目 / 会话 / 消息 (M1) ----------
+class CreateProjectReq(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+
+
+class RenameReq(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+
+
+class CreateConversationReq(BaseModel):
+    project_id: int
+    title: str | None = Field(None, max_length=255)
+
+
+class ProjectResp(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    user_id: int
+    name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class MessageResp(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    conversation_id: int
+    role: str
+    content: str
+    model_id: str | None = None
+    created_at: datetime
+
+
+class ConversationResp(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    project_id: int
+    user_id: int
+    title: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    messages: list[MessageResp] = []
+
+
+class SearchItemResp(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    type: str  # project | conversation
+    id: int
+    title: str
+    project_id: int | None = None

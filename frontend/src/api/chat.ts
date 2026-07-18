@@ -15,15 +15,17 @@ export interface StartChatOptions {
   model: string
   messages: ChatMessage[]
   traceId: string
+  conversationId: number
   cb: ChatCallbacks
 }
 
-/** 打开与业务服务的匿名 SSE 对话流(文档 §3.7 / §5)。返回 EventSource 以便取消。 */
+/** 打开与业务服务的 SSE 对话流(需登录 Cookie + conversation_id)。返回 EventSource 以便取消。 */
 export function startChat(opts: StartChatOptions): EventSource {
   const params = new URLSearchParams()
   params.set('model', opts.model)
   params.set('messages', JSON.stringify(opts.messages))
   params.set('trace_id', opts.traceId)
+  params.set('conversation_id', String(opts.conversationId))
 
   const es = new EventSource(`/api/chat?${params.toString()}`)
   const safeParse = (raw: string): any => {
@@ -91,7 +93,7 @@ export async function fetchModels(): Promise<ModelInfo[]> {
   }
 }
 
-/** 提交评价(M0 后端若未实现 /api/feedback,静默忽略)。 */
+/** 提交评价(后端若未实现 /api/feedback,静默忽略)。 */
 export async function sendFeedback(
   traceId: string,
   rating: 'up' | 'down',

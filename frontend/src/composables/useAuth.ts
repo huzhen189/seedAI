@@ -1,28 +1,33 @@
-import { ref } from 'vue'
-import { fetchMe, login, register, logout, updateMe, type AuthUser, type UpdateMePayload } from '../api/auth'
-
-// 模块级单例:跨组件共享同一份登录态(项目未引入 Pinia)。
-const user = ref<AuthUser | null>(null)
-const ready = ref(false)
+// 兼容封装:原有组件(AuthPanel/SettingsPanel/ChatView)通过 useAuth() 取得登录态。
+// 现底层改为 Pinia useAuthStore,对外 API 保持不变,并补齐 doLogin/doRegister/doUpdateUser 别名。
+import { useAuthStore } from '../stores/auth'
+import { storeToRefs } from 'pinia'
+import * as authApi from '../api/auth'
 
 export function useAuth() {
-  async function init() {
-    user.value = await fetchMe()
-    ready.value = true
+  const store = useAuthStore()
+  const { user } = storeToRefs(store)
+
+  async function doUpdateUser(p: {
+    nickname?: string
+    email?: string
+    oldPassword?: string
+    newPassword?: string
+  }) {
+    const u = await authApi.updateMe(p)
+    store.user = u
+    return u
   }
-  async function doLogin(username: string, password: string) {
-    user.value = await login(username, password)
+
+  return {
+    user,
+    init: store.init,
+    login: store.login,
+    register: store.register,
+    logout: store.logout,
+    doLogin: store.login,
+    doRegister: store.register,
+    doLogout: store.logout,
+    doUpdateUser,
   }
-  async function doRegister(username: string, password: string, email?: string, nickname?: string) {
-    user.value = await register(username, password, email, nickname)
-  }
-  async function doUpdateUser(p: UpdateMePayload) {
-    user.value = await updateMe(p)
-    return user.value
-  }
-  async function doLogout() {
-    await logout()
-    user.value = null
-  }
-  return { user, ready, init, doLogin, doRegister, doUpdateUser, doLogout }
 }

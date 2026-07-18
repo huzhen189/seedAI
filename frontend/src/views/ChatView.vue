@@ -1,20 +1,16 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
-import ModelSelector from '../components/ModelSelector.vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import ThoughtTrail from '../components/ThoughtTrail.vue'
 import PreviewPane from '../components/PreviewPane.vue'
 import ChatInput from '../components/ChatInput.vue'
-import {
-  startChat,
-  cancelChat,
-  fetchModels,
-  sendFeedback,
-  type ChatCallbacks,
-} from '../api/chat'
-import { useAuth } from '../composables/useAuth'
+import MessageBubble from '../components/MessageBubble.vue'
 import AuthPanel from '../components/AuthPanel.vue'
 import SettingsPanel from '../components/SettingsPanel.vue'
-import type { ChatMessage, ModelInfo } from '../types'
+import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
+import { useAuth } from '../composables/useAuth'
+import { useProjectStore } from '../stores/project'
+import { useConversationStore } from '../stores/conversation'
+import type { ModelInfo } from '../types'
 
 const models = ref<ModelInfo[]>([])
 const model = ref('hy3')
@@ -22,7 +18,6 @@ const input = ref('')
 const generating = ref(false)
 const finished = ref(false)
 
-const conversation = ref<ChatMessage[]>([]) // 多轮用户消息
 const stages = ref<string[]>([])
 const currentStage = ref('')
 const thinks = ref('')
@@ -34,34 +29,70 @@ const traceId = ref('')
 const esRef = ref<EventSource | null>(null)
 const rating = ref<'' | 'up' | 'down'>('')
 
-// 登录态(模块级单例,跨组件共享)
-const { user, init, doLogout } = useAuth()
-
-// 提交时若未登录,弹窗引导登录;登录成功后自动重发
+const showSettings = ref(false)
 const showAuth = ref(false)
 const pendingSend = ref(false)
-// 用户设置面板
-const showSettings = ref(false)
+
+const auth = useAuth()
+const projectStore = useProjectStore()
+const convStore = useConversationStore()
+
+const messages = computed(() => convStore.messages)
+const currentProjectName = computed(
+  () => projectStore.projects.find((p) => p.id === projectStore.currentProjectId)?.name || '未选择项目',
+)
 
 function genTraceId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
   return 't' + Date.now().toString(16) + Math.random().toString(16).slice(2)
 }
 
-function pushStage(stage: string) {
-  currentStage.value = stage
-  if (stage && !stages.value.includes(stage)) stages.value.push(stage)
+async function loadCurrentProject() {
+  const pid = projectStore.currentProjectId
+  if (pid == null) return
+  await convStore.loadConversations(pid)
+  if (convStore.conversations.length) {
+    await convStore.loadMessages(convStore.conversations[0].id)
+  } else {
+    convStore.messages = []
+  }
+}
+
+async function newConversation() {
+  const pid = projectStore.currentProjectId
+  if (pid == null) {
+    alert('请先在左侧新建项目')
+    return
+  }
+  await convStore.create(pid)
+  generatedHtml.value = ''
+  previewUrl.value = null
+}
+
+async function onConvChange(e: Event) {
+  const id = Number((e.target as HTMLSelectElement).value)
+  if (id) {
+    await convStore.loadMessages(id)
+    generatedHtml.value = ''
+    previewUrl.value = null
+  }
 }
 
 async function send() {
   const text = input.value.trim()
   if (!text || generating.value) return
-
-  // 提交门禁:未登录则弹窗引导登录,登录成功由 watch(user) 自动重发
-  if (!user.value) {
+  if (!auth.user.value) {
     pendingSend.value = true
     showAuth.value = true
     return
+  }
+  const pid = projectStore.currentProjectId
+  if (pid == null) {
+    alert('请先在左侧新建项目')
+    return
+  }
+  if (convStore.currentConvId == null) {
+    await convStore.create(pid, text.slice(0, 20))
   }
 
   // 重置本次生成状态
@@ -76,17 +107,32 @@ async function send() {
   rating.value = ''
   traceId.value = genTraceId()
 
-  conversation.value.push({ role: 'user', content: text })
-  const messages: ChatMessage[] = conversation.value.slice()
-
+  const cid = convStore.currentConvId!
+  convStore.messages.push({
+    role: 'user',
+    content: text,
+    conversation_id: cid,
+    id: 0,
+    created_at: '',
+    model_id: model.value,
+  } as any)
+  convStore.messages.push({
+    role: 'assistant',
+    content: '',
+    conversation_id: cid,
+    id: 0,
+    created_at: '',
+    model_id: model.value,
+  } as any)
+  const assistantIdx = convStore.messages.length - 1
   generating.value = true
   input.value = ''
 
   const cb: ChatCallbacks = {
     onNode: (d) => {
       if (d.stage) {
-        pushStage(d.stage)
-        // 预览事件:优先用线上直链,否则依赖已累积 token(srcdoc)
+        currentStage.value = d.stage
+        if (d.stage && !stages.value.includes(d.stage)) stages.value.push(d.stage)
         if (d.stage === 'preview' && d.url) previewUrl.value = d.url as string
       }
     },
@@ -95,6 +141,7 @@ async function send() {
     },
     onToken: (t) => {
       generatedHtml.value += t
+      convStore.messages[assistantIdx].content += t
     },
     onPreview: (d) => {
       if (d.url) previewUrl.value = d.url as string
@@ -105,6 +152,7 @@ async function send() {
     onDone: () => {
       generating.value = false
       finished.value = true
+      convStore.loadConversations(pid)
     },
     onAborted: () => {
       generating.value = false
@@ -118,7 +166,16 @@ async function send() {
     },
   }
 
-  esRef.value = startChat({ model: model.value, messages, traceId: traceId.value, cb })
+  esRef.value = startChat({
+    model: model.value,
+    messages: convStore.messages.map((m) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    })),
+    traceId: traceId.value,
+    conversationId: cid,
+    cb,
+  })
 }
 
 async function stop() {
@@ -135,64 +192,93 @@ async function rate(r: 'up' | 'down') {
 }
 
 onMounted(async () => {
-  // 确认登录态(不拦截主页);同时拉取模型列表
-  await init()
+  await auth.init()
   const m = await fetchModels()
   if (m.length) models.value = m
+  await projectStore.load()
+  await loadCurrentProject()
 })
 
-// 登录/注册成功后:关闭登录弹窗;若本次提交曾被拦截,则自动重发
-watch(user, (u) => {
-  if (u) {
-    showAuth.value = false
-    if (pendingSend.value) {
-      pendingSend.value = false
-      send()
+watch(
+  () => projectStore.currentProjectId,
+  async (id) => {
+    if (id != null) {
+      await convStore.loadConversations(id)
+      if (convStore.conversations.length) await convStore.loadMessages(convStore.conversations[0].id)
+      else convStore.messages = []
     }
-  }
-})
+  },
+)
+
+watch(
+  () => convStore.pendingConvId,
+  async (id) => {
+    if (id != null) {
+      await convStore.loadMessages(id)
+      convStore.pendingConvId = null
+    }
+  },
+)
+
+watch(
+  () => auth.user,
+  (u) => {
+    if (u) {
+      showAuth.value = false
+      if (pendingSend.value) {
+        pendingSend.value = false
+        send()
+      }
+    }
+  },
+)
 </script>
 
 <template>
-  <div class="app">
-    <header class="topbar">
-      <div class="brand">SeedAI · 建站助手</div>
-      <div class="right">
-        <template v-if="user">
-          <span class="user">{{ user.nickname || user.username }}</span>
-          <button class="settings-btn" @click="showSettings = true">设置</button>
-          <button class="logout" @click="doLogout">退出</button>
-        </template>
-        <button v-else class="login-btn" @click="showAuth = true">登录 / 注册</button>
-        <ModelSelector :models="models" v-model:model="model" />
+  <div class="chat">
+    <div class="left-col">
+      <div class="conv-bar">
+        <span class="proj">📁 {{ currentProjectName }}</span>
+        <select :value="convStore.currentConvId ?? ''" @change="onConvChange">
+          <option value="" disabled>选择会话</option>
+          <option v-for="c in convStore.conversations" :key="c.id" :value="c.id">
+            {{ c.title || '会话' }}
+          </option>
+        </select>
+        <button class="newconv" @click="newConversation">＋ 新建会话</button>
       </div>
-    </header>
 
-    <main class="body">
-      <!-- 左:对话 + 思考流 -->
-      <section class="left">
-        <div class="conv">
-          <div v-if="conversation.length === 0" class="empty">
-            在下方描述你想生成的网站,AI 会先规划需求,再流式产出单文件 HTML 并实时预览。
-          </div>
-          <div v-for="(m, i) in conversation" :key="i" class="bubble user">
-            <div class="role">你</div>
-            <div class="text">{{ m.content }}</div>
-          </div>
+      <div class="conv">
+        <div v-if="messages.length === 0" class="empty">
+          在下方描述你想生成的网站，AI 会先规划需求，再流式产出并实时预览。
         </div>
-        <div class="trail-wrap">
-          <ThoughtTrail
-            :stages="stages"
-            :thinks="thinks"
-            :degraded="degraded"
-            :current="currentStage"
-          />
-        </div>
-      </section>
+        <MessageBubble
+          v-for="(m, i) in messages"
+          :key="i"
+          :role="m.role"
+          :content="m.content"
+        />
+      </div>
 
-      <!-- 右:实时预览 -->
-      <section class="right-pane">
-        <PreviewPane :html="generatedHtml" :url="previewUrl" :loading="generating" />
+      <div v-if="stages.length || thinks" class="trail-wrap">
+        <ThoughtTrail
+          :stages="stages"
+          :thinks="thinks"
+          :degraded="degraded"
+          :current="currentStage"
+        />
+      </div>
+
+      <div class="footer">
+        <ChatInput
+          v-model:value="input"
+          v-model:model="model"
+          :generating="generating"
+          :models="models"
+          @send="send"
+          @stop="stop"
+          @open-settings="showSettings = true"
+        />
         <div v-if="errorMsg" class="error">⚠ {{ errorMsg }}</div>
         <div v-if="finished && !errorMsg && (generatedHtml || previewUrl)" class="feedback">
           <span>这次生成质量如何?</span>
@@ -202,112 +288,67 @@ watch(user, (u) => {
             打开线上预览 ↗
           </a>
         </div>
-      </section>
-    </main>
+      </div>
+    </div>
 
-    <footer class="footer">
-      <ChatInput v-model:value="input" :generating="generating" @send="send" @stop="stop" />
-    </footer>
+    <div class="right-pane">
+      <PreviewPane :html="generatedHtml" :url="previewUrl" :loading="generating" />
+    </div>
+
+    <AuthPanel v-if="showAuth" @close="showAuth = false" />
+    <SettingsPanel v-if="showSettings" @close="showSettings = false" />
   </div>
-
-  <AuthPanel v-if="showAuth" @close="showAuth = false" />
-  <SettingsPanel v-if="showSettings" @close="showSettings = false" />
 </template>
 
 <style scoped>
-.app {
-  height: 100%;
+.chat {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.left-col {
+  flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  min-width: 0;
 }
-.topbar {
+.right-pane {
+  width: 46%;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.conv-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 12px 20px;
-  background: var(--panel);
+  gap: 10px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border);
 }
-.brand {
-  font-weight: 700;
-  font-size: 16px;
-  color: var(--brand);
-}
-.right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.anon {
-  font-size: 12px;
-  color: var(--muted);
+.conv-bar select {
   border: 1px solid var(--border);
-  padding: 3px 8px;
-  border-radius: 999px;
-}
-.user {
+  border-radius: 8px;
+  padding: 4px 8px;
   font-size: 13px;
-  color: var(--brand);
-  font-weight: 600;
 }
-.logout {
-  border: 1px solid var(--border);
-  background: var(--panel);
-  border-radius: 8px;
-  padding: 3px 10px;
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--muted);
-}
-.settings-btn {
-  border: 1px solid var(--border);
-  background: var(--panel);
-  border-radius: 8px;
-  padding: 3px 10px;
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--brand);
-  font-weight: 600;
-}
-.login-btn {
+.newconv {
+  margin-left: auto;
   border: 1px solid var(--brand);
   background: var(--brand);
   color: #fff;
   border-radius: 8px;
-  padding: 5px 14px;
+  padding: 4px 12px;
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
 }
-.login-btn:hover {
-  opacity: 0.92;
-}
-.loading-screen {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  color: var(--muted);
-  font-size: 14px;
-}
-.body {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 380px 1fr;
-  gap: 16px;
-  padding: 16px;
-  min-height: 0;
-}
-.left {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-height: 0;
-}
 .conv {
-  flex: 0 0 auto;
-  max-height: 38%;
-  overflow: auto;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -321,40 +362,17 @@ watch(user, (u) => {
   border-radius: 10px;
   padding: 14px;
 }
-.bubble {
-  border-radius: 10px;
-  padding: 10px 12px;
-  font-size: 14px;
-  line-height: 1.6;
-}
-.bubble.user {
-  background: #eef2ff;
-  border: 1px solid #e0e7ff;
-}
-.bubble .role {
-  font-size: 12px;
-  color: var(--muted);
-  margin-bottom: 4px;
-}
 .trail-wrap {
-  flex: 1;
-  min-height: 0;
+  max-height: 30%;
   overflow: auto;
   background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 14px;
+  border-top: 1px solid var(--border);
+  padding: 10px 14px;
 }
-.right-pane {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-height: 0;
-}
-.right-pane > .preview,
-.right-pane :deep(.preview) {
-  flex: 1;
-  min-height: 0;
+.footer {
+  padding: 12px 14px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
 }
 .error {
   color: var(--err);
@@ -363,6 +381,7 @@ watch(user, (u) => {
   border: 1px solid #fecaca;
   border-radius: 8px;
   padding: 8px 12px;
+  margin-top: 8px;
 }
 .feedback {
   display: flex;
@@ -370,6 +389,7 @@ watch(user, (u) => {
   gap: 10px;
   font-size: 13px;
   color: var(--muted);
+  margin-top: 8px;
 }
 .feedback button {
   border: 1px solid var(--border);
@@ -388,10 +408,5 @@ watch(user, (u) => {
   color: var(--brand);
   text-decoration: none;
   font-weight: 600;
-}
-.footer {
-  padding: 12px 16px;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
 }
 </style>

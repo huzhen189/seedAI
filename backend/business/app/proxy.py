@@ -6,24 +6,35 @@
 - 这里负责把前端的 GET 请求翻译成 AI 服务的 POST /generate,并把 SSE 帧
   透明透传回去;同时转发取消信号到 AI 的 POST /cancel。
 - 鉴权 / 限流 / 用量计量在此拦截(已登录用户按真实 user_id 计量)。
+- **落库(M1)**:/api/chat 入参新增 conversation_id;SSE 流结束(或中断)时,
+  把首条用户消息 + AI 完整回复双写进 Message,并更新 Conversation.updated_at,
+  首条时自动生成会话标题。落库失败不阻塞已完成的流。
 
-SSE 透传策略:上游 AI 返回的是标准 SSE 文本帧(event:/data: 行 + 空行)。
-我们用 httpx 以原始字节流读取,再以 StreamingResponse 原样吐出,保证
-所有事件类型(token / think / node / preview / done / error / aborted /
-degraded)一字不差地转发,不做任何重排。
+SSE 透传策略:上游 AI 返回标准 SSE 文本帧(event:/data: 行 + 空行)。
+我们用 httpx aiter_lines 逐行解析,重建标准 SSE 帧原样吐出(保证
+think/token/node/preview/done/error/aborted/degraded 一字不差地转发,兼容
+前端 EventSource),同时收集 token 帧内容用于落库。
 """
 import json
+import logging
 import uuid
+from datetime import datetime
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
+from .db import get_db
 from .metrics import record_model_usage
+from .models import Conversation, Message
 from .security import CurrentUser, get_current_user
 
 router = APIRouter(prefix="/api", tags=["generate"])
+
+logger = logging.getLogger("proxy")
 
 
 def _parse_messages(request: Request) -> list:
@@ -64,39 +75,77 @@ async def list_models():
 async def chat(
     request: Request,
     user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
     model: str = Query("hy3", description="模型 id,默认主模型 hy3"),
+    conversation_id: int = Query(..., description="会话 id,必填(前端先建会话)"),
     trace_id: str | None = Query(None, description="前端生成的链路 id,用于取消"),
 ):
-    """登录后 SSE 对话端点(文档 §3.7 / §5 / §2.1)。
+    """登录后 SSE 对话端点(文档 §3.7 / §5 / §2.1 / §15.3)。
 
-    前端: GET /api/chat?model=<id>&messages=<JSON>&trace_id=<id>(需携带登录 Cookie)
-    业务: 校验 JWT → 翻译成 POST {ai}/generate,逐帧透传 SSE。
+    前端: GET /api/chat?model=<id>&conversation_id=<cid>&messages=<JSON>&trace_id=<id>
+          (需携带登录 Cookie)
+    业务: 校验 JWT → 翻译成 POST {ai}/generate,逐帧透传 SSE → 流结束落库。
     """
     messages = _parse_messages(request)
     tid = trace_id or uuid.uuid4().hex
+
+    # 取首条用户消息文本(用于落库 + 自动标题)
+    user_text = ""
+    for m in messages:
+        if m.get("role") == "user":
+            user_text = m.get("content", "") or ""
+            break
 
     # 已登录用户按真实 user_id 计量
     await record_model_usage(user.id, model)
 
     payload = {"model_id": model, "messages": messages, "trace_id": tid}
 
-    # 流式透传:原始字节,不重排
     async def publisher():
         # read 不超时(生成可能持续数分钟),connect 给 10s
         timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream(
-                "POST",
-                f"{settings.ai_service_url}/generate",
-                json=payload,
-            ) as resp:
-                if resp.status_code >= 400:
-                    # 上游报错:把错误体作为单行文本透出给前端
-                    err_text = await resp.aread()
-                    yield err_text
-                    return
-                async for chunk in resp.aiter_raw():
-                    yield chunk
+        assistant_parts: list[str] = []
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST",
+                    f"{settings.ai_service_url}/generate",
+                    json=payload,
+                ) as resp:
+                    if resp.status_code >= 400:
+                        # 上游报错:把错误体作为单行文本透出给前端
+                        err_text = await resp.aread()
+                        yield err_text
+                        return
+                    event = None
+                    data_parts: list[str] = []
+                    async for raw_line in resp.aiter_lines():
+                        if raw_line == "":
+                            if event is not None or data_parts:
+                                data = "\n".join(data_parts)
+                                if event == "token":
+                                    assistant_parts.append(data)
+                                # 重建标准 SSE 帧透传(兼容前端 EventSource)
+                                frame = ""
+                                if event:
+                                    frame += f"event: {event}\n"
+                                frame += f"data: {data}\n\n"
+                                yield frame.encode("utf-8")
+                            event, data_parts = None, []
+                            continue
+                        if raw_line.startswith("event:"):
+                            event = raw_line[6:].strip()
+                        elif raw_line.startswith("data:"):
+                            data_parts.append(raw_line[5:].strip())
+                        # 其他行(id:/retry:/注释)忽略透传
+        finally:
+            # 流结束(正常/中断)均尝试落库;失败仅记录,不阻塞已返回的流
+            try:
+                await _persist_conversation(
+                    db, user, conversation_id, model, user_text, "".join(assistant_parts)
+                )
+            except Exception as e:  # 落库失败不影响已完成生成
+                logger.warning("persist conversation failed: %s", e)
 
     return StreamingResponse(
         publisher(),
@@ -107,6 +156,43 @@ async def chat(
             "X-Trace-Id": tid,  # 便于前端在没自带 trace_id 时也能取消
         },
     )
+
+
+async def _persist_conversation(
+    db: AsyncSession,
+    user: CurrentUser,
+    conversation_id: int,
+    model: str,
+    user_text: str,
+    assistant_text: str,
+) -> None:
+    """SSE 结束后落库:用户消息 + AI 回复;更新会话标题/updated_at。"""
+    conv = (
+        await db.execute(
+            select(Conversation).where(
+                Conversation.id == conversation_id,
+                Conversation.user_id == user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if conv is None:
+        return  # 会话不存在或不属于该用户,跳过落库
+    db.add(
+        Message(conversation_id=conv.id, role="user", content=user_text, model_id=model)
+    )
+    if assistant_text:
+        db.add(
+            Message(
+                conversation_id=conv.id,
+                role="assistant",
+                content=assistant_text,
+                model_id=model,
+            )
+        )
+    if not conv.title and user_text:
+        conv.title = user_text[:20]
+    conv.updated_at = datetime.utcnow()
+    await db.commit()
 
 
 @router.post("/cancel")
