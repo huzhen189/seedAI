@@ -5,7 +5,7 @@ export interface AuthUser {
   id: number
   username: string
   nickname: string
-  email: string
+  email: string | null
   role: string
   plan: string
 }

@@ -24,7 +24,7 @@ class UserResp(BaseModel):
     id: int
     username: str
     nickname: str = ""
-    email: str
+    email: str | None = None
     role: str
     plan: str
 

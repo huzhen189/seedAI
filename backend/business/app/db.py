@@ -32,6 +32,14 @@ async def init_db():
                     pass
                 else:
                     raise
+            # 兼容性迁移: email 改为可空(老表为 NOT NULL DEFAULT '', 无邮箱用户会撞唯一索引), 幂等
+            try:
+                await conn.execute(
+                    text("ALTER TABLE users MODIFY email VARCHAR(128) NULL")
+                )
+            except Exception:
+                # 已可空 / 无此列等场景忽略
+                pass
 
 
 async def get_db():

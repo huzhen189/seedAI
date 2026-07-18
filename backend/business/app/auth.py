@@ -5,7 +5,7 @@ token;EventSource / 页面同源时浏览器自动携带 Cookie。另兼容 Bear
 API 调试 / 非浏览器客户端)。
 """
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
 from .cache import cache_user_get, cache_user_set
 from .config import settings
@@ -47,18 +47,17 @@ def _clear_cookies(resp: Response) -> None:
 
 @router.post("/register", response_model=UserResp)
 async def register(req: RegisterReq, response: Response, db=Depends(get_db)):
-    exists = await db.scalar(
-        select(User).where(
-            (User.username == req.username) | (User.email == (req.email or ""))
-        )
-    )
+    conditions = [User.username == req.username]
+    if req.email:
+        conditions.append(User.email == req.email)
+    exists = await db.scalar(select(User).where(or_(*conditions)))
     if exists:
         raise HTTPException(status_code=409, detail="username or email already exists")
 
     user = User(
         username=req.username,
         nickname=req.nickname or req.username,
-        email=req.email or "",
+        email=req.email or None,
         password_hash=hash_password(req.password),
         role="user",
         plan="free",
