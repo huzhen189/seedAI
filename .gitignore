@@ -33,6 +33,9 @@ build/
 *.sqlite3
 seedai.db
 
+# ===== 本地运行日志(按日期滚动: business.log / business.log.YYYY-MM-DD,不入库) =====
+backend/*/logs/
+
 # ===== 本地 Agent 工作记忆(非项目产物) =====
 .workbuddy/
 

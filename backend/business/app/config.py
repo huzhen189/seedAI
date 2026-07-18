@@ -8,6 +8,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # 用绝对路径定位项目根目录的 .env,不受启动目录影响(与 AI 服务一致)。
 # 之前相对 env_file=".env" 在 backend/business/app 下启动会找不到根 .env,
 # 导致 DATABASE_URL/MYSQL_URL/JWT 等回落默认值(如 SQLite),与 docker 行为不一致。
+# parents[3] 的由来:本文件位于 <仓库根>/backend/business/app/config.py,
+# 向上 3 级(__file__ -> app -> business -> backend -> 仓库根)即拿到仓库根,
+# 从而稳定读到仓库根的 .env(无论进程从哪个目录启动)。
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ENV_FILE = PROJECT_ROOT / ".env"
 
@@ -45,6 +48,8 @@ class Settings(BaseSettings):
         self.database_url = u
 
     # JWT
+    # ⚠️ 默认 jwt_secret 仅用于本地开发,生产必须在 .env 覆盖为强随机值,
+    # 否则任何人可用该已知密钥伪造 token。HS256 为对称签名,签发与校验共用此密钥。
     jwt_secret: str = "dev-secret-change-me"
     jwt_algorithm: str = "HS256"
     access_token_ttl: int = 1800  # 30 min

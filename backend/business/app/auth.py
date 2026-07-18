@@ -39,6 +39,16 @@ class _CookieOpts(TypedDict):
 
 
 def _set_cookies(resp: Response, access: str, refresh: str) -> None:
+    """把 access / refresh 两个 JWT 写进 HttpOnly Cookie。
+
+    为什么用 Cookie 而非把 token 返给前端存 localStorage?
+      - HttpOnly: JS 读不到,从源头挡住 XSS 窃取 token;
+      - SameSite=lax: 跨站 POST 不自动带,缓解 CSRF(配合业务仅同源调用更稳);
+      - Secure: 仅 HTTPS 传输(生产 cookie_secure=true;本地 http 联调设 false 才能写)。
+    浏览器在同源的 EventSource / fetch 请求里会自动带上这两个 Cookie,
+    前端无需手动管理 token,也避免 Bearer 头在 SSE 里无法携带的问题。
+    access 短时效(max_age=access_token_ttl),refresh 长时效用于静默续期。
+    """
     opts: _CookieOpts = {
         "max_age": settings.access_token_ttl,
         "httponly": True,
@@ -47,6 +57,7 @@ def _set_cookies(resp: Response, access: str, refresh: str) -> None:
         "domain": settings.cookie_domain or None,
     }
     resp.set_cookie(ACCESS_COOKIE, access, **opts)
+    # refresh 复用除 max_age 外的全部属性,仅把有效期换成 refresh_token_ttl。
     refresh_opts: _CookieOpts = {**opts, "max_age": settings.refresh_token_ttl}
     resp.set_cookie(REFRESH_COOKIE, refresh, **refresh_opts)
 
@@ -58,6 +69,8 @@ def _clear_cookies(resp: Response) -> None:
 
 @router.post("/register", response_model=UserResp)
 async def register(req: RegisterReq, response: Response, db=Depends(get_db)):
+    # 唯一性校验:用户名必查;邮箱仅当用户填写时才参与查重(允许空邮箱用户)。
+    # 用 or_ 合并,任一命中即视为已存在 -> 409,防止重复账号 / 邮箱撞车。
     conditions = [User.username == req.username]
     if req.email:
         conditions.append(User.email == req.email)
@@ -65,6 +78,9 @@ async def register(req: RegisterReq, response: Response, db=Depends(get_db)):
     if exists:
         raise HTTPException(status_code=409, detail="username or email already exists")
 
+    # 新建用户:默认 role=user、plan=free(超级管理员由 SEED_SUPER_ADMIN 种子注入,
+    # 不在此开放自助注册);nickname 缺省回退为用户名;密码经 bcrypt 哈希存储,
+    # 绝不落明文。
     user = User(
         username=req.username,
         nickname=req.nickname or req.username,
@@ -76,6 +92,7 @@ async def register(req: RegisterReq, response: Response, db=Depends(get_db)):
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    # 注册即签发并下发 Cookie,用户无需再走一次登录。
     _set_cookies(
         response,
         create_access_token(user.id, user.role),
@@ -113,6 +130,10 @@ async def login(req: LoginReq, response: Response, db=Depends(get_db)):
 
 @router.post("/refresh", response_model=UserResp)
 async def refresh(req: RefreshReq, response: Response, db=Depends(get_db)):
+    # 刷新令牌必须严格校验两点:
+    #   1. 能正常 decode(签名/过期都会抛异常 -> 401);
+    #   2. token 的 type 字段必须为 "refresh",防止拿 access token 当 refresh 用
+    #      (access 短时效、且权限不同,混用会放大被盗用风险)。
     try:
         payload = decode_token(req.refresh_token)
         if payload.get("type") != "refresh":
@@ -184,6 +205,8 @@ async def update_me(req: UpdateMeReq, user=Depends(get_current_user), db=Depends
         u.nickname = req.nickname
 
     if req.new_password:
+        # 即便已登录也要验旧密码:防止会话被劫持时攻击者无声改密把自己锁在外面。
+        # 旧密码错误直接 400,不泄露任何额外信息。
         if not req.old_password or not verify_password(req.old_password, u.password_hash):
             raise HTTPException(status_code=400, detail="old password incorrect")
         u.password_hash = hash_password(req.new_password)

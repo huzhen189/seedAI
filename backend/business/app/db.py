@@ -7,7 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from .config import settings
 
 
+# 异步引擎:
+#  - echo=False:不打 SQL 日志(避免刷屏,排查时临时改 True);
+#  - future=True:启用 SQLAlchemy 2.0 风格 API(async_sessionmaker 等);
+#  - database_url 已是异步驱动(mysql+aiomysql,见 config.model_post_init)。
 engine = create_async_engine(settings.database_url, echo=False, future=True)
+# expire_on_commit=False:commit 后对象属性不失效,避免后续访问触发隐式查询
+# (生成流里要反复读 user_text 等,关掉更顺)。
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

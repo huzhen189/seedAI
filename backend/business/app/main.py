@@ -9,6 +9,7 @@ from .admin import router as admin_router
 from .auth import router as auth_router
 from .config import settings
 from .db import init_db
+from .logging_config import setup_logging
 from .metrics import record_request
 from .projects import router as projects_router
 from .proxy import router as proxy_router
@@ -16,6 +17,10 @@ from .reconciler import start_reconciler
 
 
 app = FastAPI(title="SeedAI Business API")
+
+# 初始化日志:控制台 + 本地按日期滚动文件(backend/business/logs/business.log)。
+# 必须在路由装配前调用,确保启动期日志也能落盘。
+setup_logging("business")
 
 app.add_middleware(
     CORSMiddleware,

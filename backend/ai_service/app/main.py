@@ -17,11 +17,16 @@ from sse_starlette.sse import EventSourceResponse
 
 from .config import settings
 from .events import to_sse
+from .logging_config import setup_logging
 from .providers import list_providers
 from .queue import get_queue, worker_loop
 from .registries import bootstrap
 from .registry import SkillRegistry, ToolRegistry
 
+
+# 初始化日志:控制台 + 本地按日期滚动文件(backend/ai_service/logs/ai_service.log)。
+# 必须在 bootstrap/路由装配前调用,确保启动期与注册期日志也能落盘。
+setup_logging("ai_service")
 
 # 引导注册(导入 skills + tools 包,完成全部注册)
 _REGISTRY = bootstrap()

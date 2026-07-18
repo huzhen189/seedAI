@@ -34,11 +34,11 @@ def verify_password(plain: str, hashed: str) -> bool:
 def create_access_token(user_id: int, role: str) -> str:
     now = datetime.now(timezone.utc)
     payload = {
-        "sub": str(user_id),
-        "role": role,
-        "type": "access",
-        "iat": now,
-        "exp": now + timedelta(seconds=settings.access_token_ttl),
+        "sub": str(user_id),  # subject:用户 id,decode 后转 int 用
+        "role": role,  # 角色直接塞进 token,鉴权依赖无需每次查库
+        "type": "access",  # 标记令牌类型,刷新接口会拒绝非 refresh 类型的 token
+        "iat": now,  # 签发时间
+        "exp": now + timedelta(seconds=settings.access_token_ttl),  # 过期时间(短时效)
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
