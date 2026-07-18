@@ -18,7 +18,22 @@ logger = logging.getLogger(__name__)
 #  - echo=False:不打 SQL 日志(避免刷屏,排查时临时改 True);
 #  - future=True:启用 SQLAlchemy 2.0 风格 API(async_sessionmaker 等);
 #  - database_url 已是异步驱动(mysql+aiomysql,见 config.model_post_init)。
-engine = create_async_engine(settings.database_url, echo=False, future=True)
+#  - pool_pre_ping=True:每次从池取连接前先执行 `SELECT 1` 探活,若连接已被
+#    服务端 / 公网 NAT / 防火墙静默断开(典型报错 2013 "Lost connection to MySQL
+#    server during query"),立即丢弃并新建,避免拿到死连接直接 500(本地开发机跨公网
+#    连云 MySQL 时,空闲连接常被几分钟级的防火墙超时掐断)。
+#  - pool_recycle=1800:连接使用 30min 后强制回收重建,远小于 MySQL wait_timeout
+#    (28800s)与常见防火墙空闲超时,双保险防止空闲死连接。
+#  - pool_size / max_overflow:开发期合理并发上限。
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    future=True,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    pool_size=10,
+    max_overflow=20,
+)
 # expire_on_commit=False:commit 后对象属性不失效,避免后续访问触发隐式查询
 # (生成流里要反复读字段,关掉更顺)。
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
