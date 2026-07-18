@@ -12,7 +12,7 @@ import ThoughtTrail from '../components/ThoughtTrail.vue'
 import PreviewPane from '../components/PreviewPane.vue'
 import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
-import SettingsPanel from '../components/SettingsPanel.vue'
+import { useRouter } from 'vue-router'
 import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
@@ -42,12 +42,12 @@ const traceId = ref('')
 const esRef = ref<EventSource | null>(null)
 const rating = ref<'' | 'up' | 'down'>('')
 
-const showSettings = ref(false)
 const pendingSend = ref(false)
 
 const auth = useAuth()
 const projectStore = useProjectStore()
 const convStore = useConversationStore()
+const router = useRouter()
 
 const messages = computed(() => convStore.messages)
 const currentProjectName = computed(
@@ -303,7 +303,7 @@ watch(
           :models="models"
           @send="send"
           @stop="stop"
-          @open-settings="showSettings = true"
+          @open-settings="router.push('/settings')"
         />
         <div v-if="errorMsg" class="error">⚠ {{ errorMsg }}</div>
         <div v-if="finished && !errorMsg && (generatedHtml || previewUrl)" class="feedback">
@@ -321,7 +321,6 @@ watch(
       <PreviewPane :html="generatedHtml" :url="previewUrl" :loading="generating" />
     </div>
 
-    <SettingsPanel v-if="showSettings" @close="showSettings = false" />
   </div>
 </template>
 

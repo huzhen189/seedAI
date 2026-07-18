@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 
-const emit = defineEmits<{ close: [] }>()
+const router = useRouter()
 const { user, doUpdateUser } = useAuth()
 
 // 表单初值取自当前用户态
@@ -41,7 +42,7 @@ async function save() {
   }
 
   if (Object.keys(payload).length === 0) {
-    emit('close')
+    // 无改动则直接返回,不弹层(页面形态下无需关闭)
     return
   }
 
@@ -54,7 +55,6 @@ async function save() {
     email.value = updated.email || ''
     oldPassword.value = ''
     newPassword.value = ''
-    setTimeout(() => emit('close'), 600)
   } catch (e: any) {
     err.value = e?.message || '保存失败'
   } finally {
@@ -64,10 +64,13 @@ async function save() {
 </script>
 
 <template>
-  <div class="auth-mask" @click.self="emit('close')">
-    <div class="auth-card">
-      <button class="close-x" aria-label="关闭" @click="emit('close')">×</button>
+  <div class="settings-page">
+    <div class="head">
+      <button class="back" @click="router.back()">← 返回</button>
       <div class="title">账户设置</div>
+    </div>
+
+    <div class="card">
       <div class="sub">修改昵称、邮箱或密码</div>
 
       <label class="field-label">昵称</label>
@@ -110,20 +113,34 @@ async function save() {
 </template>
 
 <style scoped>
-.auth-mask {
-  position: fixed;
-  inset: 0;
+.settings-page {
+  flex: 1;
+  padding: 24px;
+  overflow: auto;
+}
+.head {
   display: flex;
   align-items: center;
-  justify-content: center;
-  background: rgba(244, 246, 250, 0.9);
-  z-index: 50;
+  gap: 12px;
+  margin-bottom: 16px;
 }
-.auth-card {
-  position: relative;
+.back {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+}
+.title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--brand);
+}
+.card {
   width: 340px;
-  max-height: 90vh;
-  overflow: auto;
+  max-width: 100%;
   background: #fff;
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -132,22 +149,6 @@ async function save() {
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-.close-x {
-  position: absolute;
-  top: 8px;
-  right: 12px;
-  border: none;
-  background: transparent;
-  font-size: 20px;
-  line-height: 1;
-  color: var(--muted);
-  cursor: pointer;
-}
-.title {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--brand);
 }
 .sub {
   font-size: 12px;
@@ -160,7 +161,7 @@ async function save() {
   color: var(--muted);
   margin-top: 2px;
 }
-.auth-card input {
+.card input {
   height: 38px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -168,7 +169,7 @@ async function save() {
   font-size: 14px;
   outline: none;
 }
-.auth-card input:focus {
+.card input:focus {
   border-color: var(--brand);
 }
 .divider {
@@ -212,7 +213,7 @@ async function save() {
   color: #16a34a;
   font-size: 12px;
 }
-.auth-card button.submit {
+.card button.submit {
   height: 40px;
   border: none;
   border-radius: 8px;
@@ -223,7 +224,7 @@ async function save() {
   cursor: pointer;
   margin-top: 4px;
 }
-.auth-card button.submit:disabled {
+.card button.submit:disabled {
   opacity: 0.6;
   cursor: default;
 }

@@ -5,14 +5,12 @@ import { useAuthStore } from '../stores/auth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
 import AuthPanel from './AuthPanel.vue'
-import SettingsPanel from './SettingsPanel.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
 const projectStore = useProjectStore()
 const convStore = useConversationStore()
 
-const showSettings = ref(false)
 const searchText = ref('')
 
 const user = computed(() => auth.user)
@@ -38,6 +36,10 @@ function pickItem(item: any) {
 function logout() {
   auth.logout()
 }
+// 点击头像进入设置页(不再用单独的"设置"按钮)
+function goSettings() {
+  router.push('/settings')
+}
 </script>
 
 <template>
@@ -57,9 +59,10 @@ function logout() {
     </div>
     <div class="right">
       <template v-if="user">
-        <span class="avatar">{{ (user.nickname || user.username).slice(0, 1) }}</span>
+        <span class="avatar" title="点击进入设置" @click="goSettings">{{
+          (user.nickname || user.username).slice(0, 1)
+        }}</span>
         <span class="uname">{{ user.nickname || user.username }}</span>
-        <button class="btn" @click="showSettings = true">设置</button>
         <button class="btn" @click="logout">退出</button>
       </template>
       <button v-else class="login" @click="auth.openLogin()">登录 / 注册</button>
@@ -67,7 +70,6 @@ function logout() {
   </header>
 
   <AuthPanel />
-  <SettingsPanel v-if="showSettings" @close="showSettings = false" />
 </template>
 
 <style scoped>
@@ -148,6 +150,7 @@ function logout() {
   margin-left: auto;
 }
 .avatar {
+  cursor: pointer;
   width: 28px;
   height: 28px;
   border-radius: 50%;
