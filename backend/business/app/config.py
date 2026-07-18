@@ -1,9 +1,17 @@
-"""业务服务配置。从 .env 读取(密钥只在此出现,不进文档/记忆)。"""
+"""业务服务配置。从项目根 .env 读取(密钥只在此出现,不进文档/记忆)。"""
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 用绝对路径定位项目根目录的 .env,不受启动目录影响(与 AI 服务一致)。
+# 之前相对 env_file=".env" 在 backend/business/app 下启动会找不到根 .env,
+# 导致 DATABASE_URL/MYSQL_URL/JWT 等回落默认值(如 SQLite),与 docker 行为不一致。
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+ENV_FILE = PROJECT_ROOT / ".env"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(ENV_FILE), extra="ignore")
 
     # 服务间通信:业务服务唯一对外,AI 服务仅内网
     ai_service_url: str = "http://ai-service:7102"

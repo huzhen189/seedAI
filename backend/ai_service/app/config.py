@@ -1,9 +1,18 @@
-"""AI 服务配置(仅内网)。从 .env 加载(extra="ignore" 容忍未声明变量)。"""
+"""AI 服务配置(仅内网)。从项目根 .env 加载(extra="ignore" 容忍未声明变量)。"""
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 用绝对路径定位项目根目录的 .env,不受启动目录影响。
+# 之前用相对 env_file=".env",本地从 backend/ai_service/app 启动时找不到根 .env,
+# 导致模型 Key 全为空 → hy3 调用腾讯 TokenHub 401 鉴权失败。
+# docker 内该绝对路径不存在时 pydantic-settings 会静默忽略,回退到 compose 注入的环境变量,安全。
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+ENV_FILE = PROJECT_ROOT / ".env"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(ENV_FILE), extra="ignore")
 
     # 模型 Key(仅 AI 服务持有)
     deepseek_api_key: str = ""
