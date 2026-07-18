@@ -38,7 +38,9 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
 
     # CORS(前端 origin,逗号分隔;默认含本地与站点域)
-    cors_origins: str = "http://localhost:7100,http://seedai.huzhen.net.cn:7100"
+    # 含 bare 域名与 https 变体:bare 域名场景(如 nginx 反代到 80/443)下
+    # 若前端改用绝对地址跨域调用 seedapi,仍可带 Cookie 通行。
+    cors_origins: str = "http://localhost:7100,http://seedai.huzhen.net.cn:7100,http://seedai.huzhen.net.cn,https://seedai.huzhen.net.cn"
 
 
 settings = Settings()
