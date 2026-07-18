@@ -88,9 +88,30 @@ class MemoryBackend(QueueBackend):
 
 class RedisBackend(QueueBackend):
     def __init__(self):
+        import redis
         import redis.asyncio as aioredis
 
-        self._r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        # 关键:不能只做 TCP 探测。redis-py 默认走 RESP3 握手会先发 `HELLO` 命令,
+        # 而部分云 Redis(老版本/代理)不支持 HELLO,会直接返回
+        #   unknown command `HELLO` ... -> /generate 运行时 500。
+        # 这里用「同步客户端 + protocol=2(避开 HELLO)」做一次真实 PING 握手,
+        # 连不上 / 协议不兼容就抛 ConnectionError,让 get_queue 回退到 MemoryBackend。
+        try:
+            sync_r = redis.from_url(
+                settings.redis_url,
+                protocol=2,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
+            sync_r.ping()
+            sync_r.close()
+        except Exception as e:  # 含连接失败、HELLO/AUTH 不兼容等
+            raise ConnectionError(f"Redis 不可用或不兼容: {e}") from e
+
+        # 异步客户端同样强制 protocol=2,与探测保持一致,避免首条命令就 HELLO 报错。
+        self._r = aioredis.from_url(
+            settings.redis_url, decode_responses=True, protocol=2
+        )
 
     async def open_channel(self, trace_id: str):
         ps = self._r.pubsub()

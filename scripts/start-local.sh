@@ -14,7 +14,7 @@ for port in 7101 7102; do
   for i in $(seq 1 6); do
     pid=$(netstat -ano 2>/dev/null | grep ":$port " | grep LISTENING | awk '{print $NF}' | head -1)
     [ -z "$pid" ] && break
-    taskkill //PID "$pid" //F >/dev/null 2>&1 || true
+    cmd.exe /c "taskkill /PID $pid /F" >/dev/null 2>&1 || true
     sleep 1
   done
 done
