@@ -4,6 +4,7 @@
 用途:generate_site 产出落盘后,由本工具上传到预览桶,返回线上直链 preview_url
       (前端 iframe 直接加载,无需本地 host 代理,§3.11)。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -25,7 +26,10 @@ from ..registry import tool
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "local_path": {"type": "string", "description": "本地文件绝对路径(通常由 file_write 产出)"},
+                    "local_path": {
+                        "type": "string",
+                        "description": "本地文件绝对路径(通常由 file_write 产出)",
+                    },
                     "cos_key": {
                         "type": "string",
                         "description": "COS 对象键,如 'previews/{user_id}/{site_id}/{version}/index.html'",

@@ -4,13 +4,15 @@ M0 骨架:封装核心原语,业务层(CRUD)按需调用。
 - cache_get/cache_set:用户常用数据,默认 30min TTL。
 - enqueue_write_error/retry_write_errors:写 MySQL 失败时入队,定时检查器重试。
 """
+
 import json
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 import redis.asyncio as aioredis
 
 from .config import settings
+
 
 logger = logging.getLogger("business.cache")
 
@@ -73,9 +75,10 @@ async def pop_write_errors(limit: int = 50) -> list[dict]:
         r = await get_redis()
         for _ in range(limit):
             raw = await r.lpop("queue:error")
-            if not raw:
+            if raw is None:
                 break
-            out.append(json.loads(raw))
+            if isinstance(raw, (bytes, str)):
+                out.append(json.loads(raw))
     except Exception as e:
         logger.warning("pop_write_errors failed: %s", e)
     return out

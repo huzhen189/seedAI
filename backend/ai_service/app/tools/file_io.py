@@ -3,6 +3,7 @@
 成熟来源:Python 标准库 pathlib(零依赖、跨平台)。
 用途:generate_site 产出单文件 HTML 落盘 artifacts 目录,随后由 cos_upload 投递。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -72,4 +73,9 @@ def file_read(path: str) -> dict:
     if not fp.exists():
         return {"ok": False, "error": "not_found", "path": str(fp)}
     text = fp.read_text(encoding="utf-8")
-    return {"ok": True, "path": str(fp.resolve()), "content": text, "bytes": len(text.encode("utf-8"))}
+    return {
+        "ok": True,
+        "path": str(fp.resolve()),
+        "content": text,
+        "bytes": len(text.encode("utf-8")),
+    }

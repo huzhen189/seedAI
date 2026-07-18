@@ -10,6 +10,7 @@ ToolEntry 字段严格对齐设计文档 §5.9:
   - scope  : internal(仅内部 agent 调用) / user_exposed(用户可见可触发)
   - risk   : safe / dangerous(危险工具需权限校验 / 沙箱隔离)
 """
+
 from __future__ import annotations
 
 import inspect

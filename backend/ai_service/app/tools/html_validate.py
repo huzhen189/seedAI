@@ -4,6 +4,7 @@
 用途:Reviewer 节点(§5.3)做静态分析 —— 校验标签平衡、关键结构、是否含 script/style。
 说明:MVP 用标准库做轻量校验;后续可平滑升级为 html5lib / tidy(更强容错),接口不变。
 """
+
 from __future__ import annotations
 
 from html.parser import HTMLParser
@@ -13,8 +14,20 @@ from ..registry import tool
 
 class _HTMLValidator(HTMLParser):
     VOID = {
-        "area", "base", "br", "col", "embed", "hr", "img",
-        "input", "link", "meta", "param", "source", "track", "wbr",
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
     }
 
     def __init__(self):

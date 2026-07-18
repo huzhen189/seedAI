@@ -43,7 +43,7 @@ async function submit() {
 <template>
   <div v-if="store.loginOpen" class="auth-mask" @click.self="store.closeLogin()">
     <div class="auth-card">
-      <button class="close-x" @click="store.closeLogin()" aria-label="关闭">×</button>
+      <button class="close-x" aria-label="关闭" @click="store.closeLogin()">×</button>
       <div class="title">SeedAI · {{ mode === 'login' ? '登录' : '注册' }}</div>
       <div class="sub">登录后才能开始对话</div>
 
@@ -74,8 +74,8 @@ async function submit() {
         <button
           type="button"
           class="eye"
-          @click="showPwd = !showPwd"
           :title="showPwd ? '隐藏密码' : '显示密码'"
+          @click="showPwd = !showPwd"
         >
           {{ showPwd ? '🙈' : '👁' }}
         </button>
@@ -91,9 +91,7 @@ async function submit() {
         <template v-if="mode === 'login'">
           还没有账号? <a @click="mode = 'register'">去注册</a>
         </template>
-        <template v-else>
-          已有账号? <a @click="mode = 'login'">去登录</a>
-        </template>
+        <template v-else> 已有账号? <a @click="mode = 'login'">去登录</a> </template>
       </div>
     </div>
   </div>

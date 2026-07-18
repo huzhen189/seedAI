@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend (ruff / mypy / pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend/business
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install dev deps
+        run: pip install -r ../requirements-dev.txt
+      - name: Ruff lint
+        run: python -m ruff check ../business/app ../ai_service/app
+      - name: Ruff format check
+        run: python -m ruff format --check ../business/app ../ai_service/app
+      - name: Mypy type check
+        run: python -m mypy ../business/app
+      - name: Pytest
+        run: python -m pytest -q
+
+  frontend:
+    name: Frontend (eslint / prettier / vitest / build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: ESLint
+        run: npm run lint
+      - name: Prettier check
+        run: npm run format:check
+      - name: Unit tests
+        run: npm run test
+      - name: Build (type-check + bundle)
+        run: npm run build

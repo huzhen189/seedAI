@@ -64,7 +64,9 @@ export function startChat(opts: StartChatOptions): EventSource {
       // 主动弹出登录框,并给出明确提示。
       const isAuthErr =
         d.code === 'AUTH_REQUIRED' ||
-        /missing authentication|not authenticated|未登录|invalid or expired token|^\s*401\b/i.test(msg)
+        /missing authentication|not authenticated|未登录|invalid or expired token|^\s*401\b/i.test(
+          msg,
+        )
       if (isAuthErr) {
         notifyAuthRequired()
         opts.cb.onError?.('登录已失效，请重新登录')

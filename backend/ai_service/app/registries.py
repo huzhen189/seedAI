@@ -5,6 +5,7 @@
   无需修改 __init__(运营/用户贡献能力热插拔,§5.9 来源 B)。
 - 单个贡献文件出错不阻断整体(沙箱式容错)。
 """
+
 from __future__ import annotations
 
 import importlib

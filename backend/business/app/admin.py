@@ -1,4 +1,5 @@
 """管理监控路由(§3.6):仅 admin。实时指标 SSE + 手动控制面占位。"""
+
 import asyncio
 import json
 
@@ -8,12 +9,14 @@ from sse_starlette.sse import EventSourceResponse
 from .metrics import snapshot
 from .security import require_admin
 
+
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 @router.get("/metrics")
 async def metrics_stream(_=Depends(require_admin)):
     """实时指标:每 2s 推一帧快照。"""
+
     async def publisher():
         while True:
             yield {"event": "metrics", "data": json.dumps(await snapshot())}

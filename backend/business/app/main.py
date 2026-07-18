@@ -1,4 +1,5 @@
 """业务服务入口(唯一对外)。装配鉴权 / 生成代理 / 管理监控。"""
+
 import time
 
 from fastapi import FastAPI, Request
@@ -12,6 +13,7 @@ from .metrics import record_request
 from .projects import router as projects_router
 from .proxy import router as proxy_router
 from .reconciler import start_reconciler
+
 
 app = FastAPI(title="SeedAI Business API")
 

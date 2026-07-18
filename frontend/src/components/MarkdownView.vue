@@ -31,6 +31,9 @@ watch(() => props.content, render)
 </script>
 
 <template>
+  <!-- 安全:rendered 已先经 DOMPurify.sanitize 清洗(marked 输出不可信),
+       此处 v-html 不会引入 XSS。勿移除该清洗步骤。 -->
+  <!-- eslint-disable-next-line vue/no-v-html -- 已用 DOMPurify 清洗,安全 -->
   <div class="md" v-html="rendered"></div>
 </template>
 

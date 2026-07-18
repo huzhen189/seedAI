@@ -30,10 +30,8 @@ export const deleteProject = (id: number): Promise<null> => j('DELETE', `/api/pr
 
 export const listConversations = (projectId: number): Promise<Conversation[]> =>
   j('GET', `/api/conversations?project_id=${projectId}`)
-export const createConversation = (
-  projectId: number,
-  title?: string,
-): Promise<Conversation> => j('POST', '/api/conversations', { project_id: projectId, title })
+export const createConversation = (projectId: number, title?: string): Promise<Conversation> =>
+  j('POST', '/api/conversations', { project_id: projectId, title })
 export const getConversation = (id: number): Promise<Conversation> =>
   j('GET', `/api/conversations/${id}`)
 export const renameConversation = (id: number, name: string): Promise<Conversation> =>

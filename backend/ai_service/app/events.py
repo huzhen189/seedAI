@@ -12,10 +12,12 @@
 每个事件是一个 dict: {"event": <type>, "data": <payload>};data 可为字符串或 dict,
 经 to_sse() 序列化为 SSE 的 {event, data} 字符串帧。
 """
+
 from __future__ import annotations
 
 import json
 from typing import Any, Dict
+
 
 # 终止事件:收到即结束 SSE 流
 TERMINAL_EVENTS = {"done", "error", "aborted"}

@@ -3,10 +3,12 @@
 成熟来源:单 LLM 调用(ReAct 思路的简化形态,§5.7「仅作简单 skill 实现思路」)。
 非图技能(is_graph=False):一次 PROVIDERS[model_id] 调用即返回。
 """
+
 from __future__ import annotations
 
 from ..providers import get_chat_model
 from ..registry import register_skill
+
 
 SYS_WRITE = (
     "你是一名资深工程师。根据用户需求直接产出代码片段,"

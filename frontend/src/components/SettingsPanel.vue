@@ -66,7 +66,7 @@ async function save() {
 <template>
   <div class="auth-mask" @click.self="emit('close')">
     <div class="auth-card">
-      <button class="close-x" @click="emit('close')" aria-label="关闭">×</button>
+      <button class="close-x" aria-label="关闭" @click="emit('close')">×</button>
       <div class="title">账户设置</div>
       <div class="sub">修改昵称、邮箱或密码</div>
 

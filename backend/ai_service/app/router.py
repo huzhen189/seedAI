@@ -4,10 +4,12 @@
 - 生产可替换为一次小模型调用(§5.8),对外接口不变(detect_intent -> skill 名)。
 - dispatch:流式技能(is_graph / async generator)逐 token 转发;普通技能单次返回。
 """
+
 from __future__ import annotations
 
 import inspect
-from typing import AsyncGenerator, Any
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from .registry import SkillRegistry
 

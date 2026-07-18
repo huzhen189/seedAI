@@ -38,7 +38,7 @@ function pickSearch(item: any) {
     </div>
 
     <div v-if="showSearch && !collapsed" class="searchbox">
-      <input v-model="searchText" @input="onSearch" placeholder="搜索项目 / 会话" />
+      <input v-model="searchText" placeholder="搜索项目 / 会话" @input="onSearch" />
       <div v-if="projectStore.searchResults.length" class="sres">
         <div
           v-for="r in projectStore.searchResults"

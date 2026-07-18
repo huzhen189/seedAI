@@ -5,6 +5,7 @@ scope=user_exposed:用户可在 UI 显式触发"生成配图"。
 说明:图像 API 非必须能力;未配置 image_api_key/image_api_base 时返回清晰状态,
 不阻塞其它能力(§5.9 来源 A 内置工具,mature 库可平滑接入)。
 """
+
 from __future__ import annotations
 
 import httpx
@@ -27,8 +28,16 @@ from ..registry import tool
                 "type": "object",
                 "properties": {
                     "prompt": {"type": "string", "description": "图像描述提示词"},
-                    "size": {"type": "string", "description": "尺寸,如 1024x1024", "enum": ["1024x1024", "1792x1024", "1024x1792"]},
-                    "quality": {"type": "string", "description": "质量", "enum": ["standard", "hd"]},
+                    "size": {
+                        "type": "string",
+                        "description": "尺寸,如 1024x1024",
+                        "enum": ["1024x1024", "1792x1024", "1024x1792"],
+                    },
+                    "quality": {
+                        "type": "string",
+                        "description": "质量",
+                        "enum": ["standard", "hd"],
+                    },
                 },
                 "required": ["prompt"],
             },

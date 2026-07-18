@@ -8,16 +8,19 @@
 - 环境变量 DEV_MEMORY_QUEUE=1 或 REDIS_URL 以 memory:// 开头 → MemoryBackend
 - 否则 → RedisBackend(懒加载 redis 库,缺库时回退 MemoryBackend 并告警)
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-from typing import Any, AsyncGenerator, Dict, Optional
+from collections.abc import AsyncGenerator
+from typing import Any, Dict, Optional
 
 from .config import settings
 from .events import TERMINAL_EVENTS
 from .runner import run_skill
+
 
 _JOB_QUEUE = "queue:generate"
 
@@ -115,9 +118,7 @@ class RedisBackend(QueueBackend):
         return json.loads(raw)
 
     async def publish(self, trace_id: str, event: Dict[str, Any]) -> None:
-        await self._r.publish(
-            f"gen:progress:{trace_id}", json.dumps(event, ensure_ascii=False)
-        )
+        await self._r.publish(f"gen:progress:{trace_id}", json.dumps(event, ensure_ascii=False))
 
     async def is_cancelled(self, trace_id: str) -> bool:
         return await self._r.exists(f"cancel:{trace_id}") == 1
@@ -135,10 +136,7 @@ def get_queue() -> QueueBackend:
     if _backend is not None:
         return _backend
 
-    use_memory = (
-        os.getenv("DEV_MEMORY_QUEUE") == "1"
-        or settings.redis_url.startswith("memory://")
-    )
+    use_memory = os.getenv("DEV_MEMORY_QUEUE") == "1" or settings.redis_url.startswith("memory://")
     if use_memory:
         _backend = MemoryBackend()
         return _backend
@@ -156,6 +154,7 @@ def get_queue() -> QueueBackend:
 async def worker_loop(concurrency: int = 1):
     """Worker 池:消费 queue:generate,运行 run_skill,把每个事件 publish 到对应进度频道。"""
     q = get_queue()
+
     # 用 asyncio 任务池模拟并发 Worker
     async def _one():
         while True:
@@ -165,7 +164,7 @@ async def worker_loop(concurrency: int = 1):
             messages = job.get("messages", [])
             skill = job.get("skill")
 
-            async def _cancelled():
+            async def _cancelled(trace_id=trace_id):
                 return await q.is_cancelled(trace_id) if trace_id else False
 
             try:

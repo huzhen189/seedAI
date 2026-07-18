@@ -4,6 +4,7 @@
 - 所有写操作先校验归属(user_id),非本人 404。
 - 删除项目级联删会话与消息;删除会话级联删消息。
 """
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,7 @@ from .schemas import (
 )
 from .security import CurrentUser, get_current_user
 
+
 router = APIRouter(prefix="/api", tags=["projects"])
 
 
@@ -31,12 +33,16 @@ async def list_projects(
     db: AsyncSession = Depends(get_db),
 ):
     rows = (
-        await db.execute(
-            select(Project)
-            .where(Project.user_id == user.id)
-            .order_by(Project.updated_at.desc())
+        (
+            await db.execute(
+                select(Project)
+                .where(Project.user_id == user.id)
+                .order_by(Project.updated_at.desc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return rows
 
 
@@ -87,15 +93,13 @@ async def delete_project(
     if proj is None:
         raise HTTPException(status_code=404, detail="project not found")
     conv_ids = (
-        await db.execute(
-            select(Conversation.id).where(Conversation.project_id == project_id)
-        )
-    ).scalars().all()
+        (await db.execute(select(Conversation.id).where(Conversation.project_id == project_id)))
+        .scalars()
+        .all()
+    )
     if conv_ids:
         await db.execute(delete(Message).where(Message.conversation_id.in_(conv_ids)))
-        await db.execute(
-            delete(Conversation).where(Conversation.project_id == project_id)
-        )
+        await db.execute(delete(Conversation).where(Conversation.project_id == project_id))
     await db.delete(proj)
     await db.commit()
     return None
@@ -109,12 +113,16 @@ async def list_conversations(
     db: AsyncSession = Depends(get_db),
 ):
     rows = (
-        await db.execute(
-            select(Conversation)
-            .where(Conversation.project_id == project_id, Conversation.user_id == user.id)
-            .order_by(Conversation.updated_at.desc())
+        (
+            await db.execute(
+                select(Conversation)
+                .where(Conversation.project_id == project_id, Conversation.user_id == user.id)
+                .order_by(Conversation.updated_at.desc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return rows
 
 
@@ -126,9 +134,7 @@ async def create_conversation(
 ):
     proj = (
         await db.execute(
-            select(Project).where(
-                Project.id == req.project_id, Project.user_id == user.id
-            )
+            select(Project).where(Project.id == req.project_id, Project.user_id == user.id)
         )
     ).scalar_one_or_none()
     if proj is None:
@@ -156,12 +162,16 @@ async def get_conversation(
     if conv is None:
         raise HTTPException(status_code=404, detail="conversation not found")
     msgs = (
-        await db.execute(
-            select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.id.asc())
+        (
+            await db.execute(
+                select(Message)
+                .where(Message.conversation_id == conversation_id)
+                .order_by(Message.id.asc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     resp = ConversationResp.model_validate(conv)
     resp.messages = [MessageResp.model_validate(m) for m in msgs]
     return resp
@@ -226,12 +236,16 @@ async def list_messages(
     if conv is None:
         raise HTTPException(status_code=404, detail="conversation not found")
     msgs = (
-        await db.execute(
-            select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.id.asc())
+        (
+            await db.execute(
+                select(Message)
+                .where(Message.conversation_id == conversation_id)
+                .order_by(Message.id.asc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return msgs
 
 
@@ -245,21 +259,27 @@ async def search(
     like = f"%{q}%"
     results: list[SearchItemResp] = []
     projs = (
-        await db.execute(
-            select(Project).where(Project.user_id == user.id, Project.name.like(like))
-        )
-    ).scalars().all()
-    for p in projs:
-        results.append(
-            SearchItemResp(type="project", id=p.id, title=p.name, project_id=None)
-        )
-    convs = (
-        await db.execute(
-            select(Conversation).where(
-                Conversation.user_id == user.id, Conversation.title.like(like)
+        (
+            await db.execute(
+                select(Project).where(Project.user_id == user.id, Project.name.like(like))
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
+    for p in projs:
+        results.append(SearchItemResp(type="project", id=p.id, title=p.name, project_id=None))
+    convs = (
+        (
+            await db.execute(
+                select(Conversation).where(
+                    Conversation.user_id == user.id, Conversation.title.like(like)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
     for c in convs:
         results.append(
             SearchItemResp(

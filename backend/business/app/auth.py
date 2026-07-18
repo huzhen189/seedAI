@@ -4,8 +4,11 @@
 token;EventSource / 页面同源时浏览器自动携带 Cookie。另兼容 Bearer(便于
 API 调试 / 非浏览器客户端)。
 """
+
+from typing import Literal, Optional, TypedDict
+
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import select, or_
+from sqlalchemy import or_, select
 
 from .cache import cache_user_get, cache_user_set
 from .config import settings
@@ -23,21 +26,29 @@ from .security import (
     verify_password,
 )
 
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+class _CookieOpts(TypedDict):
+    max_age: int
+    httponly: bool
+    secure: bool
+    samesite: Literal["lax", "strict", "none"]
+    domain: Optional[str]
+
+
 def _set_cookies(resp: Response, access: str, refresh: str) -> None:
-    opts = dict(
-        max_age=settings.access_token_ttl,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="lax",
-        domain=settings.cookie_domain or None,
-    )
+    opts: _CookieOpts = {
+        "max_age": settings.access_token_ttl,
+        "httponly": True,
+        "secure": settings.cookie_secure,
+        "samesite": "lax",
+        "domain": settings.cookie_domain or None,
+    }
     resp.set_cookie(ACCESS_COOKIE, access, **opts)
-    resp.set_cookie(
-        REFRESH_COOKIE, refresh, **{**opts, "max_age": settings.refresh_token_ttl}
-    )
+    refresh_opts: _CookieOpts = {**opts, "max_age": settings.refresh_token_ttl}
+    resp.set_cookie(REFRESH_COOKIE, refresh, **refresh_opts)
 
 
 def _clear_cookies(resp: Response) -> None:
@@ -156,9 +167,7 @@ async def me(user=Depends(get_current_user), db=Depends(get_db)):
 
 
 @router.patch("/me", response_model=UserResp)
-async def update_me(
-    req: UpdateMeReq, user=Depends(get_current_user), db=Depends(get_db)
-):
+async def update_me(req: UpdateMeReq, user=Depends(get_current_user), db=Depends(get_db)):
     """修改当前用户信息:昵称 / 邮箱 / 密码(改密码需验旧密码)。"""
     u = await db.get(User, user.id)
     if not u:
@@ -166,9 +175,7 @@ async def update_me(
 
     # 邮箱变更需查重(排除自己)
     if req.email is not None and req.email != u.email:
-        exists = await db.scalar(
-            select(User).where((User.email == req.email) & (User.id != u.id))
-        )
+        exists = await db.scalar(select(User).where((User.email == req.email) & (User.id != u.id)))
         if exists:
             raise HTTPException(status_code=409, detail="email already exists")
         u.email = req.email

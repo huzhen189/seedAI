@@ -3,11 +3,11 @@
 成熟来源:httpx(成熟异步 HTTP 客户端) + beautifulsoup4(成熟 HTML 解析)。
 用途:生成/改写网站时,抓取参考站点正文,注入上下文增强质量。
 """
+
 from __future__ import annotations
 
 import httpx
 
-from ..config import settings
 from ..registry import tool
 
 

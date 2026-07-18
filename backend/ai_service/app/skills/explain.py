@@ -1,8 +1,10 @@
 """Skill: explain(解释/问答 · 单次 LLM 直出 · §5.2)。"""
+
 from __future__ import annotations
 
 from ..providers import get_chat_model
 from ..registry import register_skill
+
 
 SYS_EXPLAIN = "你是一名耐心、严谨的助手。回答用户问题,给出准确、易懂的解释,必要时举例。"
 

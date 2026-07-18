@@ -1,7 +1,9 @@
 """业务服务配置。从项目根 .env 读取(密钥只在此出现,不进文档/记忆)。"""
+
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 # 用绝对路径定位项目根目录的 .env,不受启动目录影响(与 AI 服务一致)。
 # 之前相对 env_file=".env" 在 backend/business/app 下启动会找不到根 .env,
@@ -37,19 +39,19 @@ class Settings(BaseSettings):
         # 不改 .env 的库地址/账号(那套是用户统一的)。
         u = self.database_url
         if u.startswith("mysql+pymysql://"):
-            u = "mysql+aiomysql://" + u[len("mysql+pymysql://"):]
+            u = "mysql+aiomysql://" + u[len("mysql+pymysql://") :]
         elif u.startswith("mysql://"):
-            u = "mysql+aiomysql://" + u[len("mysql://"):]
+            u = "mysql+aiomysql://" + u[len("mysql://") :]
         self.database_url = u
 
     # JWT
     jwt_secret: str = "dev-secret-change-me"
     jwt_algorithm: str = "HS256"
-    access_token_ttl: int = 1800          # 30 min
+    access_token_ttl: int = 1800  # 30 min
     refresh_token_ttl: int = 7 * 24 * 3600  # 7 days
 
     # 缓存默认 TTL
-    cache_user_ttl: int = 1800            # 30 min
+    cache_user_ttl: int = 1800  # 30 min
 
     # 站点域名(§4-C:主站 + 隔离预览子域)
     site_domain: str = "seedai.huzhen.net.cn"

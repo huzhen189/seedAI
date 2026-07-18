@@ -1,13 +1,15 @@
 """鉴权工具:bcrypt 密码哈希 + JWT 签发/校验 + 当前用户依赖。"""
-import bcrypt
+
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import bcrypt
 import jwt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import settings
+
 
 _bearer = HTTPBearer(auto_error=False)
 

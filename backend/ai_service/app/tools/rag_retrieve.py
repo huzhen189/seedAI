@@ -8,6 +8,7 @@
   - 内部 agent          → generate_site 的 Planner 检索上下文增强质量
 说明:M0 不接向量检索,未配 embedding key / chroma 不可用时返回清晰错误,不阻塞启动。
 """
+
 from __future__ import annotations
 
 from ..config import settings
@@ -40,7 +41,9 @@ from ..registry import tool
         },
     },
 )
-async def rag_retrieve(query: str, collection: str = "components", top_k: int | None = None) -> dict:
+async def rag_retrieve(
+    query: str, collection: str = "components", top_k: int | None = None
+) -> dict:
     top_k = top_k or settings.rag_top_k
     try:
         import chromadb

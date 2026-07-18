@@ -7,10 +7,12 @@ run_skill() 是统一的「一次生成请求 → 事件流」入口:
   * handler 是普通协程 → 其结果包成 token 事件
 - 末尾产出 done(异常时先产 error 再 done,保证 SSE 流一定有关闭帧)
 """
+
 from __future__ import annotations
 
 import inspect
-from typing import Any, AsyncGenerator, Callable, Dict, Optional
+from collections.abc import AsyncGenerator
+from typing import Any, Callable, Dict, Optional
 
 from .events import ev
 from .registry import SkillRegistry

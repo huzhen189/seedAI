@@ -4,6 +4,7 @@
 / generate 流程(1-C):入队 queue:generate → Worker 消费 → run_skill 产出事件流 → 经进度频道
 publish → 本端点订阅该频道并转成 SSE 帧透传给业务服务(§3.7)。Worker 在 lifespan 后台启动。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -21,6 +22,7 @@ from .queue import get_queue, worker_loop
 from .registries import bootstrap
 from .registry import SkillRegistry, ToolRegistry
 
+
 # 引导注册(导入 skills + tools 包,完成全部注册)
 _REGISTRY = bootstrap()
 
@@ -31,7 +33,7 @@ _worker_task = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _worker_task
-    q = get_queue()
+    get_queue()  # 确保队列单例初始化(副作用)
     # 启动 Worker 池(消费 queue:generate,发布进度)
     _worker_task = __import__("asyncio").ensure_future(
         worker_loop(concurrency=settings.worker_concurrency)

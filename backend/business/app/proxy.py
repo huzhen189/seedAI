@@ -16,6 +16,7 @@ SSE 透传策略:上游 AI 返回标准 SSE 文本帧(event:/data: 行 + 空行)
 think/token/node/preview/done/error/aborted/degraded 一字不差地转发,兼容
 前端 EventSource),同时收集 token 帧内容用于落库。
 """
+
 import json
 import logging
 import uuid
@@ -33,6 +34,7 @@ from .db import get_db
 from .metrics import record_model_usage
 from .models import Conversation, Message
 from .security import ACCESS_COOKIE, CurrentUser, decode_token
+
 
 router = APIRouter(prefix="/api", tags=["generate"])
 
@@ -73,7 +75,7 @@ def _sse_auth_error() -> StreamingResponse:
     """
 
     async def gen():
-        yield 'event: error\n'
+        yield "event: error\n"
         yield 'data: {"message":"Missing authentication","code":"AUTH_REQUIRED"}\n\n'
 
     return StreamingResponse(
@@ -81,7 +83,6 @@ def _sse_auth_error() -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
 
 
 def _parse_messages(request: Request) -> list:
@@ -159,37 +160,39 @@ async def chat(
         timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
         assistant_parts: list[str] = []
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream(
+            async with (
+                httpx.AsyncClient(timeout=timeout) as client,
+                client.stream(
                     "POST",
                     f"{settings.ai_service_url}/generate",
                     json=payload,
-                ) as resp:
-                    if resp.status_code >= 400:
-                        # 上游报错:把错误体作为单行文本透出给前端
-                        err_text = await resp.aread()
-                        yield err_text
-                        return
-                    event = None
-                    data_parts: list[str] = []
-                    async for raw_line in resp.aiter_lines():
-                        if raw_line == "":
-                            if event is not None or data_parts:
-                                data = "\n".join(data_parts)
-                                if event == "token":
-                                    assistant_parts.append(data)
-                                # 重建标准 SSE 帧透传(兼容前端 EventSource)
-                                frame = ""
-                                if event:
-                                    frame += f"event: {event}\n"
-                                frame += f"data: {data}\n\n"
-                                yield frame.encode("utf-8")
-                            event, data_parts = None, []
-                            continue
-                        if raw_line.startswith("event:"):
-                            event = raw_line[6:].strip()
-                        elif raw_line.startswith("data:"):
-                            data_parts.append(raw_line[5:].strip())
+                ) as resp,
+            ):
+                if resp.status_code >= 400:
+                    # 上游报错:把错误体作为单行文本透出给前端
+                    err_text = await resp.aread()
+                    yield err_text
+                    return
+                event = None
+                data_parts: list[str] = []
+                async for raw_line in resp.aiter_lines():
+                    if raw_line == "":
+                        if event is not None or data_parts:
+                            data = "\n".join(data_parts)
+                            if event == "token":
+                                assistant_parts.append(data)
+                            # 重建标准 SSE 帧透传(兼容前端 EventSource)
+                            frame = ""
+                            if event:
+                                frame += f"event: {event}\n"
+                            frame += f"data: {data}\n\n"
+                            yield frame.encode("utf-8")
+                        event, data_parts = None, []
+                        continue
+                    if raw_line.startswith("event:"):
+                        event = raw_line[6:].strip()
+                    elif raw_line.startswith("data:"):
+                        data_parts.append(raw_line[5:].strip())
                         # 其他行(id:/retry:/注释)忽略透传
         finally:
             # 流结束(正常/中断)均尝试落库;失败仅记录,不阻塞已返回的流
@@ -230,9 +233,7 @@ async def _persist_conversation(
     ).scalar_one_or_none()
     if conv is None:
         return  # 会话不存在或不属于该用户,跳过落库
-    db.add(
-        Message(conversation_id=conv.id, role="user", content=user_text, model_id=model)
-    )
+    db.add(Message(conversation_id=conv.id, role="user", content=user_text, model_id=model))
     if assistant_text:
         db.add(
             Message(
@@ -259,7 +260,5 @@ async def cancel(request: Request):
     if not trace_id:
         raise HTTPException(status_code=400, detail="missing trace_id")
     async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(
-            f"{settings.ai_service_url}/cancel", json={"trace_id": trace_id}
-        )
+        r = await client.post(f"{settings.ai_service_url}/cancel", json={"trace_id": trace_id})
         return r.json()

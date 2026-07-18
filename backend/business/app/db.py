@@ -1,7 +1,11 @@
 """数据库引擎与会话(SQLAlchemy 2.0 async)。"""
+
+import contextlib
+
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from .config import settings
+
 
 engine = create_async_engine(settings.database_url, echo=False, future=True)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -22,9 +26,7 @@ async def init_db():
             # 兼容性迁移:新增 nickname 列(老表可能无此列,幂等)
             try:
                 await conn.execute(
-                    text(
-                        "ALTER TABLE users ADD COLUMN nickname VARCHAR(64) NOT NULL DEFAULT ''"
-                    )
+                    text("ALTER TABLE users ADD COLUMN nickname VARCHAR(64) NOT NULL DEFAULT ''")
                 )
             except Exception as e:  # 重复列(1060)等已存在场景,忽略
                 msg = str(e)
@@ -33,13 +35,8 @@ async def init_db():
                 else:
                     raise
             # 兼容性迁移: email 改为可空(老表为 NOT NULL DEFAULT '', 无邮箱用户会撞唯一索引), 幂等
-            try:
-                await conn.execute(
-                    text("ALTER TABLE users MODIFY email VARCHAR(128) NULL")
-                )
-            except Exception:
-                # 已可空 / 无此列等场景忽略
-                pass
+            with contextlib.suppress(Exception):
+                await conn.execute(text("ALTER TABLE users MODIFY email VARCHAR(128) NULL"))
 
 
 async def get_db():

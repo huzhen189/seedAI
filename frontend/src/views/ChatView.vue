@@ -37,7 +37,8 @@ const convStore = useConversationStore()
 
 const messages = computed(() => convStore.messages)
 const currentProjectName = computed(
-  () => projectStore.projects.find((p) => p.id === projectStore.currentProjectId)?.name || '未选择项目',
+  () =>
+    projectStore.projects.find((p) => p.id === projectStore.currentProjectId)?.name || '未选择项目',
 )
 
 function genTraceId(): string {
@@ -202,7 +203,8 @@ watch(
   async (id) => {
     if (id != null) {
       await convStore.loadConversations(id)
-      if (convStore.conversations.length) await convStore.loadMessages(convStore.conversations[0].id)
+      if (convStore.conversations.length)
+        await convStore.loadMessages(convStore.conversations[0].id)
       else convStore.messages = []
     }
   },
@@ -250,12 +252,7 @@ watch(
         <div v-if="messages.length === 0" class="empty">
           在下方描述你想生成的网站，AI 会先规划需求，再流式产出并实时预览。
         </div>
-        <MessageBubble
-          v-for="(m, i) in messages"
-          :key="i"
-          :role="m.role"
-          :content="m.content"
-        />
+        <MessageBubble v-for="(m, i) in messages" :key="i" :role="m.role" :content="m.content" />
       </div>
 
       <div v-if="stages.length || thinks" class="trail-wrap">

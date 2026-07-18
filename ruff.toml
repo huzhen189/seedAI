@@ -1,0 +1,38 @@
+# 质量基线(资深开发牵头,2026-07-18):Python lint + format。
+# 仅作用于 .py 文件;前端由 eslint/prettier 覆盖。
+line-length = 100
+target-version = "py39"
+indent-width = 4
+
+[lint]
+# 选一套务实的规则集:风格(E/I)+ 正确性(F/B)+ 现代化(UP/SIM/C4)。
+select = [
+    "E",   # pycodestyle 错误
+    "F",   # pyflakes(未使用导入/变量等)
+    "I",   # isort 导入排序
+    "B",   # flake8-bugbear 常见 bug 模式
+    "UP",  # pyupgrade 现代化写法
+    "SIM", # flake8-simplify 简化
+    "C4",  # flake8-comprehensions
+]
+ignore = [
+    "E501", # 行过长交给 ruff format 处理
+    "B008", # FastAPI Depends(...) 默认参数是误报,非问题
+    "B904", # 抛异常建议带 from;当前鉴权链路按需保留,后续 review 再议
+]
+
+[lint.isort]
+known-first-party = ["app"]
+lines-after-imports = 2
+
+[format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[lint.per-file-ignores]
+# 测试文件允许断言裸异常等更宽松写法
+"tests/**" = ["B", "SIM"]
+# AI 核心服务:现代化注解(UP006/UP035/UP045, Optional->X|None 等)留作后续技术债,
+# 避免在本 PR 大范围 churn;真实问题(B/F/SIM/C4)仍照常检查。
+"backend/ai_service/**" = ["UP006", "UP035", "UP045"]

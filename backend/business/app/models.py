@@ -1,4 +1,5 @@
 """SQLAlchemy 模型。M0 仅 User;M1 增补 Project/Conversation/Message 支撑对话持久化。"""
+
 from datetime import datetime
 from typing import Optional
 
@@ -17,7 +18,9 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     nickname: Mapped[str] = mapped_column(String(64), default="", server_default="")
     # 邮箱可空: 未提供邮箱的用户存 NULL(唯一索引允许多个 NULL); 去掉 default='' 避免 None 被替换成 ''
-    email: Mapped[Optional[str]] = mapped_column(String(128), unique=True, index=True, nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(
+        String(128), unique=True, index=True, nullable=True
+    )
     password_hash: Mapped[str] = mapped_column(String(255), default="")
     role: Mapped[str] = mapped_column(String(16), default="user")  # user | admin
     plan: Mapped[str] = mapped_column(String(16), default="free")  # 收费预留
@@ -33,7 +36,9 @@ class Project(Base):
     user_id: Mapped[int] = mapped_column(Integer, index=True)
     name: Mapped[str] = mapped_column(String(128), default="未命名项目")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
 
 class Conversation(Base):
@@ -46,7 +51,9 @@ class Conversation(Base):
     user_id: Mapped[int] = mapped_column(Integer, index=True)
     title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
 
 class Message(Base):

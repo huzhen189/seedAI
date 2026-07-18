@@ -5,6 +5,7 @@
   - 开发兜底:DuckDuckGo lite HTML(免 key,结果质量有限)
 用途:生成时检索最新资料 / 竞品参考 / 技术文档。
 """
+
 from __future__ import annotations
 
 import httpx
@@ -27,7 +28,10 @@ from ..registry import tool
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "搜索关键词"},
-                    "top_k": {"type": "integer", "description": "返回条数,默认取配置 web_search_top_k"},
+                    "top_k": {
+                        "type": "integer",
+                        "description": "返回条数,默认取配置 web_search_top_k",
+                    },
                 },
                 "required": ["query"],
             },
@@ -86,9 +90,7 @@ async def _ddg(query: str, top_k: int) -> dict:
     except ImportError:
         return {"ok": False, "error": "beautifulsoup4 未安装(pip install beautifulsoup4)"}
     try:
-        async with httpx.AsyncClient(
-            timeout=15, headers={"User-Agent": "Mozilla/5.0 SeedAI"}
-        ) as c:
+        async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0 SeedAI"}) as c:
             # DuckDuckGo lite 为表单 POST
             r = await c.post("https://html.duckduckgo.com/html/", data={"q": query})
             r.raise_for_status()

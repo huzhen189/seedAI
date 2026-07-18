@@ -8,6 +8,7 @@ SkillEntry 字段严格对齐设计文档 §5.8:
   - is_graph    : 是否多 agent 状态图(True 时 handler 为 graph.compile())
   - description : 给 Router / 前端展示的说明
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

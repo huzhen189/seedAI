@@ -1,8 +1,10 @@
 """Skill: generate_doc(生成文档/说明 · 单次 LLM 直出 · §5.2)。"""
+
 from __future__ import annotations
 
 from ..providers import get_chat_model
 from ..registry import register_skill
+
 
 SYS_DOC = "你是一名技术文档工程师。根据用户需求产出清晰、结构化的文档/说明,使用 Markdown。"
 

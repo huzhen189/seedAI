@@ -1,0 +1,5 @@
+# 后端开发依赖(质量基线)。CI 与本地均从此安装。
+# 安装: pip install -r backend/requirements-dev.txt
+ruff==0.15.22
+mypy==2.3.0
+pytest==9.1.1

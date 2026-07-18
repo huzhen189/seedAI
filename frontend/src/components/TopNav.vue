@@ -48,14 +48,9 @@ function logout() {
       <RouterLink to="/projects" class="navlink">项目</RouterLink>
     </nav>
     <div class="search">
-      <input v-model="searchText" @input="onSearch" placeholder="搜索项目 / 会话" />
+      <input v-model="searchText" placeholder="搜索项目 / 会话" @input="onSearch" />
       <div v-if="searchResults.length" class="dropdown">
-        <div
-          v-for="r in searchResults"
-          :key="r.type + r.id"
-          class="item"
-          @click="pickItem(r)"
-        >
+        <div v-for="r in searchResults" :key="r.type + r.id" class="item" @click="pickItem(r)">
           <span class="tag">{{ r.type === 'project' ? '项目' : '会话' }}</span> {{ r.title }}
         </div>
       </div>

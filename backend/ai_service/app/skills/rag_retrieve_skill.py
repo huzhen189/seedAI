@@ -5,10 +5,11 @@
   - 对内 Tool(tools.rag_retrieve):generate_site 的 Planner 检索上下文增强生成质量
 本质复用 tools.rag_retrieve.rag_retrieve 同一函数(§5.9 澄清)。
 """
+
 from __future__ import annotations
 
-from ..tools.rag_retrieve import rag_retrieve
 from ..registry import register_skill
+from ..tools.rag_retrieve import rag_retrieve
 
 
 async def rag_retrieve_skill(model_id: str, messages: list, **kwargs) -> dict:

@@ -1,7 +1,9 @@
 """AI 服务配置(仅内网)。从项目根 .env 加载(extra="ignore" 容忍未声明变量)。"""
+
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 # 用绝对路径定位项目根目录的 .env,不受启动目录影响。
 # 之前用相对 env_file=".env",本地从 backend/ai_service/app 启动时找不到根 .env,
@@ -17,7 +19,9 @@ class Settings(BaseSettings):
     # 模型 Key(仅 AI 服务持有)
     deepseek_api_key: str = ""
     qwen_api_key: str = ""
-    qwen_base_url: str = "https://ws-rao72of9tmiy6llq.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    qwen_base_url: str = (
+        "https://ws-rao72of9tmiy6llq.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    )
     qwen_model: str = "qwen-plus"
     hy3_api_key: str = ""
     hy3_api_key_demo: str = ""

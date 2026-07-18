@@ -6,13 +6,16 @@
 FallbackRouter:按「用户主模型 + 默认降级序」在调用失败时回退到下一个可用模型,
 并可在事件流中标注 degraded(由调用方决定)。默认降级序 HY3 → Qwen → DeepSeek(§12 #31)。
 """
+
 from __future__ import annotations
 
-from typing import AsyncGenerator, List
+from collections.abc import AsyncGenerator
+from typing import List
 
 from langchain_openai import ChatOpenAI
 
 from .config import settings
+
 
 # 默认降级序(用户指定可覆盖,见 §13.2 / #31)
 FALLBACK_ORDER: List[str] = ["hy3", "qwen", "deepseek"]

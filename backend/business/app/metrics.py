@@ -5,15 +5,12 @@
 - 管理页通过 /admin/metrics(SSE) 实时订阅。
 MVP 不引 Prometheus;后期可平滑替换为 /metrics 暴露文本格式。
 """
+
 import logging
 import time
-from typing import Optional
-
-import redis.asyncio as aioredis
-from fastapi import Request, Response
 
 from .cache import get_redis
-from .config import settings
+
 
 logger = logging.getLogger("business.metrics")
 
@@ -54,8 +51,7 @@ async def snapshot() -> dict:
         pipe.get("stats:requests:error")
         pipe.hgetall("stats:model_usage")
         pipe.get("stats:rpm:now")
-        await pipe.execute()
-        total, err, usage, _ = pipe
+        total, err, usage, _ = await pipe.execute()
         minute = int(time.time() // 60)
         rpm = await r.get(f"stats:rpm:{minute}") or 0
         return {
