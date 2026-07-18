@@ -60,21 +60,31 @@ export function startChat(opts: StartChatOptions): EventSource {
     if (me.data) {
       const d = safeParse(me.data)
       const msg = String(d.message || me.data)
-      // 鉴权失败(后端经 SSE error 事件下发 AUTH_REQUIRED / "Missing authentication"):
-      // 主动弹出登录框,并给出明确提示。
-      const isAuthErr =
-        d.code === 'AUTH_REQUIRED' ||
+      const code = String(d.code || '')
+      // 按后端下发的错误码给出明确提示,而非笼统“连接中断”。
+      if (code === 'UPSTREAM_ERROR') {
+        opts.cb.onError?.('AI 服务暂时不可用，请稍后重试')
+      } else if (code === 'RATE_LIMITED') {
+        opts.cb.onError?.('请求过于频繁，请稍后再试')
+      } else if (code === 'AUTH_REQUIRED') {
+        // 鉴权失败:主动弹出登录框。
+        notifyAuthRequired()
+        opts.cb.onError?.('登录已失效，请重新登录')
+      } else if (
         /missing authentication|not authenticated|未登录|invalid or expired token|^\s*401\b/i.test(
           msg,
         )
-      if (isAuthErr) {
+      ) {
+        // 兜底:无 code 但文案为鉴权失败。
         notifyAuthRequired()
         opts.cb.onError?.('登录已失效，请重新登录')
       } else {
-        opts.cb.onError?.(msg)
+        // 其他服务端错误:显示后端给出的 message(默认也给出可读文案)。
+        opts.cb.onError?.(msg || '服务异常，请稍后重试')
       }
     } else {
-      // 无 data:多为网络中断;若用户态本应在登录态,也提示重新登录。
+      // 无 data:多为网络中断(连接被重置/服务不可达);EventSource 对
+      // 非 2xx 也会以无 data error 触发,故提示“检查网络或重新登录”。
       opts.cb.onError?.('连接中断，请检查网络或重新登录')
     }
     es.close()

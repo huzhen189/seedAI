@@ -67,22 +67,52 @@ async def _resolve_user(request: Request) -> CurrentUser | None:
         return None
 
 
-def _sse_auth_error() -> StreamingResponse:
-    """鉴权失败时返回一条 SSE error 事件(而非 JSON 401)。
+def _error_frame(code: str, message: str) -> str:
+    """构造一条标准 SSE error 帧文本(供生成器 yield)。"""
+    return (
+        "event: error\n"
+        f"data: {json.dumps({'code': code, 'message': message}, ensure_ascii=False)}\n\n"
+    )
 
-    浏览器 EventSource 读不到 HTTP 401 状态码,只能解析 SSE 帧;
-    故用标准 SSE 帧下发 AUTH_REQUIRED,前端即可主动弹出登录框。
+
+def _sse_error_frame(code: str, message: str) -> StreamingResponse:
+    """通用 SSE error 帧响应(HTTP 200 + text/event-stream)。
+
+    浏览器 EventSource 读不到非 2xx 状态码,任何业务/上游错误都必须
+    以 SSE error 帧下发,前端才能识别并给出明确提示(而非笼统“连接中断”)。
     """
 
     async def gen():
-        yield "event: error\n"
-        yield 'data: {"message":"Missing authentication","code":"AUTH_REQUIRED"}\n\n'
+        yield _error_frame(code, message)
 
     return StreamingResponse(
         gen(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _sse_auth_error() -> StreamingResponse:
+    """鉴权失败时返回一条 SSE error 事件(而非 JSON 401)。
+
+    浏览器 EventSource 读不到 HTTP 401 状态码,只能解析 SSE 帧;
+    故用标准 SSE 帧下发 AUTH_REQUIRED,前端即可主动弹出登录框。
+    """
+    return _sse_error_frame("AUTH_REQUIRED", "Missing authentication")
+
+
+def _map_upstream_error(status: int, body: bytes) -> tuple[str, str]:
+    """把上游 HTTP 错误状态码/响应体映射成(错误码, 中文提示)。"""
+    if status == 429:
+        return "RATE_LIMITED", "请求过于频繁，请稍后再试"
+    message = "AI 服务暂时不可用，请稍后重试"
+    try:
+        data = json.loads(body)
+        if isinstance(data, dict) and data.get("detail"):
+            message = str(data["detail"])
+    except Exception:
+        pass
+    return "UPSTREAM_ERROR", message
 
 
 def _parse_messages(request: Request) -> list:
@@ -160,40 +190,48 @@ async def chat(
         timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
         assistant_parts: list[str] = []
         try:
-            async with (
-                httpx.AsyncClient(timeout=timeout) as client,
-                client.stream(
-                    "POST",
-                    f"{settings.ai_service_url}/generate",
-                    json=payload,
-                ) as resp,
-            ):
-                if resp.status_code >= 400:
-                    # 上游报错:把错误体作为单行文本透出给前端
-                    err_text = await resp.aread()
-                    yield err_text
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                try:
+                    async with client.stream(
+                        "POST",
+                        f"{settings.ai_service_url}/generate",
+                        json=payload,
+                    ) as resp:
+                        if resp.status_code >= 400:
+                            # 上游报错:翻译成 SSE error 帧(而非裸字节),
+                            # 浏览器 EventSource 才能识别并提示明确文案。
+                            err_text = await resp.aread()
+                            code, message = _map_upstream_error(resp.status_code, err_text)
+                            yield _error_frame(code, message)
+                            return
+                        event = None
+                        data_parts: list[str] = []
+                        async for raw_line in resp.aiter_lines():
+                            if raw_line == "":
+                                if event is not None or data_parts:
+                                    data = "\n".join(data_parts)
+                                    if event == "token":
+                                        assistant_parts.append(data)
+                                    # 重建标准 SSE 帧透传(兼容前端 EventSource)
+                                    frame = ""
+                                    if event:
+                                        frame += f"event: {event}\n"
+                                    frame += f"data: {data}\n\n"
+                                    yield frame.encode("utf-8")
+                                event, data_parts = None, []
+                                continue
+                            if raw_line.startswith("event:"):
+                                event = raw_line[6:].strip()
+                            elif raw_line.startswith("data:"):
+                                data_parts.append(raw_line[5:].strip())
+                                # 其他行(id:/retry:/注释)忽略透传
+                except httpx.HTTPError as e:
+                    # 上游连接/读取异常(AI 服务宕机、Redis 未起导致
+                    # /generate 入队失败而 5xx 等):下发 SSE error 帧,
+                    # 避免连接裸断让前端只能笼统报“连接中断”。
+                    logger.warning("upstream request failed: %s", e)
+                    yield _error_frame("UPSTREAM_ERROR", "AI 服务暂时不可用，请稍后重试")
                     return
-                event = None
-                data_parts: list[str] = []
-                async for raw_line in resp.aiter_lines():
-                    if raw_line == "":
-                        if event is not None or data_parts:
-                            data = "\n".join(data_parts)
-                            if event == "token":
-                                assistant_parts.append(data)
-                            # 重建标准 SSE 帧透传(兼容前端 EventSource)
-                            frame = ""
-                            if event:
-                                frame += f"event: {event}\n"
-                            frame += f"data: {data}\n\n"
-                            yield frame.encode("utf-8")
-                        event, data_parts = None, []
-                        continue
-                    if raw_line.startswith("event:"):
-                        event = raw_line[6:].strip()
-                    elif raw_line.startswith("data:"):
-                        data_parts.append(raw_line[5:].strip())
-                        # 其他行(id:/retry:/注释)忽略透传
         finally:
             # 流结束(正常/中断)均尝试落库;失败仅记录,不阻塞已返回的流
             try:
