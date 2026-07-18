@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+langgraph
+langchain-openai
+openai
+pydantic-settings
+sse-starlette
+httpx
+redis>=5.0
+# 工具链(§5.9 内置工具):缺包不影响注册,仅在调用对应工具时按需使用
+chromadb
+cos-python-sdk-v5
+beautifulsoup4
+playwright

@@ -1,0 +1,36 @@
+# ===== 密钥 / 环境 =====
+.env
+.env.local
+.env.production
+*.local.env
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+artifacts/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ===== Node / Next.js =====
+node_modules/
+.next/
+out/
+dist/
+build/
+
+# ===== 编辑器 / 系统 =====
+.DS_Store
+.idea/
+.vscode/
+
+# ===== 本地数据库 / 运行时产物 =====
+*.db
+*.sqlite
+*.sqlite3
+seedai.db
+
+# ===== 本地 Agent 工作记忆(非项目产物) =====
+.workbuddy/

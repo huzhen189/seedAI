@@ -1,0 +1,97 @@
+# SeedAI 本地/生产一体编排(M0 · 文档 §3 / §4)。
+# 服务名即内网 DNS 主机名,与 .env 中 redis/mysql/chroma/ai-service 一致。
+# 前端(frontend/nginx)对外 7100;业务服务(business)对外 7101;
+# AI 服务(ai-service)仅内网 7102;前端反向代理 /api 到 business。
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: seedai-root
+      MYSQL_DATABASE: seedai
+      MYSQL_USER: seedai
+      MYSQL_PASSWORD: seedai
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks: [seed-net]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pseedai-root"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks: [seed-net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  chroma:
+    image: chromadb/chroma:latest
+    restart: unless-stopped
+    environment:
+      CHROMA_SERVER_HOST: 0.0.0.0
+      CHROMA_SERVER_HTTP_PORT: 8000
+    volumes:
+      - chroma_data:/chroma/chroma
+    networks: [seed-net]
+
+  ai-service:
+    build: ./backend/ai_service
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CHROMA_URL: http://chroma:8000
+      AI_SERVICE_PORT: 7102
+    expose:
+      - "7102"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [seed-net]
+
+  business:
+    build: ./backend/business
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # M0 用 MySQL(aiomysql 异步驱动);本地直跑可用 .env 默认 SQLite
+      DATABASE_URL: mysql+aiomysql://seedai:seedai@mysql:3306/seedai
+      REDIS_URL: redis://redis:6379/0
+      AI_SERVICE_URL: http://ai-service:7102
+      BUSINESS_API_PORT: 7101
+    ports:
+      - "7101:7101"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ai-service:
+        condition: service_started
+    networks: [seed-net]
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "7100:80"
+    depends_on:
+      - business
+    networks: [seed-net]
+
+volumes:
+  mysql_data:
+  redis_data:
+  chroma_data:
+
+networks:
+  seed-net:
+    driver: bridge

@@ -1,0 +1,111 @@
+"""模型抽象层:Provider 注册表 + LangChain ChatOpenAI 工厂 + FallbackRouter(2-C)。
+
+所有模型均走 OpenAI 兼容协议(DeepSeek / Qwen / HY3 都是),
+因此统一用 ChatOpenAI 配 base_url 即可,新增模型只加一行注册。
+
+FallbackRouter:按「用户主模型 + 默认降级序」在调用失败时回退到下一个可用模型,
+并可在事件流中标注 degraded(由调用方决定)。默认降级序 HY3 → Qwen → DeepSeek(§12 #31)。
+"""
+from __future__ import annotations
+
+from typing import AsyncGenerator, List
+
+from langchain_openai import ChatOpenAI
+
+from .config import settings
+
+# 默认降级序(用户指定可覆盖,见 §13.2 / #31)
+FALLBACK_ORDER: List[str] = ["hy3", "qwen", "deepseek"]
+
+
+class ProviderConfig:
+    def __init__(self, id: str, label: str, base_url: str, api_key: str, model: str):
+        self.id = id
+        self.label = label
+        self.base_url = base_url
+        self.api_key = api_key
+        self.model = model
+
+
+# 注册表:前端 GET /models 拿到列表;生成时按 model_id 取
+PROVIDERS: dict[str, ProviderConfig] = {
+    "deepseek": ProviderConfig(
+        id="deepseek",
+        label="DeepSeek",
+        base_url="https://api.deepseek.com/v1",
+        api_key=settings.deepseek_api_key,
+        model="deepseek-chat",
+    ),
+    "qwen": ProviderConfig(
+        id="qwen",
+        label="Qwen",
+        base_url=settings.qwen_base_url,
+        api_key=settings.qwen_api_key,
+        model=settings.qwen_model,
+    ),
+    "hy3": ProviderConfig(
+        id="hy3",
+        label="HY3",
+        base_url=settings.hy3_base_url,
+        api_key=settings.hy3_api_key or settings.hy3_api_key_demo,
+        model=settings.hy3_model,
+    ),
+}
+
+
+def list_providers() -> list[dict]:
+    return [{"id": p.id, "label": p.label} for p in PROVIDERS.values()]
+
+
+def available_model_ids() -> List[str]:
+    """有真实 API Key 的模型列表(用于降级回退时跳过未配置模型)。"""
+    return [pid for pid, p in PROVIDERS.items() if p.api_key]
+
+
+def resolve_fallback_order(primary: str) -> List[str]:
+    """返回实际尝试顺序:[primary(若有 key)] + 其余可用模型(按 FALLBACK_ORDER)。"""
+    order: List[str] = []
+    if primary in PROVIDERS and PROVIDERS[primary].api_key:
+        order.append(primary)
+    for m in FALLBACK_ORDER:
+        if m not in order and PROVIDERS[m].api_key:
+            order.append(m)
+    if not order:  # 都没配 key,至少尝试 primary 让错误暴露
+        order = [primary] if primary in PROVIDERS else [FALLBACK_ORDER[0]]
+    return order
+
+
+def get_chat_model(model_id: str, streaming: bool = True) -> ChatOpenAI:
+    """按 model_id 构造一个可流式/非流式调用的 ChatOpenAI。"""
+    p = PROVIDERS[model_id]
+    return ChatOpenAI(
+        model=p.model,
+        api_key=p.api_key,
+        base_url=p.base_url,
+        streaming=streaming,
+        temperature=0.7,
+        max_tokens=4096,
+    )
+
+
+async def astream_with_fallback(
+    primary: str, messages: list, system: str | None = None
+) -> AsyncGenerator:
+    """流式生成,带模型降级(2-C)。
+
+    按顺序尝试模型,某个模型整体失败(首个 token 前抛异常)才回退下一个;
+    返回 (chunk, model_id) 以便调用方标注 degraded。
+    """
+    order = resolve_fallback_order(primary)
+    last_err: Exception | None = None
+    for mid in order:
+        try:
+            chat = get_chat_model(mid, streaming=True)
+            msgs = ([{"role": "system", "content": system}] if system else []) + messages
+            async for chunk in chat.astream(msgs):
+                yield chunk, mid
+            return
+        except Exception as e:  # 整体失败 → 下一个模型
+            last_err = e
+            continue
+    raise last_err or RuntimeError("所有模型均不可用")
