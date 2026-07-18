@@ -49,30 +49,6 @@ const auth = useAuth()
 const projectStore = useProjectStore()
 const convStore = useConversationStore()
 
-const models = ref<ModelInfo[]>([])
-const model = ref('hy3')
-const input = ref('')
-const generating = ref(false)
-const finished = ref(false)
-
-const stages = ref<string[]>([])
-const currentStage = ref('')
-const thinks = ref('')
-const degraded = ref(false)
-const generatedHtml = ref('')
-const previewUrl = ref<string | null>(null)
-const errorMsg = ref('')
-const traceId = ref('')
-const esRef = ref<EventSource | null>(null)
-const rating = ref<'' | 'up' | 'down'>('')
-
-const showSettings = ref(false)
-const pendingSend = ref(false)
-
-const auth = useAuth()
-const projectStore = useProjectStore()
-const convStore = useConversationStore()
-
 const messages = computed(() => convStore.messages)
 const currentProjectName = computed(
   () =>
