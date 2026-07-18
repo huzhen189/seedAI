@@ -155,7 +155,8 @@ async def chat(
     db: AsyncSession = Depends(get_db),
     model: str = Query("hy3", description="模型 id,默认主模型 hy3"),
     conversation_id: int = Query(..., description="会话 id,必填(前端先建会话)"),
-    trace_id: str | None = Query(None, description="前端生成的链路 id,用于取消"),
+    trace_id: str | None = Query(None, description="前端生成的链路 id,用于取消/续传"),
+    after: str | None = Query(None, description="断点续传:仅回放该 stream id 之后的增量(留空=全量回放)"),
 ):
     """登录后 SSE 对话端点(文档 §3.7 / §5 / §2.1 / §15.3)。
 
@@ -184,6 +185,12 @@ async def chat(
     await record_model_usage(user.id, model)
 
     payload = {"model_id": model, "messages": messages, "trace_id": tid}
+    # 续传:把 after 作为查询参数转发给 AI /generate(断点续接同一进度流)
+    gen_url = f"{settings.ai_service_url}/generate"
+    if after:
+        from urllib.parse import urlencode
+
+        gen_url += "?" + urlencode({"after": after})
 
     async def publisher():
         # read 不超时(生成可能持续数分钟),connect 给 10s
@@ -194,7 +201,7 @@ async def chat(
                 try:
                     async with client.stream(
                         "POST",
-                        f"{settings.ai_service_url}/generate",
+                        gen_url,
                         json=payload,
                     ) as resp:
                         if resp.status_code >= 400:
@@ -236,7 +243,7 @@ async def chat(
             # 流结束(正常/中断)均尝试落库;失败仅记录,不阻塞已返回的流
             try:
                 await _persist_conversation(
-                    db, user, conversation_id, model, user_text, "".join(assistant_parts)
+                    db, user, conversation_id, model, user_text, "".join(assistant_parts), tid
                 )
             except Exception as e:  # 落库失败不影响已完成生成
                 logger.warning("persist conversation failed: %s", e)
@@ -259,8 +266,13 @@ async def _persist_conversation(
     model: str,
     user_text: str,
     assistant_text: str,
+    trace_id: str,
 ) -> None:
-    """SSE 结束后落库:用户消息 + AI 回复;更新会话标题/updated_at。"""
+    """SSE 结束后落库:用户消息 + AI 回复;更新会话标题/updated_at。
+
+    幂等(重连 / 续传):同一 trace_id 只插一条 user 消息;assistant 消息按 trace_id
+    upsert(首落 insert、续传 update),避免刷新 / 重连导致重复行。
+    """
     conv = (
         await db.execute(
             select(Conversation).where(
@@ -271,16 +283,49 @@ async def _persist_conversation(
     ).scalar_one_or_none()
     if conv is None:
         return  # 会话不存在或不属于该用户,跳过落库
-    db.add(Message(conversation_id=conv.id, role="user", content=user_text, model_id=model))
-    if assistant_text:
+
+    # user 消息:同 trace_id 已存在则跳过(重连不会重复插入)
+    user_msg = (
+        await db.execute(
+            select(Message).where(
+                Message.trace_id == trace_id, Message.role == "user"
+            )
+        )
+    ).scalar_one_or_none()
+    if user_msg is None:
         db.add(
             Message(
                 conversation_id=conv.id,
-                role="assistant",
-                content=assistant_text,
+                role="user",
+                content=user_text,
                 model_id=model,
+                trace_id=trace_id,
             )
         )
+
+    # assistant 消息:首落 insert,重连续传 update(覆盖为最新完整内容)
+    if assistant_text:
+        asst_msg = (
+            await db.execute(
+                select(Message).where(
+                    Message.trace_id == trace_id, Message.role == "assistant"
+                )
+            )
+        ).scalar_one_or_none()
+        if asst_msg is None:
+            db.add(
+                Message(
+                    conversation_id=conv.id,
+                    role="assistant",
+                    content=assistant_text,
+                    model_id=model,
+                    trace_id=trace_id,
+                )
+            )
+        else:
+            asst_msg.content = assistant_text
+            asst_msg.model_id = model
+
     if not conv.title and user_text:
         conv.title = user_text[:20]
     conv.updated_at = datetime.utcnow()

@@ -96,3 +96,28 @@ class SearchItemResp(BaseModel):
     id: int
     title: str
     project_id: int | None = None
+
+
+# ---------- 管理后台(§3 RBAC) ----------
+class AdminUserResp(BaseModel):
+    """管理后台用户列表项(敏感字段不外泄)。"""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    username: str
+    nickname: str = ""
+    email: str | None = None
+    role: str
+    plan: str
+
+
+class SetRoleReq(BaseModel):
+    """变更用户角色(super_admin 仅可由种子/已有 super_admin 赋予,不能被降级)。"""
+
+    role: str = Field(pattern="^(user|admin|super_admin)$")
+
+
+class SetPlanReq(BaseModel):
+    """变更用户套餐(预留收费接入)。"""
+
+    plan: str = Field(min_length=1, max_length=16)

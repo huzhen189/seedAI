@@ -7,7 +7,7 @@
 
 import logging
 
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from .config import settings
@@ -114,6 +114,39 @@ async def init_db():
         logger.info("数据库 schema 已自动补齐缺失列: %s", ", ".join(added))
     else:
         logger.debug("数据库 schema 与 model 一致,无缺失列需补齐")
+
+    # 第三步:超级管理员种子注入(文档 §2.3)。
+    # 首次启动(或任何时候)把 SEED_SUPER_ADMIN 指定的用户名角色置为 super_admin,
+    # 解决"角色自举"问题 —— 普通注册只能得到 user,初始超管只能由该环境变量赋予。
+    await _seed_super_admin()
+
+
+async def _seed_super_admin() -> None:
+    """把 settings.seed_super_admin 指定的用户提升为 super_admin(若不存在则跳过)。"""
+    username = (settings.seed_super_admin or "").strip()
+    if not username:
+        return
+    from .models import User
+
+    try:
+        async with SessionLocal() as session:
+            user = (
+                await session.execute(select(User).where(User.username == username))
+            ).scalar_one_or_none()
+            if user is None:
+                logger.warning(
+                    "SEED_SUPER_ADMIN=%s 对应的用户不存在,跳过注入(请先注册该账号)",
+                    username,
+                )
+                return
+            if user.role != "super_admin":
+                user.role = "super_admin"
+                await session.commit()
+                logger.info("已将用户 '%s' 注入为 super_admin", username)
+            else:
+                logger.debug("用户 '%s' 已是 super_admin,无需变更", username)
+    except Exception as e:  # 种子失败不应阻断启动
+        logger.warning("super_admin 种子注入失败(已跳过): %s", e)
 
 
 async def get_db():

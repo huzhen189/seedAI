@@ -25,6 +25,31 @@ export interface ThinkEvent {
   comment?: string
 }
 
+/** 大计划 / 目标特殊节点(Planner 产出,前端渲染为「计划 / 流程」卡片)。 */
+export interface PlanEvent {
+  title?: string
+  goal?: string
+  steps?: string[]
+}
+
+/** 思考时间线中的一步:每个 agent 节点对应一步,含该步的思考文本与状态。 */
+export interface ThoughtStep {
+  stage: string
+  label: string
+  status: 'pending' | 'active' | 'done'
+  think: string
+  passed?: boolean
+  comment?: string
+}
+
+/** 用户角色(RBAC 三级)。 */
+export type Role = 'user' | 'admin' | 'super_admin'
+export const ROLE_LABELS: Record<Role, string> = {
+  user: '普通用户',
+  admin: '管理员',
+  super_admin: '超级管理员',
+}
+
 export interface PreviewEvent {
   url?: string
   stage?: string
@@ -66,6 +91,26 @@ export interface SearchItem {
 }
 
 export interface AuthUser {
+  id: number
+  username: string
+  nickname: string
+  email: string | null
+  role: string
+  plan: string
+}
+
+/** 管理后台实时指标快照(/admin/metrics SSE)。 */
+export interface MetricsSnapshot {
+  uptime_s?: number
+  requests_total?: number
+  requests_error?: number
+  requests_per_min?: number
+  model_usage?: Record<string, number>
+  error?: string
+}
+
+/** 管理后台用户列表项(/admin/users)。 */
+export interface AdminUser {
   id: number
   username: string
   nickname: string

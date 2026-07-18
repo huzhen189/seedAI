@@ -1,8 +1,10 @@
 """生成任务队列 + 进度分发(1-C: Redis 队列 + Worker 池)。
 
-- RedisBackend : 生产/真实路径。任务入 `queue:generate`(列表),Worker `BRPOP` 消费;
-  进度经 Redis PubSub 频道 `gen:progress:<trace_id>` 发布;取消经 `cancel:<trace_id>` 标记。
-- MemoryBackend: 开发兜底(无 redis 时)。进程内 asyncio.Queue,保证装 Docker 前也能本地验证闭环。
+进度持久化改造(支撑「离线继续 + 重连回放」):
+- 进度不再只走易失 PubSub,而是写入 **可回放的 Redis Stream** `gen:stream:<trace_id>`。
+  Worker 每产出一个事件就 `XADD`;订阅端先 `XRANGE` 回放历史,再 `XREAD BLOCK` 续接实时,
+  天然支持「客户端断线 → Worker 继续跑 → 重连从断点(或从头)回放」。
+- 内存兜底(MemoryBackend)同样保存历史列表,支持按索引回放。
 
 选择逻辑(get_queue):
 - 环境变量 DEV_MEMORY_QUEUE=1 或 REDIS_URL 以 memory:// 开头 → MemoryBackend
@@ -23,17 +25,28 @@ from .runner import run_skill
 
 
 _JOB_QUEUE = "queue:generate"
+_STREAM_PREFIX = "gen:stream:"  # + trace_id -> Redis Stream(可回放进度)
 
 
 class QueueBackend:
     """队列抽象。子类实现具体存储。"""
 
     async def open_channel(self, trace_id: str):
-        """建立进度订阅通道(在 enqueue 之前调用,避免丢首帧)。返回供 subscribe 使用的句柄。"""
+        """建立进度通道句柄(在 enqueue 之前调用,避免丢首帧)。返回 subscribe 使用的键。"""
         raise NotImplementedError
 
-    async def subscribe(self, handle) -> AsyncGenerator[Dict[str, Any], None]:
-        """迭代进度事件,直到终止事件。handle 来自 open_channel。"""
+    async def stream_exists(self, trace_id: str) -> bool:
+        """该 trace_id 的进度流是否已存在(用于 /generate 判断是否续接而非重新入队)。"""
+        raise NotImplementedError
+
+    async def subscribe(
+        self, trace_id: str, after: Optional[str] = None
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """迭代进度事件,直到终止事件。
+
+        - after=None:从流起点全量回放(新任务首次连接 / 重连全量回放);
+        - after=<id>:仅回放该 id 之后的增量(断点续传)。
+        """
         raise NotImplementedError
 
     async def enqueue(self, job: Dict[str, Any]) -> None:
@@ -55,17 +68,39 @@ class QueueBackend:
 class MemoryBackend(QueueBackend):
     def __init__(self):
         self._jobs: asyncio.Queue = asyncio.Queue()
-        self._progress: Dict[str, asyncio.Queue] = {}
+        self._progress: Dict[str, asyncio.Queue] = {}  # 实时转发队列
+        self._history: Dict[str, list] = {}  # trace_id -> [event, ...] 历史(可回放)
         self._cancel: set = set()
 
     async def open_channel(self, trace_id: str):
-        return self._progress.setdefault(trace_id, asyncio.Queue())
+        self._history.setdefault(trace_id, [])
+        return trace_id
 
-    async def subscribe(self, handle: asyncio.Queue) -> AsyncGenerator[Dict[str, Any], None]:
+    async def stream_exists(self, trace_id: str) -> bool:
+        return trace_id in self._history
+
+    async def subscribe(self, trace_id: str, after: Optional[str] = None):
+        history = self._history.get(trace_id, [])
+        # 回放历史(after 为 None 全量;为索引字符串时回放其后部分)
+        start = 0
+        if after is not None:
+            try:
+                start = int(after) + 1
+            except ValueError:
+                start = 0
+        for ev in history[start:]:
+            yield ev
+            if ev.get("event") in TERMINAL_EVENTS:
+                return
+        # 历史已含终止事件 -> 直接结束(无需再等实时)
+        if history and history[-1].get("event") in TERMINAL_EVENTS:
+            return
+        # 续接实时队列
+        q = self._progress.setdefault(trace_id, asyncio.Queue())
         while True:
-            event = await handle.get()
-            yield event
-            if event.get("event") in TERMINAL_EVENTS:
+            ev = await q.get()
+            yield ev
+            if ev.get("event") in TERMINAL_EVENTS:
                 break
 
     async def enqueue(self, job: Dict[str, Any]) -> None:
@@ -75,6 +110,7 @@ class MemoryBackend(QueueBackend):
         return await self._jobs.get()
 
     async def publish(self, trace_id: str, event: Dict[str, Any]) -> None:
+        self._history.setdefault(trace_id, []).append(event)
         q = self._progress.get(trace_id)
         if q is not None:
             await q.put(event)
@@ -113,23 +149,49 @@ class RedisBackend(QueueBackend):
             settings.redis_url, decode_responses=True, protocol=2
         )
 
-    async def open_channel(self, trace_id: str):
-        ps = self._r.pubsub()
-        await ps.subscribe(f"gen:progress:{trace_id}")
-        return ps
+    def _key(self, trace_id: str) -> str:
+        return f"{_STREAM_PREFIX}{trace_id}"
 
-    async def subscribe(self, ps) -> AsyncGenerator[Dict[str, Any], None]:
+    async def open_channel(self, trace_id: str):
+        # Stream 以 trace_id 为键,open 即确保后续 publish/subscribe 指向同一键。
+        return trace_id
+
+    async def stream_exists(self, trace_id: str) -> bool:
         try:
-            async for msg in ps.listen():
-                if msg.get("type") != "message":
-                    continue
-                event = json.loads(msg["data"])
-                yield event
-                if event.get("event") in TERMINAL_EVENTS:
-                    break
-        finally:
-            await ps.unsubscribe()
-            await ps.aclose()
+            return await self._r.exists(self._key(trace_id)) == 1
+        except Exception:
+            return False
+
+    async def subscribe(self, trace_id: str, after: Optional[str] = None):
+        key = self._key(trace_id)
+        last_id = after or "0"
+        # 1) 回放历史(增量或全量)
+        if after is None:
+            hist = await self._r.xrange(key, "-", "+")
+        else:
+            # 排他区间:(after, +] —— 只回放断点之后的事件
+            hist = await self._r.xrange(key, f"({after}", "+")
+        for entry_id, fields in hist:
+            event = json.loads(fields.get("event", "{}"))
+            yield event
+            last_id = entry_id
+            if event.get("event") in TERMINAL_EVENTS:
+                return
+        if hist:
+            last_id = hist[-1][0]
+        # 2) 续接实时(阻塞等待新事件)
+        while True:
+            resp = await self._r.xread({key: last_id}, block=5000, count=100)
+            if not resp:
+                # 超时:再探一次,避免长空闲误判结束;若流已含终止事件则退出
+                continue
+            for _k, entries in resp:
+                for entry_id, fields in entries:
+                    event = json.loads(fields.get("event", "{}"))
+                    yield event
+                    last_id = entry_id
+                    if event.get("event") in TERMINAL_EVENTS:
+                        return
 
     async def enqueue(self, job: Dict[str, Any]) -> None:
         await self._r.lpush(_JOB_QUEUE, json.dumps(job, ensure_ascii=False))
@@ -139,7 +201,13 @@ class RedisBackend(QueueBackend):
         return json.loads(raw)
 
     async def publish(self, trace_id: str, event: Dict[str, Any]) -> None:
-        await self._r.publish(f"gen:progress:{trace_id}", json.dumps(event, ensure_ascii=False))
+        # 持久化进度到可回放 Stream;XTRIM 限长避免无限膨胀
+        await self._r.xadd(
+            self._key(trace_id),
+            {"event": json.dumps(event, ensure_ascii=False)},
+            maxlen=5000,
+            approximate=True,
+        )
 
     async def is_cancelled(self, trace_id: str) -> bool:
         return await self._r.exists(f"cancel:{trace_id}") == 1
@@ -173,7 +241,7 @@ def get_queue() -> QueueBackend:
 
 
 async def worker_loop(concurrency: int = 1):
-    """Worker 池:消费 queue:generate,运行 run_skill,把每个事件 publish 到对应进度频道。"""
+    """Worker 池:消费 queue:generate,运行 run_skill,把每个事件 publish 到对应进度流(持久化)。"""
     q = get_queue()
 
     # 用 asyncio 任务池模拟并发 Worker

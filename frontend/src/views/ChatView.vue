@@ -3,9 +3,14 @@
 // 职责:
 //   1. 组装「项目 → 会话 → 消息」三级数据(经 project / conversation 两个 Pinia store);
 //   2. 发送:校验登录态与项目/会话,调用 startChat 建立 SSE 流,把流事件映射为本地状态;
-//   3. 鉴权门禁:未登录时点发送 -> 记 pendingSend 并弹登录框;登录成功后自动重发(见底部 watch);
-//   4. 取消:stop() 级联 cancelChat -> 业务 -> AI 中断生成(C1);
-//   5. 评价:生成完成后可对本次 trace 投 👍/👎(数据供后端统计 + 回归集)。
+//   3. 思考面板:每个 agent 节点作为时间线的一步(精准分步反馈),Planner 的「计划/目标」
+//      作为特殊节点卡片渲染;think 文本按阶段分别累积;
+//   4. 断线续传 / 重连:用 sessionStorage 记录 active trace(convId+traceId),发送时写入、
+//      done/aborted/error 清除;刷新或切换会话时若仍有未完成的 trace,以同一 traceId 重开
+//      SSE 全量回放 + 续活(后端 stream_exists 命中则续接,Worker 后台独立继续);
+//   5. 鉴权门禁:未登录时点发送 -> 记 pendingSend 并弹登录框;登录成功后自动重发;
+//   6. 取消:stop() 级联 cancelChat -> 业务 -> AI 中断生成(C1);
+//   7. 评价:生成完成后可对本次 trace 投 👍/👎。
 // 左栏是对话区 + 思考轨迹,右栏是实时预览(PreviewPane)。
 import { computed, onMounted, ref, watch } from 'vue'
 import ThoughtTrail from '../components/ThoughtTrail.vue'
@@ -17,23 +22,30 @@ import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } 
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { ModelInfo } from '../types'
+import type { ModelInfo, PlanEvent, ThoughtStep } from '../types'
+
+const STAGE_LABELS: Record<string, string> = {
+  enter_router: '路由分发',
+  dispatch: '技能调度',
+  enter_planner: '规划需求',
+  enter_coder: '编写代码',
+  enter_reviewer: '评审校验',
+  previewing: '投递预览',
+  preview: '生成预览',
+  done: '完成',
+}
 
 // ---- 本地 UI 状态 ----
-// generating:是否正在生成(控制发送/停止按钮切换、预览 loading);
-// finished:本次生成是否已结束(用于显示评价条);
-// stages/thinks:思考轨迹(ThoughtTrail 用);generatedHtml:流式累积的 HTML;
-// previewUrl:上游给出的线上预览直链(COS);traceId:本次链路 id,用于取消与评价;
-// pendingSend:登录门禁的"待重发"标记 —— 未登录时点发送会置 true,登录成功 watch 触发重发。
 const models = ref<ModelInfo[]>([])
 const model = ref('hy3')
 const input = ref('')
 const generating = ref(false)
 const finished = ref(false)
 
-const stages = ref<string[]>([])
+// 思考时间线(每步一个 agent 节点)+ 计划特殊节点;替代旧版混成一坨的 thinks 字符串。
+const thoughtSteps = ref<ThoughtStep[]>([])
+const planNodes = ref<PlanEvent[]>([])
 const currentStage = ref('')
-const thinks = ref('')
 const degraded = ref(false)
 const generatedHtml = ref('')
 const previewUrl = ref<string | null>(null)
@@ -56,11 +68,138 @@ const currentProjectName = computed(
 )
 
 // 生成本次对话的链路 id(trace_id):
-// 优先用 crypto.randomUUID(安全随机);老浏览器无该 API 时退化为"时间戳+随机"拼接,
-// 仅用于取消/评价时与后端对齐同一路生成,不要求密码学强度。
+// 优先用 crypto.randomUUID(安全随机);老浏览器无该 API 时退化为"时间戳+随机"拼接。
 function genTraceId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
   return 't' + Date.now().toString(16) + Math.random().toString(16).slice(2)
+}
+
+// ---- 重连状态(sessionStorage,刷新同标签页可恢复) ----
+const ACTIVE_KEY = 'seedai:active-gen'
+function setActiveGen(convId: number, tid: string) {
+  try {
+    sessionStorage.setItem(ACTIVE_KEY, JSON.stringify({ convId, traceId: tid }))
+  } catch {
+    /* 忽略 */
+  }
+}
+function clearActiveGen() {
+  try {
+    sessionStorage.removeItem(ACTIVE_KEY)
+  } catch {
+    /* 忽略 */
+  }
+}
+function getActiveGen(): { convId: number; traceId: string } | null {
+  try {
+    const raw = sessionStorage.getItem(ACTIVE_KEY)
+    if (!raw) return null
+    const o = JSON.parse(raw)
+    if (o && typeof o.convId === 'number' && o.traceId) return o
+  } catch {
+    /* 忽略 */
+  }
+  return null
+}
+
+// 重置「本轮生成」的展示态(不含 messages 数组,数组在 send/resume 各自处理)。
+function resetGenState() {
+  thoughtSteps.value = []
+  planNodes.value = []
+  currentStage.value = ''
+  degraded.value = false
+  generatedHtml.value = ''
+  previewUrl.value = null
+  errorMsg.value = ''
+  finished.value = false
+  rating.value = ''
+}
+
+function upsertStep(stage: string, status: ThoughtStep['status']) {
+  const label = STAGE_LABELS[stage] || stage
+  const existing = thoughtSteps.value.find((s) => s.stage === stage)
+  if (existing) existing.status = status
+  else thoughtSteps.value.push({ stage, label, status, think: '' })
+}
+function appendThink(stage: string, content: string) {
+  const step = thoughtSteps.value.find((s) => s.stage === stage)
+  if (step) step.think += content
+}
+function findAssistantIdx(): number {
+  for (let i = convStore.messages.length - 1; i >= 0; i--) {
+    if (convStore.messages[i].role === 'assistant') return i
+  }
+  return -1
+}
+
+// 统一的 SSE 事件回调:把 node/think/plan/token 映射到本地状态。
+function makeCallbacks(assistantIdx: number): ChatCallbacks {
+  return {
+    onNode: (d) => {
+      if (!d.stage) return
+      currentStage.value = d.stage
+      // 之前进行中的步骤标记为完成
+      thoughtSteps.value.forEach((s) => {
+        if (s.status === 'active') s.status = 'done'
+      })
+      if (d.stage === 'done') {
+        thoughtSteps.value.forEach((s) => (s.status = 'done'))
+      } else {
+        upsertStep(d.stage, 'active')
+      }
+      if (d.stage === 'preview' && d.url) previewUrl.value = d.url as string
+    },
+    onThink: (d) => {
+      // think 事件的阶段名不带 enter_ 前缀(planner / reviewer),
+      // 需映射到时间线里的节点步名(enter_planner / enter_reviewer)。
+      const THINK_TO_STEP: Record<string, string> = {
+        planner: 'enter_planner',
+        reviewer: 'enter_reviewer',
+      }
+      const stage = d.stage || currentStage.value
+      const stepStage = THINK_TO_STEP[stage] || stage
+      if (stepStage) appendThink(stepStage, d.content || '')
+      if (stage === 'reviewer') {
+        const step = thoughtSteps.value.find((s) => s.stage === 'enter_reviewer')
+        if (step) {
+          step.passed = d.passed
+          step.comment = d.comment
+        }
+      }
+    },
+    onPlan: (d) => {
+      planNodes.value.push({ title: d.title, goal: d.goal, steps: d.steps })
+    },
+    onToken: (t) => {
+      generatedHtml.value += t
+      const m = convStore.messages[assistantIdx]
+      if (m) m.content += t
+    },
+    onPreview: (d) => {
+      if (d.url) previewUrl.value = d.url as string
+    },
+    onDegraded: () => {
+      degraded.value = true
+    },
+    onDone: () => {
+      generating.value = false
+      finished.value = true
+      clearActiveGen()
+      convStore.loadConversations(projectStore.currentProjectId!)
+    },
+    onAborted: () => {
+      generating.value = false
+      finished.value = true
+      errorMsg.value = '已取消'
+      clearActiveGen()
+    },
+    onError: (m) => {
+      generating.value = false
+      finished.value = true
+      errorMsg.value = m
+      clearActiveGen()
+    },
+  }
 }
 
 async function loadCurrentProject() {
@@ -91,6 +230,7 @@ async function onConvChange(e: Event) {
     await convStore.loadMessages(id)
     generatedHtml.value = ''
     previewUrl.value = null
+    await maybeResume()
   }
 }
 
@@ -98,7 +238,6 @@ async function send() {
   const text = input.value.trim()
   if (!text || generating.value) return
   // 鉴权门禁:未登录不发送,记 pendingSend 并弹登录框。
-  // 登录成功后由底部 watch(auth.user) 检测到 user 变化,清 pendingSend 并重调 send()。
   if (!auth.user.value) {
     pendingSend.value = true
     auth.openLogin()
@@ -114,21 +253,13 @@ async function send() {
     await convStore.create(pid, text.slice(0, 20))
   }
 
-  // 重置本次生成状态(避免与上一轮残留混淆)
-  stages.value = []
-  currentStage.value = ''
-  thinks.value = ''
-  degraded.value = false
-  generatedHtml.value = ''
-  previewUrl.value = null
-  errorMsg.value = ''
-  finished.value = false
-  rating.value = ''
+  resetGenState()
   traceId.value = genTraceId()
+  const cid = convStore.currentConvId!
+  setActiveGen(cid, traceId.value)
 
   // 乐观更新:先把用户消息 + 一个空 assistant 占位塞进消息列表,
   // 后续 token 事件直接累加到 assistant 占位上,实现"打字机"效果。
-  const cid = convStore.currentConvId!
   convStore.messages.push({
     role: 'user',
     content: text,
@@ -149,46 +280,6 @@ async function send() {
   generating.value = true
   input.value = ''
 
-  // 把 SSE 事件映射到本地状态:node=阶段进度 / think=思考累积 / token=HTML 累积 /
-  // preview=线上预览直链 / degraded=模型降级 / done=结束 / aborted=取消 / error=报错。
-  const cb: ChatCallbacks = {
-    onNode: (d) => {
-      if (d.stage) {
-        currentStage.value = d.stage
-        if (d.stage && !stages.value.includes(d.stage)) stages.value.push(d.stage)
-        if (d.stage === 'preview' && d.url) previewUrl.value = d.url as string
-      }
-    },
-    onThink: (d) => {
-      if (d.content) thinks.value += d.content
-    },
-    onToken: (t) => {
-      generatedHtml.value += t
-      convStore.messages[assistantIdx].content += t
-    },
-    onPreview: (d) => {
-      if (d.url) previewUrl.value = d.url as string
-    },
-    onDegraded: () => {
-      degraded.value = true
-    },
-    onDone: () => {
-      generating.value = false
-      finished.value = true
-      convStore.loadConversations(pid)
-    },
-    onAborted: () => {
-      generating.value = false
-      finished.value = true
-      errorMsg.value = '已取消'
-    },
-    onError: (m) => {
-      generating.value = false
-      finished.value = true
-      errorMsg.value = m
-    },
-  }
-
   esRef.value = startChat({
     model: model.value,
     messages: convStore.messages.map((m) => ({
@@ -197,15 +288,45 @@ async function send() {
     })),
     traceId: traceId.value,
     conversationId: cid,
-    cb,
+    cb: makeCallbacks(assistantIdx),
   })
+}
+
+// 重连:以同一 traceId 重开 SSE 全量回放(后端命中 stream_exists 则续接,不重新生成)。
+async function resume(convId: number, tid: string) {
+  resetGenState()
+  // 已加载的 assistant 消息内容清空,交由回放重新累积(避免重复)。
+  const idx = findAssistantIdx()
+  if (idx >= 0) convStore.messages[idx].content = ''
+  generating.value = true
+  traceId.value = tid
+  setActiveGen(convId, tid)
+  esRef.value = startChat({
+    model: model.value,
+    messages: convStore.messages.map((m) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    })),
+    traceId: tid,
+    conversationId: convId,
+    cb: makeCallbacks(idx),
+  })
+}
+
+// 若当前存在未完成的 active 生成,则重连恢复(刷新/切会话时调用)。
+async function maybeResume() {
+  const ag = getActiveGen()
+  if (!ag || generating.value) return
+  if (convStore.currentConvId !== ag.convId) {
+    await convStore.loadMessages(ag.convId)
+  }
+  resume(ag.convId, ag.traceId)
 }
 
 async function stop() {
   if (!generating.value) return
   generating.value = false
-  // 级联取消(C1):通知业务 /api/cancel -> 业务转发 AI /cancel -> Worker 中断生成,
-  // 省下后续 token 成本;同时关闭本地 EventSource 不再消费。
+  // 级联取消(C1):通知业务 /api/cancel -> 业务转发 AI /cancel -> Worker 中断生成。
   if (traceId.value) await cancelChat(traceId.value)
   esRef.value?.close()
   esRef.value = null
@@ -217,13 +338,13 @@ async function rate(r: 'up' | 'down') {
 }
 
 onMounted(async () => {
-  // 启动顺序:先恢复登录态(/auth/me,未登录返回 null 不阻塞) -> 拉模型列表供选择器
-  // -> 加载项目 -> 载入当前项目的首个会话消息。
+  // 启动顺序:先恢复登录态(/auth/me) -> 拉模型列表 -> 加载项目 -> 载入首个会话。
   await auth.init()
   const m = await fetchModels()
   if (m.length) models.value = m
   await projectStore.load()
   await loadCurrentProject()
+  await maybeResume()
 })
 
 watch(
@@ -231,9 +352,9 @@ watch(
   async (id) => {
     if (id != null) {
       await convStore.loadConversations(id)
-      if (convStore.conversations.length)
-        await convStore.loadMessages(convStore.conversations[0].id)
+      if (convStore.conversations.length) await convStore.loadMessages(convStore.conversations[0].id)
       else convStore.messages = []
+      await maybeResume()
     }
   },
 )
@@ -244,6 +365,7 @@ watch(
     if (id != null) {
       await convStore.loadMessages(id)
       convStore.pendingConvId = null
+      await maybeResume()
     }
   },
 )
@@ -251,9 +373,7 @@ watch(
 watch(
   () => auth.user,
   (u) => {
-    // 登录成功(thinking:user 从 null 变为有值):关闭登录框;
-    // 若此前是"未登录点发送"触发的门禁(pendingSend=true),则自动重发那条消息,
-    // 用户无感知地完成"弹窗登录 → 继续对话"的闭环。
+    // 登录成功后关闭登录框;若此前是"未登录点发送"触发的门禁,则自动重发。
     if (u) {
       auth.closeLogin()
       if (pendingSend.value) {
@@ -286,10 +406,10 @@ watch(
         <MessageBubble v-for="(m, i) in messages" :key="i" :role="m.role" :content="m.content" />
       </div>
 
-      <div v-if="stages.length || thinks" class="trail-wrap">
+      <div v-if="thoughtSteps.length || planNodes.length" class="trail-wrap">
         <ThoughtTrail
-          :stages="stages"
-          :thinks="thinks"
+          :steps="thoughtSteps"
+          :plans="planNodes"
           :degraded="degraded"
           :current="currentStage"
         />
@@ -387,7 +507,7 @@ watch(
   padding: 14px;
 }
 .trail-wrap {
-  max-height: 30%;
+  max-height: 32%;
   overflow: auto;
   background: var(--panel);
   border-top: 1px solid var(--border);

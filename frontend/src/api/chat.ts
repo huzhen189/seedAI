@@ -1,9 +1,10 @@
-import type { ChatMessage, ModelInfo, NodeEvent, ThinkEvent } from '../types'
+import type { ChatMessage, ModelInfo, NodeEvent, PlanEvent, ThinkEvent } from '../types'
 import { notifyAuthRequired } from '../stores/auth'
 
 export interface ChatCallbacks {
   onNode?: (data: NodeEvent) => void
   onThink?: (data: ThinkEvent) => void
+  onPlan?: (data: PlanEvent) => void
   onToken?: (text: string) => void
   onPreview?: (data: NodeEvent) => void
   onDegraded?: (data: unknown) => void
@@ -18,6 +19,8 @@ export interface StartChatOptions {
   traceId: string
   conversationId: number
   cb: ChatCallbacks
+  /** 断点续传:指定后仅回放该 stream id 之后的增量(留空=全量回放)。 */
+  after?: string
 }
 
 /** 打开与业务服务的 SSE 对话流(需登录 Cookie + conversation_id)。返回 EventSource 以便取消。 */
@@ -27,6 +30,7 @@ export function startChat(opts: StartChatOptions): EventSource {
   params.set('messages', JSON.stringify(opts.messages))
   params.set('trace_id', opts.traceId)
   params.set('conversation_id', String(opts.conversationId))
+  if (opts.after) params.set('after', opts.after)
 
   const es = new EventSource(`/api/chat?${params.toString()}`)
   const safeParse = (raw: string): any => {
@@ -39,6 +43,7 @@ export function startChat(opts: StartChatOptions): EventSource {
 
   es.addEventListener('node', (e) => opts.cb.onNode?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('think', (e) => opts.cb.onThink?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('plan', (e) => opts.cb.onPlan?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('token', (e) => {
     const d = safeParse((e as MessageEvent).data)
     const text = typeof d.data === 'string' ? d.data : (e as MessageEvent).data

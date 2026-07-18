@@ -23,8 +23,16 @@ from ..registry import register_skill
 
 
 SYS_PLANNER = (
-    "你负责把用户的建站需求拆解成简短的结构化规格,包含:板块划分、整体布局、视觉风格、"
-    "技术选型建议。用中文,2~4 段即可,不要输出代码。"
+    "你负责把用户的建站需求拆解成结构化规格。请**只输出一个 JSON 对象**(不要代码块围栏、"
+    "不要多余解释),字段如下:\n"
+    "{\n"
+    '  "title": "网站标题(简短,≤12字)",\n'
+    '  "goal": "本次生成要达成的核心目标(1句话)",\n'
+    '  "steps": ["步骤1", "步骤2", ...],   // 3~6 个有序执行步骤,每步一句话\n'
+    '  "reasoning": "拆解思路与关键取舍(2~4 句自由文本)"\n'
+    "}\n"
+    "要求:板块划分 / 整体布局 / 视觉风格 / 技术选型建议都体现在 steps 与 reasoning 中;"
+    '用中文;steps 为可执行的有序清单。'
 )
 SYS_CODER = (
     "你是一名资深前端工程师。根据用户需求(及上方需求规格),生成一个【单文件 HTML】,"
@@ -66,6 +74,39 @@ def _extract_html(text: str) -> str:
         if text.lstrip().lower().startswith(("html", "HTML")):
             text = text.lstrip()[4:]
     return text.strip()
+
+
+def _parse_plan(raw: str) -> dict:
+    """把 Planner 的 JSON 输出安全解析为计划结构。
+
+    失败兜底:用原文首行当 title、按换行拆 steps,保证前端至少有一个特殊节点可渲染。
+    """
+    import json
+    import re
+
+    try:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        data = json.loads(m.group(0)) if m else {}
+    except Exception:
+        data = {}
+    title = str(data.get("title") or "").strip() or (raw.strip().splitlines()[0][:24] if raw.strip() else "建站计划")
+    goal = str(data.get("goal") or "").strip()
+    reasoning = str(data.get("reasoning") or "").strip()
+    steps_raw = data.get("steps") or []
+    steps: list[str] = []
+    for s in steps_raw:
+        if isinstance(s, dict):
+            s = s.get("text") or s.get("step") or ""
+        s = str(s).strip()
+        if s:
+            steps.append(s)
+    if not steps:  # 兜底:把 reasoning/原文按句拆成步骤
+        for line in re.split(r"[\n;；]", reasoning or raw):
+            line = line.strip().lstrip("0123456789.、)。) ")
+            if len(line) > 2:
+                steps.append(line)
+        steps = steps[:6]
+    return {"title": title, "goal": goal, "reasoning": reasoning, "steps": steps}
 
 
 def _review(model_id: str, html: str) -> Dict:
@@ -119,7 +160,17 @@ async def generate_stream(
     # 1) Planner
     yield ev("node", stage="enter_planner")
     spec = _chat(model_id, SYS_PLANNER, messages)
-    yield ev("think", stage="planner", content=spec)
+    plan = _parse_plan(spec)
+    # 思考流:Planner 的拆解思路(分步思考的一部分)
+    if plan.get("reasoning"):
+        yield ev("think", stage="planner", content=plan["reasoning"])
+    # 特殊节点:大计划 / 目标(title/goal/steps),前端渲染为「计划 / 流程」卡片
+    yield ev(
+        "plan",
+        title=plan.get("title", ""),
+        goal=plan.get("goal", ""),
+        steps=plan.get("steps", []),
+    )
 
     # 2) Coder(流式,带模型降级 2-C)
     yield ev("node", stage="enter_coder")

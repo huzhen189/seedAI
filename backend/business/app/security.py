@@ -90,7 +90,32 @@ def get_current_user(
         )
 
 
+# 角色常量(与 User.role 字段、文档 §3 RBAC 三级保持一致)。
+ROLE_SUPER_ADMIN = "super_admin"
+ROLE_ADMIN = "admin"
+ROLE_USER = "user"
+
+
+def is_super_admin(user: CurrentUser) -> bool:
+    return user.role == ROLE_SUPER_ADMIN
+
+
 def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
-    if user.role != "admin":
+    """管理页只读权限:super_admin 或 admin 均可进入后台(文档 §3)。
+
+    注意:此前实现只放行 `admin`,会把 super_admin 也挡在门外(与文档冲突),
+    这里改为双角色放行。
+    """
+    if user.role not in (ROLE_ADMIN, ROLE_SUPER_ADMIN):
         raise HTTPException(status_code=403, detail="Admin only")
+    return user
+
+
+def require_super_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    """控制面 / 用户与角色管理权限:仅 super_admin(文档 §3)。
+
+    普通 admin 仅能查看后台,不能执行控制面与角色管理。
+    """
+    if user.role != ROLE_SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Super admin only")
     return user

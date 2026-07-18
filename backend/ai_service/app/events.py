@@ -2,7 +2,9 @@
 
 事件类型:
 - node      : agent 节点进入/离开(stage 字段标明阶段)
-- think     : 各 agent 的思考/推理文本(content)
+- think     : 各 agent 的思考/推理文本(content);分步实时反馈(每一步精准反馈)
+- plan      : 大的计划 / 目标特殊节点(title/goal/steps)——前端渲染为「计划/流程」卡片,
+              区别于普通 think 文本(如 Planner 产出的结构化需求规格)
 - token     : Coder 产出的 HTML 字符流(data 为字符串,进预览)
 - error     : 错误(随后结束)
 - done      : 结束(随后断连)

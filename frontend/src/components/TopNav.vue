@@ -48,6 +48,12 @@ function goSettings() {
     <nav class="nav">
       <RouterLink to="/" class="navlink">对话</RouterLink>
       <RouterLink to="/projects" class="navlink">项目</RouterLink>
+      <RouterLink
+        v-if="user && (user.role === 'admin' || user.role === 'super_admin')"
+        to="/admin"
+        class="navlink"
+        >管理</RouterLink
+      >
     </nav>
     <div class="search">
       <input v-model="searchText" placeholder="搜索项目 / 会话" @input="onSearch" />

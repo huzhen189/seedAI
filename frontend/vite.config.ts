@@ -20,6 +20,11 @@ export default defineConfig({
         target: process.env.VITE_API_TARGET || 'http://seedapi.huzhen.net.cn:7101',
         changeOrigin: true,
       },
+      // 管理后台(§10):/admin/* 同样代理到业务服务(同源,Cookie 随请求自动携带)
+      '/admin': {
+        target: process.env.VITE_API_TARGET || 'http://seedapi.huzhen.net.cn:7101',
+        changeOrigin: true,
+      },
       // 登录/注册等鉴权接口也代理到业务服务(同源,Cookie 可随请求自动携带)
       '/auth': {
         target: process.env.VITE_API_TARGET || 'http://seedapi.huzhen.net.cn:7101',

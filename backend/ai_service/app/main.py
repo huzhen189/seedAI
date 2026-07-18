@@ -107,22 +107,29 @@ async def registry_summary():
 
 
 @app.post("/generate")
-async def generate(req: GenerateReq):
-    """SSE 生成端点:入队 → 订阅进度频道 → 透传事件流(§3.7 / 1-C)。"""
+async def generate(req: GenerateReq, after: str | None = None):
+    """SSE 生成端点:入队 → 订阅进度流 → 透传事件流(§3.7 / 1-C)。
+
+    - trace_id 已存在(进度流已建立)→ **续接已有流**(回放 + 实时),不再重新入队;
+      这是「离线继续 + 重连回放」的关键:Worker 独立运行,断线重连只是重新订阅同一流。
+    - after 为断点(stream id):仅回放其后的增量;为 None 则从头全量回放。
+    """
     q = get_queue()
     trace_id = req.trace_id or uuid.uuid4().hex
-    job = {
-        "trace_id": trace_id,
-        "model_id": req.model_id,
-        "messages": req.messages,
-        "skill": req.skill,
-    }
-    # 先建立订阅(避免丢首帧),再入队
-    channel = await q.open_channel(trace_id)
-    await q.enqueue(job)
+    resuming = await q.stream_exists(trace_id)
+    if not resuming:
+        # 新任务:建立通道(避免丢首帧)后入队,Worker 消费并 publish 到进度流
+        await q.open_channel(trace_id)
+        job = {
+            "trace_id": trace_id,
+            "model_id": req.model_id,
+            "messages": req.messages,
+            "skill": req.skill,
+        }
+        await q.enqueue(job)
 
     async def stream():
-        async for event in q.subscribe(channel):
+        async for event in q.subscribe(trace_id, after):
             yield to_sse(event)
 
     return EventSourceResponse(stream())

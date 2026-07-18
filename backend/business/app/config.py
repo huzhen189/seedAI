@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     access_token_ttl: int = 1800  # 30 min
     refresh_token_ttl: int = 7 * 24 * 3600  # 7 days
 
+    # 超级管理员种子(文档 §2.3):首次启动把该用户名的角色置为 super_admin。
+    # 避免角色自举漏洞 —— 不允许自助注册成 super_admin,只能由种子/已有 super_admin 赋予。
+    seed_super_admin: str = ""
+
     # 缓存默认 TTL
     cache_user_ttl: int = 1800  # 30 min
 

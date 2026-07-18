@@ -22,7 +22,7 @@ class User(Base):
         String(128), unique=True, index=True, nullable=True
     )
     password_hash: Mapped[str] = mapped_column(String(255), default="")
-    role: Mapped[str] = mapped_column(String(16), default="user")  # user | admin
+    role: Mapped[str] = mapped_column(String(16), default="user")  # user | admin | super_admin
     plan: Mapped[str] = mapped_column(String(16), default="free")  # 收费预留
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -66,4 +66,7 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(16))  # user | assistant
     content: Mapped[str] = mapped_column(Text)
     model_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # 链路 id:同一 trace_id 的多次(重连/续传)SSE 落库据此幂等 —— 用户消息只插一次,
+    # assistant 消息按 trace_id upsert,避免刷新/重连导致重复行(§15.3 / 重连机制)。
+    trace_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
