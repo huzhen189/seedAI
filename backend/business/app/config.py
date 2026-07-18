@@ -31,6 +31,16 @@ class Settings(BaseSettings):
         # 兼容旧键 MYSQL_URL:仅在仍取 SQLite 默认值且提供了 MYSQL_URL 时切换
         if self.database_url.startswith("sqlite") and self.mysql_url:
             self.database_url = self.mysql_url
+        # 业务端使用异步 SQLAlchemy,MySQL 必须是异步驱动(mysql+aiomysql)。
+        # .env 里常写同步驱动(mysql+pymysql)或裸 mysql://,这里自动升级为异步,
+        # 保持与 docker-compose(DATABASE_URL=mysql+aiomysql)一致 —— 本地直跑也能连同一套 MySQL,
+        # 不改 .env 的库地址/账号(那套是用户统一的)。
+        u = self.database_url
+        if u.startswith("mysql+pymysql://"):
+            u = "mysql+aiomysql://" + u[len("mysql+pymysql://"):]
+        elif u.startswith("mysql://"):
+            u = "mysql+aiomysql://" + u[len("mysql://"):]
+        self.database_url = u
 
     # JWT
     jwt_secret: str = "dev-secret-change-me"
