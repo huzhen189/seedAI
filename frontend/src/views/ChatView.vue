@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import ModelSelector from '../components/ModelSelector.vue'
 import ThoughtTrail from '../components/ThoughtTrail.vue'
 import PreviewPane from '../components/PreviewPane.vue'
@@ -34,7 +34,11 @@ const esRef = ref<EventSource | null>(null)
 const rating = ref<'' | 'up' | 'down'>('')
 
 // 登录态(模块级单例,跨组件共享)
-const { user, ready, init, doLogout } = useAuth()
+const { user, init, doLogout } = useAuth()
+
+// 提交时若未登录,弹窗引导登录;登录成功后自动重发
+const showAuth = ref(false)
+const pendingSend = ref(false)
 
 function genTraceId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
@@ -49,6 +53,13 @@ function pushStage(stage: string) {
 async function send() {
   const text = input.value.trim()
   if (!text || generating.value) return
+
+  // 提交门禁:未登录则弹窗引导登录,登录成功由 watch(user) 自动重发
+  if (!user.value) {
+    pendingSend.value = true
+    showAuth.value = true
+    return
+  }
 
   // 重置本次生成状态
   stages.value = []
@@ -121,22 +132,31 @@ async function rate(r: 'up' | 'down') {
 }
 
 onMounted(async () => {
-  // 先确认登录态;未登录时由 AuthPanel 拦截,不拉模型也不允许对话
+  // 确认登录态(不拦截主页);同时拉取模型列表
   await init()
   const m = await fetchModels()
   if (m.length) models.value = m
 })
+
+// 登录成功后,若本次提交曾被拦截,则自动重发
+watch(user, (u) => {
+  if (u && pendingSend.value) {
+    pendingSend.value = false
+    send()
+  }
+})
 </script>
 
 <template>
-  <AuthPanel v-if="ready && !user" />
-
-  <div v-else-if="ready && user" class="app">
+  <div class="app">
     <header class="topbar">
       <div class="brand">SeedAI · 建站助手</div>
       <div class="right">
-        <span class="user">{{ user.username }}</span>
-        <button class="logout" @click="doLogout">退出</button>
+        <template v-if="user">
+          <span class="user">{{ user.username }}</span>
+          <button class="logout" @click="doLogout">退出</button>
+        </template>
+        <button v-else class="login-btn" @click="showAuth = true">登录 / 注册</button>
         <ModelSelector :models="models" v-model:model="model" />
       </div>
     </header>
@@ -183,7 +203,7 @@ onMounted(async () => {
     </footer>
   </div>
 
-  <div v-else class="loading-screen">加载中…</div>
+  <AuthPanel v-if="showAuth" @close="showAuth = false" />
 </template>
 
 <style scoped>
@@ -230,6 +250,19 @@ onMounted(async () => {
   cursor: pointer;
   font-size: 12px;
   color: var(--muted);
+}
+.login-btn {
+  border: 1px solid var(--brand);
+  background: var(--brand);
+  color: #fff;
+  border-radius: 8px;
+  padding: 5px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+.login-btn:hover {
+  opacity: 0.92;
 }
 .loading-screen {
   display: flex;

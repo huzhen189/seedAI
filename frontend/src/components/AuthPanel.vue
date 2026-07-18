@@ -2,12 +2,14 @@
 import { ref } from 'vue'
 import { useAuth } from '../composables/useAuth'
 
+const emit = defineEmits<{ close: [] }>()
 const { doLogin, doRegister } = useAuth()
 
 const mode = ref<'login' | 'register'>('login')
 const username = ref('')
 const password = ref('')
 const email = ref('')
+const showPwd = ref(false)
 const err = ref('')
 const busy = ref(false)
 
@@ -24,6 +26,7 @@ async function submit() {
     } else {
       await doRegister(username.value.trim(), password.value, email.value.trim() || undefined)
     }
+    // 登录成功由父组件 watch(user) 关闭弹窗,此处不重复关闭
   } catch (e: any) {
     err.value = e?.message || '操作失败'
   } finally {
@@ -33,29 +36,42 @@ async function submit() {
 </script>
 
 <template>
-  <div class="auth-mask">
+  <div class="auth-mask" @click.self="emit('close')">
     <div class="auth-card">
+      <button class="close-x" @click="emit('close')" aria-label="关闭">×</button>
       <div class="title">SeedAI · {{ mode === 'login' ? '登录' : '注册' }}</div>
       <div class="sub">登录后才能开始对话</div>
 
       <input v-model="username" placeholder="用户名" autocomplete="username" />
+
       <input
         v-if="mode === 'register'"
         v-model="email"
         placeholder="邮箱(可选)"
         autocomplete="email"
       />
-      <input
-        v-model="password"
-        type="password"
-        placeholder="密码(至少 6 位)"
-        autocomplete="current-password"
-        @keyup.enter="submit"
-      />
+
+      <div class="pwd-wrap">
+        <input
+          v-model="password"
+          :type="showPwd ? 'text' : 'password'"
+          placeholder="密码(至少 6 位)"
+          autocomplete="current-password"
+          @keyup.enter="submit"
+        />
+        <button
+          type="button"
+          class="eye"
+          @click="showPwd = !showPwd"
+          :title="showPwd ? '隐藏密码' : '显示密码'"
+        >
+          {{ showPwd ? '🙈' : '👁' }}
+        </button>
+      </div>
 
       <div v-if="err" class="err">{{ err }}</div>
 
-      <button :disabled="busy" @click="submit">
+      <button class="submit" :disabled="busy" @click="submit">
         {{ busy ? '处理中…' : mode === 'login' ? '登录' : '注册并登录' }}
       </button>
 
@@ -82,6 +98,7 @@ async function submit() {
   z-index: 50;
 }
 .auth-card {
+  position: relative;
   width: 320px;
   background: #fff;
   border: 1px solid var(--border);
@@ -91,6 +108,17 @@ async function submit() {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+.close-x {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
 }
 .title {
   font-size: 18px;
@@ -114,11 +142,29 @@ async function submit() {
 .auth-card input:focus {
   border-color: var(--brand);
 }
+.pwd-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.pwd-wrap input {
+  flex: 1;
+  padding-right: 38px;
+}
+.eye {
+  position: absolute;
+  right: 6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
 .err {
   color: var(--err);
   font-size: 12px;
 }
-.auth-card button {
+.auth-card button.submit {
   height: 40px;
   border: none;
   border-radius: 8px;
@@ -128,7 +174,7 @@ async function submit() {
   font-weight: 600;
   cursor: pointer;
 }
-.auth-card button:disabled {
+.auth-card button.submit:disabled {
   opacity: 0.6;
   cursor: default;
 }
