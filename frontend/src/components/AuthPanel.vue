@@ -7,6 +7,7 @@ const { doLogin, doRegister } = useAuth()
 
 const mode = ref<'login' | 'register'>('login')
 const username = ref('')
+const nickname = ref('')
 const password = ref('')
 const email = ref('')
 const showPwd = ref(false)
@@ -24,7 +25,12 @@ async function submit() {
     if (mode.value === 'login') {
       await doLogin(username.value.trim(), password.value)
     } else {
-      await doRegister(username.value.trim(), password.value, email.value.trim() || undefined)
+      await doRegister(
+        username.value.trim(),
+        password.value,
+        email.value.trim() || undefined,
+        nickname.value.trim() || undefined,
+      )
     }
     // 登录成功由父组件 watch(user) 关闭弹窗,此处不重复关闭
   } catch (e: any) {
@@ -43,6 +49,13 @@ async function submit() {
       <div class="sub">登录后才能开始对话</div>
 
       <input v-model="username" placeholder="用户名" autocomplete="username" />
+
+      <input
+        v-if="mode === 'register'"
+        v-model="nickname"
+        placeholder="昵称(可选,默认同用户名)"
+        autocomplete="nickname"
+      />
 
       <input
         v-if="mode === 'register'"

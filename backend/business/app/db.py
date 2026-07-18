@@ -19,6 +19,19 @@ async def init_db():
     if settings.database_url.startswith("mysql"):
         async with engine.begin() as conn:
             await conn.execute(text("SET NAMES utf8mb4;"))
+            # 兼容性迁移:新增 nickname 列(老表可能无此列,幂等)
+            try:
+                await conn.execute(
+                    text(
+                        "ALTER TABLE users ADD COLUMN nickname VARCHAR(64) NOT NULL DEFAULT ''"
+                    )
+                )
+            except Exception as e:  # 重复列(1060)等已存在场景,忽略
+                msg = str(e)
+                if "Duplicate column" in msg or "1060" in msg or "column" in msg.lower():
+                    pass
+                else:
+                    raise
 
 
 async def get_db():

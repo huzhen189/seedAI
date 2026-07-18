@@ -11,7 +11,7 @@ from .cache import cache_user_get, cache_user_set
 from .config import settings
 from .db import get_db
 from .models import User
-from .schemas import LoginReq, RefreshReq, RegisterReq, UserResp
+from .schemas import LoginReq, RefreshReq, RegisterReq, UpdateMeReq, UserResp
 from .security import (
     ACCESS_COOKIE,
     REFRESH_COOKIE,
@@ -57,6 +57,7 @@ async def register(req: RegisterReq, response: Response, db=Depends(get_db)):
 
     user = User(
         username=req.username,
+        nickname=req.nickname or req.username,
         email=req.email or "",
         password_hash=hash_password(req.password),
         role="user",
@@ -73,6 +74,7 @@ async def register(req: RegisterReq, response: Response, db=Depends(get_db)):
     return UserResp(
         id=user.id,
         username=user.username,
+        nickname=user.nickname,
         email=user.email,
         role=user.role,
         plan=user.plan,
@@ -92,6 +94,7 @@ async def login(req: LoginReq, response: Response, db=Depends(get_db)):
     return UserResp(
         id=user.id,
         username=user.username,
+        nickname=user.nickname,
         email=user.email,
         role=user.role,
         plan=user.plan,
@@ -119,6 +122,7 @@ async def refresh(req: RefreshReq, response: Response, db=Depends(get_db)):
     return UserResp(
         id=user.id,
         username=user.username,
+        nickname=user.nickname,
         email=user.email,
         role=user.role,
         plan=user.plan,
@@ -141,7 +145,53 @@ async def me(user=Depends(get_current_user), db=Depends(get_db)):
     if not u:
         raise HTTPException(status_code=404, detail="user not found")
     data = UserResp(
-        id=u.id, username=u.username, email=u.email, role=u.role, plan=u.plan
+        id=u.id,
+        username=u.username,
+        nickname=u.nickname,
+        email=u.email,
+        role=u.role,
+        plan=u.plan,
     ).model_dump()
     await cache_user_set(user.id, data)  # 回填
+    return UserResp(**data)
+
+
+@router.patch("/me", response_model=UserResp)
+async def update_me(
+    req: UpdateMeReq, user=Depends(get_current_user), db=Depends(get_db)
+):
+    """修改当前用户信息:昵称 / 邮箱 / 密码(改密码需验旧密码)。"""
+    u = await db.get(User, user.id)
+    if not u:
+        raise HTTPException(status_code=404, detail="user not found")
+
+    # 邮箱变更需查重(排除自己)
+    if req.email is not None and req.email != u.email:
+        exists = await db.scalar(
+            select(User).where((User.email == req.email) & (User.id != u.id))
+        )
+        if exists:
+            raise HTTPException(status_code=409, detail="email already exists")
+        u.email = req.email
+
+    if req.nickname is not None:
+        u.nickname = req.nickname
+
+    if req.new_password:
+        if not req.old_password or not verify_password(req.old_password, u.password_hash):
+            raise HTTPException(status_code=400, detail="old password incorrect")
+        u.password_hash = hash_password(req.new_password)
+
+    await db.commit()
+    await db.refresh(u)
+    # 更新缓存(让 /auth/me 立即生效)
+    data = UserResp(
+        id=u.id,
+        username=u.username,
+        nickname=u.nickname,
+        email=u.email,
+        role=u.role,
+        plan=u.plan,
+    ).model_dump()
+    await cache_user_set(u.id, data)
     return UserResp(**data)

@@ -14,6 +14,7 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    nickname: Mapped[str] = mapped_column(String(64), default="", server_default="")
     email: Mapped[str] = mapped_column(String(128), unique=True, index=True, default="")
     password_hash: Mapped[str] = mapped_column(String(255), default="")
     role: Mapped[str] = mapped_column(String(16), default="user")  # user | admin

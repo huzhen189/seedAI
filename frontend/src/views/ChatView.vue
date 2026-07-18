@@ -13,6 +13,7 @@ import {
 } from '../api/chat'
 import { useAuth } from '../composables/useAuth'
 import AuthPanel from '../components/AuthPanel.vue'
+import SettingsPanel from '../components/SettingsPanel.vue'
 import type { ChatMessage, ModelInfo } from '../types'
 
 const models = ref<ModelInfo[]>([])
@@ -39,6 +40,8 @@ const { user, init, doLogout } = useAuth()
 // 提交时若未登录,弹窗引导登录;登录成功后自动重发
 const showAuth = ref(false)
 const pendingSend = ref(false)
+// 用户设置面板
+const showSettings = ref(false)
 
 function genTraceId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
@@ -138,11 +141,14 @@ onMounted(async () => {
   if (m.length) models.value = m
 })
 
-// 登录成功后,若本次提交曾被拦截,则自动重发
+// 登录/注册成功后:关闭登录弹窗;若本次提交曾被拦截,则自动重发
 watch(user, (u) => {
-  if (u && pendingSend.value) {
-    pendingSend.value = false
-    send()
+  if (u) {
+    showAuth.value = false
+    if (pendingSend.value) {
+      pendingSend.value = false
+      send()
+    }
   }
 })
 </script>
@@ -153,7 +159,8 @@ watch(user, (u) => {
       <div class="brand">SeedAI · 建站助手</div>
       <div class="right">
         <template v-if="user">
-          <span class="user">{{ user.username }}</span>
+          <span class="user">{{ user.nickname || user.username }}</span>
+          <button class="settings-btn" @click="showSettings = true">设置</button>
           <button class="logout" @click="doLogout">退出</button>
         </template>
         <button v-else class="login-btn" @click="showAuth = true">登录 / 注册</button>
@@ -204,6 +211,7 @@ watch(user, (u) => {
   </div>
 
   <AuthPanel v-if="showAuth" @close="showAuth = false" />
+  <SettingsPanel v-if="showSettings" @close="showSettings = false" />
 </template>
 
 <style scoped>
@@ -250,6 +258,16 @@ watch(user, (u) => {
   cursor: pointer;
   font-size: 12px;
   color: var(--muted);
+}
+.settings-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--brand);
+  font-weight: 600;
 }
 .login-btn {
   border: 1px solid var(--brand);
