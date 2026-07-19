@@ -1,4 +1,4 @@
-import type { Conversation, Project, SearchItem } from '../types'
+import type { Artifact, Conversation, Project, SearchItem } from '../types'
 import { del, get, patch, post } from './client'
 
 export const listProjects = (): Promise<Project[]> => get('/api/projects')
@@ -21,3 +21,6 @@ export const deleteConversation = (id: number): Promise<null> =>
 
 export const search = (q: string): Promise<SearchItem[]> =>
   get(`/api/search?q=${encodeURIComponent(q)}`)
+
+export const listArtifacts = (projectId: number): Promise<Artifact[]> =>
+  get(`/api/projects/${projectId}/artifacts`)

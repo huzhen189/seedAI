@@ -12,7 +12,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_db
-from .models import Conversation, Message, Project
+from .models import Artifact, Conversation, Message, Project
 from .schemas import (
     ConversationResp,
     CreateConversationReq,
@@ -356,3 +356,42 @@ async def search(
             )
         )
     return results
+
+
+# ---------- 生成产物(Artifact · 关联到项目) ----------
+@router.get("/projects/{project_id}/artifacts")
+async def list_artifacts(
+    project_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取某项目下所有生成产物(倒序,右侧产物面板展示)。"""
+    proj = (
+        await db.execute(
+            select(Project).where(Project.id == project_id, Project.user_id == user.id)
+        )
+    ).scalar_one_or_none()
+    if proj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    rows = (
+        (
+            await db.execute(
+                select(Artifact)
+                .where(Artifact.project_id == project_id)
+                .order_by(Artifact.id.desc())
+                .limit(50)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": a.id,
+            "title": a.title,
+            "trace_id": a.trace_id,
+            "files": a.files,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+        }
+        for a in rows
+    ]

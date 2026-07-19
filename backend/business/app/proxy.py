@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import settings
 from .db import get_db
 from .metrics import consume_daily_quota, record_model_usage
-from .models import Conversation, Message, Project, User
+from .models import Artifact, Conversation, Message, Project, User
 from .schemas import FeedbackReq
 from .security import ACCESS_COOKIE, CurrentUser, decode_token, get_current_user
 from .tracing import append_trace_event, create_trace, finish_trace, log_usage
@@ -327,6 +327,31 @@ async def chat(
                     tid,
                     preview_url=preview_url,
                 )
+                # 保存生成产物(Artifact),关联到项目供右侧面板展示
+                if terminal_status == "done" and assistant_parts:
+                    try:
+                        html_size = len("".join(assistant_parts))
+                        conv = await db.get(Conversation, conversation_id)
+                        if conv is not None:
+                            db.add(
+                                Artifact(
+                                    project_id=conv.project_id,
+                                    conversation_id=conversation_id,
+                                    trace_id=tid,
+                                    title=user_text[:40] if user_text else None,
+                                    files={
+                                        "html": {
+                                            "name": "index.html",
+                                            "size": html_size,
+                                            "url": preview_url,
+                                        }
+                                    },
+                                )
+                            )
+                            await db.commit()
+                            logger.info("[chat] artifact 已保存 project=%s trace=%s", conv.project_id, tid)
+                    except Exception as e:
+                        logger.warning("[chat] artifact 保存失败: %s", e)
                 logger.info("[chat] 落库完成 trace=%s", tid)
             except Exception as e:
                 logger.warning("[chat] 落库失败 trace=%s: %s", tid, e)

@@ -123,6 +123,15 @@ export interface DbStatus {
   redis?: { ok: boolean; error?: string }
 }
 
+/** 生成产物(Artifact 表) */
+export interface Artifact {
+  id: number
+  title?: string
+  trace_id?: string
+  files?: Record<string, { name: string; size: number; url?: string }>
+  created_at?: string
+}
+
 /** 管理后台用户列表项(/admin/users)。 */
 export interface AdminUser {
   id: number

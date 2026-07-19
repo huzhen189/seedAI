@@ -19,11 +19,12 @@ import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
 import { useRouter } from 'vue-router'
 import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
+import { listArtifacts } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { warmupWebLLM } from '../composables/useWebLLM'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { ModelInfo, PlanEvent, RetryEvent, ThoughtStep } from '../types'
+import type { Artifact, ModelInfo, PlanEvent, RetryEvent, ThoughtStep } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
   enter_router: '路由分发',
@@ -52,19 +53,6 @@ const generatedHtml = ref('')
 const previewUrl = ref<string | null>(null)
 const errorMsg = ref('')
 
-// 生成产物文件列表(供右侧文件面板)
-const generatedFiles = computed(() => {
-  const files: { name: string; size: number; url?: string }[] = []
-  if (generatedHtml.value) {
-    files.push({
-      name: 'index.html',
-      size: new Blob([generatedHtml.value]).size,
-      url: previewUrl.value || undefined,
-    })
-  }
-  return files
-})
-
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B'
   if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB'
@@ -81,11 +69,25 @@ function downloadHtml() {
   a.click()
   URL.revokeObjectURL(url)
 }
+
+async function loadArtifacts() {
+  const pid = projectStore.currentProjectId
+  if (pid == null) {
+    projectArtifacts.value = []
+    return
+  }
+  try {
+    projectArtifacts.value = await listArtifacts(pid)
+  } catch {
+    projectArtifacts.value = []
+  }
+}
 const traceId = ref('')
 const esRef = ref<EventSource | null>(null)
 const rating = ref(0)
 const rateComment = ref('')
 const rateSubmitted = ref(false)
+const projectArtifacts = ref<Artifact[]>([])
 
 const pendingSend = ref(false)
 const pendingRetry = ref<{ suggested: string[]; message: string } | null>(null)
@@ -226,6 +228,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       clearActiveGen()
       convStore.loadConversations(projectStore.currentProjectId!)
+      loadArtifacts()
     },
     onAborted: () => {
       generating.value = false
@@ -425,6 +428,7 @@ onMounted(async () => {
   if (auth.user.value) {
     await projectStore.load()
     await loadCurrentProject()
+    await loadArtifacts()
     await maybeResume()
   }
 })
@@ -436,6 +440,7 @@ watch(
       await convStore.loadConversations(id)
       if (convStore.conversations.length) await convStore.loadMessages(convStore.conversations[0].id)
       else convStore.messages = []
+      await loadArtifacts()
       await maybeResume()
     }
   },
@@ -577,16 +582,26 @@ watch(pendingRetry, (r) => {
     </div>
 
     <div class="right-pane">
-      <!-- 生成产物文件面板 -->
-      <div v-if="generatedFiles.length || generating" class="artifact-panel">
+      <!-- 生成产物文件面板(按项目) -->
+      <div class="artifact-panel">
         <div class="artifact-head">📁 生成产物</div>
-        <div v-if="generating" class="artifact-empty">AI 正在生成…</div>
-        <div v-for="f in generatedFiles" :key="f.name" class="artifact-file">
-          <span class="af-name">📄 {{ f.name }}</span>
-          <span class="af-size">{{ formatFileSize(f.size) }}</span>
-          <a v-if="f.url" :href="f.url" target="_blank" class="af-open" title="线上预览">🔗</a>
-          <button v-if="!f.url && generatedHtml" class="af-dl" title="下载" @click="downloadHtml">⬇</button>
-        </div>
+        <div v-if="generating && !projectArtifacts.length" class="artifact-empty">AI 正在生成…</div>
+        <template v-for="a in projectArtifacts" :key="a.id">
+          <template v-if="a.files">
+            <div v-for="(f, _k) in a.files" :key="_k" class="artifact-file">
+              <span class="af-name">📄 {{ f.name }}</span>
+              <span class="af-size">{{ formatFileSize(f.size) }}</span>
+              <a v-if="f.url" :href="f.url" target="_blank" class="af-open" title="线上预览">🔗</a>
+              <button
+                v-else-if="generatedHtml && a.trace_id === traceId"
+                class="af-dl"
+                title="下载"
+                @click="downloadHtml"
+              >⬇</button>
+            </div>
+          </template>
+        </template>
+        <div v-if="!generating && !projectArtifacts.length" class="artifact-empty">暂无生成产物</div>
       </div>
       <PreviewPane :html="generatedHtml" :url="previewUrl" :loading="generating" />
     </div>

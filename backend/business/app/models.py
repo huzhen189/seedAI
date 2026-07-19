@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -141,4 +141,22 @@ class UsageLog(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost: Mapped[float] = mapped_column(default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Artifact(Base):
+    """生成产物:每次成功生成的最终交付物(文件列表+预览链接),关联到项目。
+
+    同项目每次生成一条 Artifact 记录,右侧产物面板按 project_id 列出所有版本。
+    """
+
+    __tablename__ = "artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, index=True)
+    conversation_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    trace_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # files: JSON 数组 [{name, size, url}], 后续多文件生成可扩展
+    files: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
