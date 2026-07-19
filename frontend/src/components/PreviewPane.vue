@@ -4,10 +4,12 @@ defineProps<{ html: string; url: string | null; loading: boolean }>()
 
 <template>
   <div class="preview">
-    <div v-if="loading && !html && !url" class="placeholder">
+    <!-- 生成中: 始终显示占位符, 不等 token 累积; 避免 srcdoc 逐帧更新导致闪烁 -->
+    <div v-if="loading" class="placeholder">
       <div class="spinner"></div>
-      <span>等待生成…</span>
+      <span>AI 正在生成网站…</span>
     </div>
+    <!-- 生成完成: 优先 COS 直链(线上预览), 兜底 srcdoc(本地渲染) -->
     <iframe
       v-else
       class="frame"
