@@ -58,11 +58,11 @@ const pausedConv = computed(() =>
 )
 
 // 消息队列: 生成中用户输入排队, 完成后自动发下一条
-const msgQueue = ref<string[]>([])
+const msgQueue = ref<{ text: string; editing: boolean }[]>([])
 const queueVisible = ref(false)
 
 function enqueue(text: string) {
-  msgQueue.value.push(text)
+  msgQueue.value.push({ text, editing: false })
   queueVisible.value = true
   input.value = ''
 }
@@ -70,8 +70,34 @@ function enqueue(text: string) {
 function dequeueAndSend() {
   const next = msgQueue.value.shift()
   if (!next) { queueVisible.value = false; return }
-  input.value = next
-  doSend(next)
+  input.value = next.text
+  doSend(next.text)
+}
+
+function editQueueItem(idx: number) {
+  const item = msgQueue.value[idx]
+  if (!item) return
+  item.editing = true
+}
+
+function saveQueueItem(idx: number, newText: string) {
+  const item = msgQueue.value[idx]
+  if (!item || !newText.trim()) return
+  item.text = newText.trim()
+  item.editing = false
+}
+
+function deleteQueueItem(idx: number) {
+  msgQueue.value.splice(idx, 1)
+  if (msgQueue.value.length === 0) queueVisible.value = false
+}
+
+function sendNowQueueItem(idx: number) {
+  const item = msgQueue.value[idx]
+  if (!item) return
+  msgQueue.value.splice(idx, 1)
+  input.value = item.text
+  doSend(item.text)
 }
 
 async function resumeConversation() {
@@ -723,8 +749,28 @@ watch(pendingRetry, (r) => {
       <div class="footer">
         <!-- 消息队列(生成中等待发送) -->
         <div v-if="queueVisible" class="queue-bar">
-          <span class="queue-label">⏳ 等待发送 ({{ msgQueue.length }})</span>
-          <div v-for="(q, i) in msgQueue" :key="i" class="queue-item">{{ q }}</div>
+          <div class="queue-head">⏳ 等待发送 ({{ msgQueue.length }})</div>
+          <div v-for="(q, i) in msgQueue" :key="i" class="queue-row">
+            <span class="queue-seq">#{{ i + 1 }}</span>
+            <template v-if="q.editing">
+              <input
+                :ref="(el: any) => el && q.editing && (el as HTMLInputElement).focus()"
+                class="queue-input"
+                :value="q.text"
+                @keyup.enter="saveQueueItem(i, ($event.target as HTMLInputElement).value)"
+                @blur="saveQueueItem(i, ($event.target as HTMLInputElement).value)"
+                @keyup.escape="q.editing = false"
+              />
+            </template>
+            <template v-else>
+              <span class="queue-text">{{ q.text }}</span>
+            </template>
+            <span class="queue-actions">
+              <button class="qbtn" title="立即发送" @click="sendNowQueueItem(i)">▶</button>
+              <button class="qbtn" title="编辑" @click="editQueueItem(i)">✏️</button>
+              <button class="qbtn qdel" title="删除" @click="deleteQueueItem(i)">✕</button>
+            </span>
+          </div>
         </div>
         <ChatInput
           v-model:value="input"
@@ -1008,7 +1054,15 @@ watch(pendingRetry, (r) => {
 .paused-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 10px; font-size: 13px; margin-bottom: 8px; }
 .paused-resume { padding: 4px 12px; border: none; border-radius: 6px; background: #10b981; color: #fff; cursor: pointer; font-size: 12px; }
 .paused-abort { padding: 4px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); cursor: pointer; font-size: 12px; }
-.queue-bar { margin-bottom: 8px; padding: 6px 10px; background: #eef2ff; border-radius: 8px; font-size: 12px; }
-.queue-label { font-weight: 600; color: #4f46e5; }
-.queue-item { padding: 2px 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-bar { margin-bottom: 8px; padding: 8px 10px; background: #eef2ff; border-radius: 8px; font-size: 12px; max-height: 200px; overflow-y: auto; }
+.queue-head { font-weight: 700; color: #4f46e5; margin-bottom: 4px; }
+.queue-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px solid #e0e7ff; }
+.queue-row:last-child { border-bottom: none; }
+.queue-seq { color: #818cf8; font-weight: 600; min-width: 20px; }
+.queue-text { flex: 1; color: #334155; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-input { flex: 1; border: 1px solid #a5b4fc; border-radius: 4px; padding: 1px 4px; font-size: 12px; outline: none; }
+.queue-actions { display: flex; gap: 2px; }
+.qbtn { border: none; background: none; cursor: pointer; font-size: 13px; padding: 1px 4px; border-radius: 3px; color: var(--muted); }
+.qbtn:hover { background: #ddd6fe; color: #4f46e5; }
+.qdel:hover { background: #fee2e2; color: #ef4444; }
 </style>
