@@ -390,15 +390,18 @@ async def chat(
         finally:
             approx_tokens = max(0, len("".join(assistant_parts)) // 4)
             logger.info(
-                "[chat] 流结束 trace=%s 状态=%s 事件数=%s tokens≈%s preview=%s",
+                "[chat] 流结束 trace=%s 状态=%s 事件数=%s tokens≈%s preview=%s assistant_text_len=%s",
                 tid,
                 terminal_status,
                 sum(event_counts.values()),
                 approx_tokens,
                 bool(preview_url),
+                len("".join(assistant_parts)),
             )
             try:
+                logger.info("[chat] 落库开始 trace=%s assistant_len=%s", tid, len("".join(assistant_parts)))
                 await finish_trace(db, tid, terminal_status, approx_tokens)
+                logger.info("[chat] finish_trace 完成 trace=%s", tid)
                 await log_usage(
                     db,
                     user.id,
@@ -407,6 +410,7 @@ async def chat(
                     model,
                     completion_tokens=approx_tokens,
                 )
+                logger.info("[chat] 开始落库消息 trace=%s", tid)
                 await _persist_conversation(
                     db,
                     user,
