@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from ..providers import get_chat_model
+from ..providers import ModelUnavailableError, get_chat_model, resolve_fallback_order
 from ..registry import register_skill
 
 
@@ -17,9 +17,16 @@ SYS_WRITE = (
 
 
 async def write_code_skill(model_id: str, messages: list, **kwargs) -> str:
-    chat = get_chat_model(model_id, streaming=False)
-    resp = chat.invoke([{"role": "system", "content": SYS_WRITE}, *messages])
-    return resp.content
+    try:
+        chat = get_chat_model(model_id, streaming=False)
+        resp = chat.invoke([{"role": "system", "content": SYS_WRITE}, *messages])
+        return resp.content
+    except Exception as e:
+        order = resolve_fallback_order(model_id)
+        suggested = [m for m in order if m != model_id]
+        raise ModelUnavailableError(
+            failed=model_id, message=f"模型 {model_id} 不可用: {e}", suggested=suggested
+        ) from e
 
 
 register_skill(

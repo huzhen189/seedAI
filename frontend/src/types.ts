@@ -32,6 +32,13 @@ export interface PlanEvent {
   steps?: string[]
 }
 
+/** 主模型不可用,携带可选替代列表,前端弹框确认后重发 */
+export interface RetryEvent {
+  failed?: string
+  suggested?: string[]
+  message?: string
+}
+
 /** 思考时间线中的一步:每个 agent 节点对应一步,含该步的思考文本与状态。 */
 export interface ThoughtStep {
   stage: string

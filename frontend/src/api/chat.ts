@@ -1,4 +1,4 @@
-import type { ChatMessage, ModelInfo, NodeEvent, PlanEvent, ThinkEvent } from '../types'
+import type { ChatMessage, ModelInfo, NodeEvent, PlanEvent, RetryEvent, ThinkEvent } from '../types'
 import { notifyAuthRequired } from '../stores/auth'
 
 export interface ChatCallbacks {
@@ -11,6 +11,8 @@ export interface ChatCallbacks {
   onDone?: () => void
   onAborted?: () => void
   onError?: (msg: string) => void
+  /** 主模型不可用时触发(data 含 failed/suggested/message),前端弹框待用户选替代模型后重发 */
+  onRetry?: (data: RetryEvent) => void
 }
 
 export interface StartChatOptions {
@@ -57,6 +59,12 @@ export function startChat(opts: StartChatOptions): EventSource {
   })
   es.addEventListener('aborted', () => {
     opts.cb.onAborted?.()
+    es.close()
+  })
+  // 主模型不可用:前端弹框确认后重新发起请求
+  es.addEventListener('retry', (e) => {
+    const d = safeParse((e as MessageEvent).data) as RetryEvent
+    opts.cb.onRetry?.(d)
     es.close()
   })
   // 服务端命名 error 事件带 data;网络层错误无 data。两者都关闭,不重连(避免重复生成)。

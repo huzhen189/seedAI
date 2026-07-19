@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from ..events import ev
-from ..providers import astream_with_fallback, get_chat_model, resolve_fallback_order
+from ..providers import ModelUnavailableError, astream_with_fallback, get_chat_model, resolve_fallback_order
 from ..rag import build_rag_context, save_memory
 from ..registry import register_skill
 
@@ -50,22 +50,17 @@ SYS_REVIEWER = (
 
 
 def _chat(model_id: str, system: str, user_msgs: list) -> str:
-    """同步调用模型(Planner/Reviewer),带降级回退(与 astream_with_fallback 一致)。"""
-    import logging
-
-    _log = logging.getLogger(__name__)
-    order = resolve_fallback_order(model_id)
-    last_err: Exception | None = None
-    for mid in order:
-        try:
-            chat = get_chat_model(mid, streaming=False)
-            resp = chat.invoke([{"role": "system", "content": system}, *user_msgs])
-            return resp.content
-        except Exception as e:
-            last_err = e
-            _log.warning("模型 %s 不可用,回退: %s", mid, e)
-            continue
-    raise last_err or RuntimeError("所有模型均不可用")
+    """同步调用模型(Planner/Reviewer)。失败时不自动降级,抛 ModelUnavailableError 让前端选替代。"""
+    try:
+        chat = get_chat_model(model_id, streaming=False)
+        resp = chat.invoke([{"role": "system", "content": system}, *user_msgs])
+        return resp.content
+    except Exception as e:
+        order = resolve_fallback_order(model_id)
+        suggested = [m for m in order if m != model_id]
+        raise ModelUnavailableError(
+            failed=model_id, message=f"模型 {model_id} 不可用: {e}", suggested=suggested
+        ) from e
 
 
 async def _cancelled_now(fn) -> bool:
@@ -180,89 +175,93 @@ async def generate_stream(
             break
     rag_ctx = build_rag_context(first_user_msg)
 
-    # 1) Planner
-    yield ev("node", stage="enter_planner")
-    planner_msgs = [{"role": "user", "content": first_user_msg or (messages[-1].get("content", "") if messages else "")}]
-    if rag_ctx:
-        planner_msgs.append(
-            {"role": "user", "content": f"【参考上下文(组件库 / 历史记忆)】\n{rag_ctx}"}
+    try:
+        # 1) Planner
+        yield ev("node", stage="enter_planner")
+        planner_msgs = [{"role": "user", "content": first_user_msg or (messages[-1].get("content", "") if messages else "")}]
+        if rag_ctx:
+            planner_msgs.append(
+                {"role": "user", "content": f"【参考上下文(组件库 / 历史记忆)】\n{rag_ctx}"}
+            )
+        spec = _chat(model_id, SYS_PLANNER, planner_msgs)
+        plan = _parse_plan(spec)
+        # 思考流:Planner 的拆解思路(分步思考的一部分)
+        if plan.get("reasoning"):
+            yield ev("think", stage="planner", content=plan["reasoning"])
+        # 特殊节点:大计划 / 目标(title/goal/steps),前端渲染为「计划 / 流程」卡片
+        yield ev(
+            "plan",
+            title=plan.get("title", ""),
+            goal=plan.get("goal", ""),
+            steps=plan.get("steps", []),
         )
-    spec = _chat(model_id, SYS_PLANNER, planner_msgs)
-    plan = _parse_plan(spec)
-    # 思考流:Planner 的拆解思路(分步思考的一部分)
-    if plan.get("reasoning"):
-        yield ev("think", stage="planner", content=plan["reasoning"])
-    # 特殊节点:大计划 / 目标(title/goal/steps),前端渲染为「计划 / 流程」卡片
-    yield ev(
-        "plan",
-        title=plan.get("title", ""),
-        goal=plan.get("goal", ""),
-        steps=plan.get("steps", []),
-    )
 
-    # 2) Coder(流式,带模型降级 2-C)
-    yield ev("node", stage="enter_coder")
-    user_msgs = [{"role": "user", "content": f"需求规格:\n{spec}"}] + messages
-    used_model = model_id
-    html_parts: list = []
-    async for chunk, mid in astream_with_fallback(model_id, user_msgs, system=SYS_CODER):
-        if await _cancelled_now(is_cancelled):
-            yield ev("aborted")
-            return
-        used_model = mid
-        text = getattr(chunk, "content", chunk)
-        if text:
-            html_parts.append(text)
-            yield ev("token", data=text)
-    if used_model != model_id:
-        yield ev("degraded", model=used_model, requested=model_id)
-    html = _extract_html("".join(html_parts))
-
-    # 3) Reviewer + Reflexion(≤3 轮)
-    for attempt in range(3):
-        yield ev("node", stage="enter_reviewer", attempt=attempt + 1)
-        review = _review(model_id, html)
-        yield ev("think", stage="reviewer", passed=review["passed"], comment=review["comment"])
-        if review["passed"]:
-            break
-        # Reflexion: 让 Coder 基于评审建议修正
-        yield ev("node", stage="enter_coder", retry=True)
-        fix_msgs = [
-            {
-                "role": "user",
-                "content": f"上一版未通过评审:{review['comment']}\n请修正以下 HTML:\n{html[:8000]}",
-            }
-        ]
-        html_parts = []
-        fix_used = model_id
-        async for chunk, mid in astream_with_fallback(model_id, fix_msgs, system=SYS_CODER):
+        # 2) Coder(流式,模型不可用时不自动降级,由前端确认后重发)
+        yield ev("node", stage="enter_coder")
+        user_msgs = [{"role": "user", "content": f"需求规格:\n{spec}"}] + messages
+        html_parts: list = []
+        async for chunk, mid in astream_with_fallback(model_id, user_msgs, system=SYS_CODER):
             if await _cancelled_now(is_cancelled):
                 yield ev("aborted")
                 return
-            fix_used = mid
             text = getattr(chunk, "content", chunk)
             if text:
                 html_parts.append(text)
                 yield ev("token", data=text)
-        if fix_used != model_id:
-            yield ev("degraded", model=fix_used, requested=model_id)
+        yield ev("degraded", model=mid, requested=model_id)
         html = _extract_html("".join(html_parts))
 
-    # 4) 预览投递(COS 直链,§10)
-    yield ev("node", stage="previewing")
-    url = _deliver(html, trace_id)
-    yield ev("node", stage="preview", url=url, fallback="srcdoc" if not url else None)
+        # 3) Reviewer + Reflexion(≤3 轮)
+        for attempt in range(3):
+            yield ev("node", stage="enter_reviewer", attempt=attempt + 1)
+            review = _review(model_id, html)
+            yield ev("think", stage="reviewer", passed=review["passed"], comment=review["comment"])
+            if review["passed"]:
+                break
+            # Reflexion: 让 Coder 基于评审建议修正
+            yield ev("node", stage="enter_coder", retry=True)
+            fix_msgs = [
+                {
+                    "role": "user",
+                    "content": f"上一版未通过评审:{review['comment']}\n请修正以下 HTML:\n{html[:8000]}",
+                }
+            ]
+            html_parts = []
+            async for chunk, mid in astream_with_fallback(model_id, fix_msgs, system=SYS_CODER):
+                if await _cancelled_now(is_cancelled):
+                    yield ev("aborted")
+                    return
+                text = getattr(chunk, "content", chunk)
+                if text:
+                    html_parts.append(text)
+                    yield ev("token", data=text)
+            yield ev("degraded", model=mid, requested=model_id)
+            html = _extract_html("".join(html_parts))
 
-    # ②-a 记忆闭环:生成成功后回写 memory 集合(供未来检索增强)
-    with suppress(Exception):
-        save_memory(
-            trace_id or "site",
-            plan.get("title", "建站"),
-            html[:1500],
-            plan.get("steps", []),
+        # 4) 预览投递(COS 直链,§10)
+        yield ev("node", stage="previewing")
+        url = _deliver(html, trace_id)
+        yield ev("node", stage="preview", url=url, fallback="srcdoc" if not url else None)
+
+        # ②-a 记忆闭环:生成成功后回写 memory 集合(供未来检索增强)
+        with suppress(Exception):
+            save_memory(
+                trace_id or "site",
+                plan.get("title", "建站"),
+                html[:1500],
+                plan.get("steps", []),
+            )
+
+        yield ev("node", stage="done")
+
+    except ModelUnavailableError as e:
+        yield ev(
+            "retry",
+            failed=e.failed,
+            suggested=e.suggested,
+            message=str(e),
         )
-
-    yield ev("node", stage="done")
+        yield ev("aborted")
 
 
 # 注册进 SkillRegistry(§5.8)

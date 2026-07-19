@@ -10,6 +10,8 @@
 - done      : 结束(随后断连)
 - aborted   : 主动取消确认(C1)
 - degraded  : 模型降级标记(2-C)
+- retry     : 主模型不可用,携带可选替代模型列表(failed/suggested),前端弹框待用户选择后重发
+              (替代原自动降级;收到后同 done/error 一样结束 SSE,由前端重新发起请求)
 
 每个事件是一个 dict: {"event": <type>, "data": <payload>};data 可为字符串或 dict,
 经 to_sse() 序列化为 SSE 的 {event, data} 字符串帧。
@@ -22,7 +24,7 @@ from typing import Any, Dict
 
 
 # 终止事件:收到即结束 SSE 流
-TERMINAL_EVENTS = {"done", "error", "aborted"}
+TERMINAL_EVENTS = {"done", "error", "aborted", "retry"}
 
 
 def ev(event: str, **data) -> Dict[str, Any]:

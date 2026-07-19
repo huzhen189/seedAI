@@ -21,6 +21,15 @@ from .config import settings
 FALLBACK_ORDER: List[str] = ["hy3", "qwen", "deepseek"]
 
 
+class ModelUnavailableError(Exception):
+    """模型不可用(限流/鉴权/超时),携带可选降级列表供前端确认切换。"""
+
+    def __init__(self, failed: str, message: str, suggested: list[str]):
+        self.failed = failed
+        self.suggested = suggested
+        super().__init__(message)
+
+
 class ProviderConfig:
     def __init__(self, id: str, label: str, base_url: str, api_key: str, model: str):
         self.id = id
@@ -94,21 +103,20 @@ def get_chat_model(model_id: str, streaming: bool = True) -> ChatOpenAI:
 async def astream_with_fallback(
     primary: str, messages: list, system: str | None = None
 ) -> AsyncGenerator:
-    """流式生成,带模型降级(2-C)。
+    """流式生成,仅使用主模型;失败时抛 ModelUnavailableError(含可选替代),不自动切换。
 
-    按顺序尝试模型,某个模型整体失败(首个 token 前抛异常)才回退下一个;
-    返回 (chunk, model_id) 以便调用方标注 degraded。
+    前端收到 retry 事件后弹框让用户选择替代模型,确认后重新发起请求——以此替代自动降级。
     """
-    order = resolve_fallback_order(primary)
-    last_err: Exception | None = None
-    for mid in order:
-        try:
-            chat = get_chat_model(mid, streaming=True)
-            msgs = ([{"role": "system", "content": system}] if system else []) + messages
-            async for chunk in chat.astream(msgs):
-                yield chunk, mid
-            return
-        except Exception as e:  # 整体失败 → 下一个模型
-            last_err = e
-            continue
-    raise last_err or RuntimeError("所有模型均不可用")
+    try:
+        chat = get_chat_model(primary, streaming=True)
+        msgs = ([{"role": "system", "content": system}] if system else []) + messages
+        async for chunk in chat.astream(msgs):
+            yield chunk, primary
+    except Exception as e:
+        order = resolve_fallback_order(primary)
+        suggested = [m for m in order if m != primary and m in PROVIDERS and PROVIDERS[m].api_key]
+        raise ModelUnavailableError(
+            failed=primary,
+            message=f"模型 {primary} 不可用: {e}",
+            suggested=suggested,
+        ) from e

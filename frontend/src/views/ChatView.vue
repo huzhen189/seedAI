@@ -23,7 +23,7 @@ import { useAuth } from '../composables/useAuth'
 import { warmupWebLLM } from '../composables/useWebLLM'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { ModelInfo, PlanEvent, ThoughtStep } from '../types'
+import type { ModelInfo, PlanEvent, RetryEvent, ThoughtStep } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
   enter_router: '路由分发',
@@ -58,6 +58,8 @@ const rateComment = ref('')
 const rateSubmitted = ref(false)
 
 const pendingSend = ref(false)
+const pendingRetry = ref<{ suggested: string[]; message: string } | null>(null)
+const lastSentText = ref('')
 
 const auth = useAuth()
 const projectStore = useProjectStore()
@@ -120,6 +122,7 @@ function resetGenState() {
   rating.value = 0
   rateComment.value = ''
   rateSubmitted.value = false
+  pendingRetry.value = null
 }
 
 function upsertStep(stage: string, status: ThoughtStep['status']) {
@@ -199,6 +202,15 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       errorMsg.value = '已取消'
       clearActiveGen()
+    },
+    onRetry: (d: RetryEvent) => {
+      generating.value = false
+      finished.value = true
+      clearActiveGen()
+      pendingRetry.value = {
+        suggested: d.suggested || [],
+        message: d.message || '模型不可用',
+      }
     },
     onError: (m) => {
       generating.value = false
@@ -285,6 +297,7 @@ async function send() {
   } as any)
   const assistantIdx = convStore.messages.length - 1
   generating.value = true
+  lastSentText.value = text
   input.value = ''
 
   esRef.value = startChat({
@@ -420,6 +433,33 @@ watch(
     }
   },
 )
+
+// 模型不可用时弹框让用户选替代模型
+async function handleRetryChoice(newModel: string) {
+  if (!pendingRetry.value) return
+  pendingRetry.value = null
+  // 移除上次发送失败的消息(user + 空 assistant)
+  const msgs = convStore.messages
+  while (msgs.length && msgs[msgs.length - 1].role === 'assistant') msgs.pop()
+  if (msgs.length && msgs[msgs.length - 1].role === 'user') msgs.pop()
+  model.value = newModel
+  // 恢复原输入并重新发送
+  const text = lastSentText.value
+  if (!text) return
+  input.value = text
+  send()
+}
+
+watch(pendingRetry, (r) => {
+  if (!r || !r.suggested.length) return
+  const first = r.suggested[0]
+  const show = window.confirm(
+    `${r.message}\n\n是否切换到「${first}」重试？` +
+    (r.suggested.length > 1 ? `\n(也可手动选择: ${r.suggested.join(', ')})` : ''),
+  )
+  if (show) handleRetryChoice(first)
+  else pendingRetry.value = null
+})
 </script>
 
 <template>
