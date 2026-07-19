@@ -55,9 +55,9 @@ const previewUrl = ref<string | null>(null)
 const errorMsg = ref('')
 
 // 意图识别(由 AI intent 事件设置; 控制右侧面板显示)
-const currentIntent = ref('')
+const currentIntent = ref<{ level1: string; level2: string }>({ level1: '', level2: '' })
 const isGenerateIntent = computed(() =>
-  ['generate', 'modify', ''].includes(currentIntent.value),
+  currentIntent.value.level1 === 'build',
 )
 
 async function downloadArtifactZip(artifact: Artifact) {
@@ -171,7 +171,7 @@ function resetGenState() {
   rating.value = 0
   rateComment.value = ''
   rateSubmitted.value = false
-  currentIntent.value = ''
+  currentIntent.value = { level1: '', level2: '' }
   pendingRetry.value = null
 }
 
@@ -264,11 +264,10 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       }
     },
     onIntent: (d) => {
-      currentIntent.value = d.intent || ''
-      // 在思考时间线顶部插入意图识别步骤
-      if (d.label) {
-        upsertStep('intent_' + (d.intent || 'unknown'), 'done', d.label)
-      }
+      currentIntent.value = { level1: d.level1 || '', level2: d.level2 || '' }
+      // 在思考时间线顶部插入意图识别步骤(两级显示)
+      const lbl = d.level2_label ? `${d.level1_label || ''} → ${d.level2_label}` : (d.label || '')
+      if (lbl) upsertStep('intent_recognized', 'done', lbl)
     },
     onUnsupported: () => {
       generating.value = false

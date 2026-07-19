@@ -44,9 +44,13 @@ export interface RetryEvent {
 
 /** 意图识别结果(前端显示标签 + 控制面板). */
 export interface IntentEvent {
-  intent?: string
+  level1?: string
+  level2?: string
   label?: string
+  level1_label?: string
+  level2_label?: string
   confidence?: number
+  industry?: string
 }
 
 /** 不支持的功能提示. */

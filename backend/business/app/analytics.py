@@ -35,13 +35,19 @@ P_LATENCY = "an:latency"              # zset: score=ms, member=tid
 P_FRONTEND = "an:frontend"            # zset: score=ms, member=tid
 
 
-async def record_intent_result(intent: str, matched: bool) -> None:
-    """记录意图分类结果: matched=True 表示用户确认/继续, False 表示用户取消/切换/不支持。"""
+async def record_intent_result(level1: str, level2: str, matched: bool) -> None:
+    """记录两级意图分类结果: matched=True 用户确认/继续, False 取消/切换/不支持。"""
     try:
         r = await get_redis()
-        await r.hincrby(P_INTENT_TOTAL, intent, 1)
+        key_total = f"{P_INTENT_TOTAL}:{level1}:{level2}"
+        key_hit = f"{P_INTENT_HIT}:{level1}:{level2}"
+        await r.hincrby(key_total, "count", 1)
         if matched:
-            await r.hincrby(P_INTENT_HIT, intent, 1)
+            await r.hincrby(key_hit, "count", 1)
+        # 也记录一级汇总(方便管理后台折叠)
+        await r.hincrby(f"{P_INTENT_TOTAL}:{level1}", "count", 1)
+        if matched:
+            await r.hincrby(f"{P_INTENT_HIT}:{level1}", "count", 1)
     except Exception as e:
         logger.warning("analytics record_intent_result failed: %s", e)
 
@@ -160,8 +166,17 @@ async def analytics_snapshot() -> dict:
     """全量分析快照(由 /admin/analytics 调用)。"""
     try:
         r = await get_redis()
-        # 意图分类
-        intent_stats = await _hset_percentages(r, P_INTENT_HIT, P_INTENT_TOTAL)
+        # 两级意图统计(按 level1 汇总 → level1:level2 明细)
+        intent_keys = await r.keys(f"{P_INTENT_TOTAL}:*")
+        intent_stats: dict = {}
+        for k in sorted(intent_keys):
+            key = k.decode() if isinstance(k, bytes) else k
+            prefix = key.replace(P_INTENT_TOTAL + ":", "")
+            tot = int((await r.get(key)) or 0)
+            hit_key = key.replace(P_INTENT_TOTAL, P_INTENT_HIT)
+            hit = int((await r.get(hit_key)) or 0)
+            if tot > 0:
+                intent_stats[prefix] = {"ok": hit, "total": tot, "rate": round(hit / tot, 3)}
         # Skill 成效
         skill_ok = await r.hgetall(P_SKILL_OK)
         skill_fail = await r.hgetall(P_SKILL_FAIL)

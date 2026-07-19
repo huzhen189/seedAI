@@ -6,18 +6,16 @@ defineProps<{
   plans: PlanEvent[]
   degraded: boolean
   current: string
-  /** 意图识别结果(顶部横幅) */
-  intent: string
+  /** 意图识别结果(两级) */
+  intent: { level1: string; level2: string }
 }>()
 
 const INTENT_COLORS: Record<string, string> = {
-  generate: '#eef2ff',
-  modify: '#fef3c7',
-  doc: '#dcfce7',
-  chat: '#f0fdf4',
-  code: '#f5f3ff',
+  learn: '#dbeafe',
+  code: '#dcfce7',
+  build: '#fef3c7',
+  doc: '#f5f3ff',
   translate: '#fdf2f8',
-  unsupported: '#fee2e2',
 }
 
 const STAGE_LABELS: Record<string, string> = {
@@ -31,29 +29,33 @@ const STAGE_LABELS: Record<string, string> = {
   done: '完成',
 }
 
-
-function intentLabel(intent: string): string {
-  const map: Record<string, string> = {
-    generate: '生成网站',
-    modify: '修改网站',
-    doc: '生成文档',
-    chat: '问答聊天',
-    code: '编写代码',
-    translate: '翻译文本',
-    unsupported: '不支持',
+function intentLabel(l: { level1: string; level2: string }): string {
+  const l1Map: Record<string, string> = {
+    learn: '学习理解', code: '编码实战', build: '建站生成',
+    doc: '文档方案', translate: '翻译转换',
   }
-  return map[intent] || intent
+  const l2Map: Record<string, string> = {
+    explain: '概念解释', debug: '排查报错', compare: '技术对比', casual: '日常闲聊',
+    snippet: '函数片段', component: 'UI组件', fix: '修复Bug', refactor: '重构优化',
+    page: '单页/落地页', site: '完整网站', modify: '修改已有', game: '互动游戏',
+    readme: 'README', tutorial: '教程指南', plan: '方案设计',
+    text: '文本翻译', code_lang: '代码翻译',
+  }
+  return `${l1Map[l.level1] || l.level1} → ${l2Map[l.level2] || l.level2}`
 }
 </script>
 
 <template>
   <div class="trail">
-    <div v-if="intent" class="intent-badge" :style="{ background: INTENT_COLORS[intent] || '#f1f5f9' }">
+    <div
+      v-if="intent.level1"
+      class="intent-badge"
+      :style="{ background: INTENT_COLORS[intent.level1] || '#f1f5f9' }"
+    >
       🧠 已识别: {{ intentLabel(intent) }}
     </div>
     <div v-if="degraded" class="badge warn">⚠ 主模型不可用,已降级到备用模型</div>
 
-    <!-- 计划 / 目标特殊节点:大计划作为卡片渲染,区别于普通思考文本 -->
     <div v-for="(p, i) in plans" :key="'plan-' + i" class="plan-card">
       <div class="plan-head">
         <span class="plan-icon">🎯</span>
@@ -67,14 +69,8 @@ function intentLabel(intent: string): string {
       </ol>
     </div>
 
-    <!-- 分步时间线:每个 agent 节点一步,精准反馈其思考文本 -->
     <ul class="timeline">
-      <li
-        v-for="s in steps"
-        :key="s.stage"
-        class="step"
-        :class="s.status"
-      >
+      <li v-for="s in steps" :key="s.stage" class="step" :class="s.status">
         <span class="dot"></span>
         <div class="step-body">
           <div class="step-label">
@@ -119,135 +115,32 @@ function intentLabel(intent: string): string {
   color: var(--warn);
 }
 
-/* 计划卡片 */
 .plan-card {
   border: 1px solid var(--brand2, #c7d2fe);
   background: linear-gradient(180deg, #eef2ff 0%, #fafaff 100%);
   border-radius: 12px;
   padding: 12px 14px;
 }
-.plan-head {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-}
-.plan-icon {
-  font-size: 18px;
-  line-height: 1.2;
-}
-.plan-title {
-  font-weight: 700;
-  font-size: 14px;
-  color: var(--brand);
-}
-.plan-goal {
-  font-size: 12px;
-  color: var(--muted);
-  margin-top: 2px;
-  line-height: 1.5;
-}
-.plan-steps {
-  margin: 10px 0 0;
-  padding-left: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.plan-steps li {
-  font-size: 13px;
-  line-height: 1.5;
-  color: #334155;
-}
+.plan-head { display: flex; gap: 10px; align-items: flex-start; }
+.plan-icon { font-size: 18px; line-height: 1.2; }
+.plan-title { font-weight: 700; font-size: 14px; color: var(--brand); }
+.plan-goal { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+.plan-steps { margin: 10px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+.plan-steps li { font-size: 13px; line-height: 1.5; color: #334155; }
 
-/* 分步时间线 */
-.timeline {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.step {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  position: relative;
-}
-.dot {
-  flex: none;
-  width: 9px;
-  height: 9px;
-  margin-top: 4px;
-  border-radius: 50%;
-  background: var(--border);
-}
-.step.active .dot {
-  background: var(--brand);
-  box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.15);
-}
-.step.done .dot {
-  background: #22c55e;
-}
-.step-body {
-  flex: 1;
-  min-width: 0;
-}
-.step-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--muted);
-}
-.step.active .step-label {
-  color: var(--brand);
-}
-.pulse {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--brand);
-  background: #eef2ff;
-  border-radius: 999px;
-  padding: 1px 8px;
-  animation: blink 1.2s ease-in-out infinite;
-}
-.ok {
-  color: #22c55e;
-}
-.think {
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: #f8fafc;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: #334155;
-  max-height: 200px;
-  overflow: auto;
-  margin: 6px 0 0;
-}
-.review {
-  font-size: 12px;
-  margin-top: 6px;
-  line-height: 1.5;
-  color: #334155;
-}
-.review .pass {
-  color: #16a34a;
-  font-weight: 700;
-  margin-right: 4px;
-}
-.review .fail {
-  color: #dc2626;
-  font-weight: 700;
-  margin-right: 4px;
-}
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.45; }
-}
+.timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.step { display: flex; gap: 10px; align-items: flex-start; position: relative; }
+.dot { flex: none; width: 9px; height: 9px; margin-top: 4px; border-radius: 50%; background: var(--border); }
+.step.active .dot { background: var(--brand); box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.15); }
+.step.done .dot { background: #22c55e; }
+.step-body { flex: 1; min-width: 0; }
+.step-label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.step.active .step-label { color: var(--brand); }
+.pulse { font-size: 11px; font-weight: 500; color: var(--brand); background: #eef2ff; border-radius: 999px; padding: 1px 8px; animation: blink 1.2s ease-in-out infinite; }
+.ok { color: #22c55e; }
+.think { white-space: pre-wrap; word-break: break-word; background: #f8fafc; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.6; color: #334155; max-height: 200px; overflow: auto; margin: 6px 0 0; }
+.review { font-size: 12px; margin-top: 6px; line-height: 1.5; color: #334155; }
+.review .pass { color: #16a34a; font-weight: 700; margin-right: 4px; }
+.review .fail { color: #dc2626; font-weight: 700; margin-right: 4px; }
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 </style>

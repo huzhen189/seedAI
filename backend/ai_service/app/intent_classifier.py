@@ -1,8 +1,10 @@
-"""意图分类器:轻量 LLM 调用, 把用户输入归到 7 类之一。
+"""两级意图分类器 + 行业感知。
 
-输出: {"intent": "chat|doc|generate|modify|translate|code|unsupported", "confidence": 0.0~1.0}
+一次 LLM 调用同时出: {level1, level2, confidence, industry}
+level1 6 类, level2 17 类, industry 12 类。
+失败退化为关键词兜底(含 level2 细判)。
 
-prompt 约 100 token, 回复约 20 token, 耗时 < 1s。
+prompt ~350 token, 回复 ~30 token, 耗时 <1.2s。
 """
 
 from __future__ import annotations
@@ -14,48 +16,70 @@ import re
 from .providers import get_chat_model, resolve_fallback_order
 
 
+# ---- 两级分类 prompt ----
 INTENT_SYSTEM = (
-    "你是意图分类器。根据用户输入, 只返回一个 JSON, 不要额外文字。\n"
-    "{\"intent\": \"chat|doc|generate|modify|translate|code|game|unsupported\", \"confidence\": 0.0~1.0, "
-    "\"industry\": \"restaurant|ecommerce|gov|edu|health|finance|game|personal|corp|tech|media|other|none\"}\n\n"
-    "分类规则:\n"
-    "- chat: 闲聊、知识问答、解释概念、日常对话\n"
-    "- doc: 生成文档、产品构思、方案计划、说明、教程\n"
-    "- generate: 新建网站、页面、落地页、Web 应用\n"
-    "- modify: 修改/优化/调整已有网站或页面\n"
-    "- translate: 翻译文本到其他语言\n"
-    "- code: 编写代码片段/函数/脚本(不是完整网页)\n"
-    "- game: 生成互动小游戏(贪吃蛇、打砖块、射击、2048等)\n"
-    "- unsupported: 以上都不匹配\n\n"
-    "industry(12选1, 仅 build/doc/game 时必填, 其他填 \"none\"):\n"
-    "restaurant(餐饮/美食/外卖) | ecommerce(电商/零售/商城) | gov(政府/政务/机构)\n"
-    "| edu(教育/培训/学校) | health(医疗/健康/养生) | finance(金融/银行/保险)\n"
-    "| game(游戏) | personal(个人/博客/简历) | corp(企业/公司/集团)\n"
-    "| tech(科技/SaaS/IT) | media(媒体/视频/娱乐) | other(其他/不明确)\n\n"
+    "你是小白编码助手的意图分类器。根据用户输入, 只返回 JSON, 不要额外文字。\n"
+    '{"level1": "...", "level2": "...", "confidence": 0.0~1.0, "industry": "..."}\n\n'
+    "level1(6选1): learn|code|build|doc|translate|unsupported\n\n"
+    "level2(只选对应 level1 下的):\n"
+    "learn→explain(解释概念)|debug(排查报错,含代码)|compare(技术对比)|casual(闲聊)\n"
+    "code→snippet(写函数片段)|component(写UI组件)|fix(修Bug)|refactor(重构)\n"
+    "build→page(单页/落地页)|site(完整多页站)|modify(修改已有)|game(互动游戏)\n"
+    "doc→readme(README)|tutorial(教程)|plan(方案/设计)\n"
+    "translate→text(翻译文本)|code_lang(跨语言代码翻译)\n"
+    "unsupported→无子类\n\n"
+    "industry(12选1, build/doc 时必填, 其他填 none):\n"
+    "restaurant(餐饮)|ecommerce(电商)|gov(政务)|edu(教育)|health(医疗)\n"
+    "|finance(金融)|game(游戏)|personal(个人)|corp(企业)|tech(科技)|media(媒体)|other\n\n"
     "用户输入: "
 )
 
 logger = logging.getLogger("ai_service.intent")
 
 
+# 有效的 level1/level2/industry 值
+VALID_LEVEL1 = frozenset({"learn", "code", "build", "doc", "translate", "unsupported"})
+VALID_LEVEL2 = frozenset({
+    "explain", "debug", "compare", "casual",
+    "snippet", "component", "fix", "refactor",
+    "page", "site", "modify", "game",
+    "readme", "tutorial", "plan",
+    "text", "code_lang",
+})
+VALID_INDUSTRIES = frozenset({
+    "restaurant", "ecommerce", "gov", "edu", "health",
+    "finance", "game", "personal", "corp", "tech", "media", "other", "none",
+})
+
+# 旧 intent 名 → (level1, level2) 兼容映射(存量统计/前端过渡)
+OLD_TO_LEVELS: dict[str, tuple[str, str]] = {
+    "chat": ("learn", "explain"),
+    "code": ("code", "snippet"),
+    "generate": ("build", "site"),
+    "modify": ("build", "modify"),
+    "game": ("build", "game"),
+    "doc": ("doc", "readme"),
+    "translate": ("translate", "text"),
+}
+
+
 def classify(messages: list[dict], model_id: str = "hy3") -> dict:
-    """分类用户意图, 返回 {intent, confidence}。失败则退化为关键词兜底。"""
-    # 取最近一条用户消息
+    """分类用户意图, 返回 {level1, level2, confidence, industry}。失败则关键词兜底。"""
     last = ""
     for m in reversed(messages):
         if m.get("role") == "user":
             last = m.get("content", "") or ""
             break
     if not last.strip():
-        return {"intent": "chat", "confidence": 1.0}
+        return {"level1": "learn", "level2": "casual", "confidence": 1.0, "industry": "none"}
 
-    # 上下文捷径: 当前会话已有 HTML 输出 → 直接判 modify
+    # 上下文捷径
     has_html = any(
         m.get("role") == "assistant" and ("<html" in (m.get("content") or "").lower())
         for m in messages
     )
     if has_html:
-        return {"intent": "modify", "confidence": 0.99, "industry": "other"}
+        return {"level1": "build", "level2": "modify", "confidence": 0.99, "industry": "other"}
 
     # LLM 分类
     order = resolve_fallback_order(model_id)
@@ -69,33 +93,32 @@ def classify(messages: list[dict], model_id: str = "hy3") -> dict:
             raw = (resp.content or "").strip()
             m = re.search(r"\{.*\}", raw, re.DOTALL)
             data = json.loads(m.group(0)) if m else {}
-            intent = data.get("intent", "")
+            l1 = data.get("level1", data.get("intent", ""))  # 兼容旧字段
+            l2 = data.get("level2", "")
             confidence = float(data.get("confidence", 0.5))
             industry = data.get("industry", "none") or "none"
-            VALID_INDUSTRIES = (
-                "restaurant", "ecommerce", "gov", "edu", "health",
-                "finance", "game", "personal", "corp", "tech", "media", "other", "none",
-            )
+
             if industry not in VALID_INDUSTRIES:
                 industry = "other"
-            if intent in (
-                "chat", "doc", "generate", "modify",
-                "translate", "code", "game", "unsupported",
-            ):
-                return {"intent": intent, "confidence": confidence, "industry": industry}
-            # 无效分类 → 关键词兜底
+            if l1 in VALID_LEVEL1 and l2 in VALID_LEVEL2:
+                return {"level1": l1, "level2": l2, "confidence": confidence, "industry": industry}
+            # 兼容旧 intent 字段 → 映射到两级
+            old_intent = data.get("intent", "")
+            if old_intent in OLD_TO_LEVELS:
+                l1, l2 = OLD_TO_LEVELS[old_intent]
+                return {"level1": l1, "level2": l2, "confidence": confidence, "industry": industry}
             break
         except Exception as e:
             logger.warning("意图分类 %s 失败: %s", mid, e)
             continue
 
-    # 关键词兜底(分类器全失败时)
     return _keyword_fallback(last)
 
 
 def _keyword_fallback(text: str) -> dict:
-    """关键词兜底(分类器全失败时)，返回 {intent, confidence, industry}。"""
+    """关键词兜底, 返回 {level1, level2, confidence, industry}。"""
     t = text.lower()
+
     # 先探测行业
     industry = "other"
     if any(w in t for w in ("餐饮", "餐厅", "饭店", "美食", "外卖", "菜单")):
@@ -110,7 +133,7 @@ def _keyword_fallback(text: str) -> dict:
         industry = "health"
     elif any(w in t for w in ("金融", "银行", "保险", "理财", "证券", "基金", "贷款")):
         industry = "finance"
-    elif any(w in t for w in ("游戏", "game", "娱乐")):
+    elif any(w in t for w in ("游戏", "game", "小游戏")):
         industry = "game"
     elif any(w in t for w in ("个人", "博客", "简历", "作品集", "portfolio")):
         industry = "personal"
@@ -121,23 +144,45 @@ def _keyword_fallback(text: str) -> dict:
     elif any(w in t for w in ("媒体", "视频", "抖音", "直播", "娱乐")):
         industry = "media"
 
+    c = lambda: 0.7  # noqa: E731 — shorthand
+
+    # level2 细判(按关键词组, 用互斥优先级)
     if any(w in t for w in ("翻译", "translate", "译成")):
-        return {"intent": "translate", "confidence": 0.7, "industry": "none"}
-    if any(w in t for w in (
-        "游戏", "game", "贪吃蛇", "打砖块", "坦克大战", "射击",
-        "2048", "消消乐", "弹球", "飞机大战", "小游戏",
-    )):
-        return {"intent": "game", "confidence": 0.7, "industry": "game"}
-    if any(w in t for w in (
-        "网站", "页面", "网页", "落地页", "主页", "官网",
-        "site", "landing", "homepage", "web",
-    )):
-        return {"intent": "generate", "confidence": 0.7, "industry": industry}
-    if any(w in t for w in ("代码", "函数", "脚本", "写一个", "snippet", "编程")):
-        return {"intent": "code", "confidence": 0.7, "industry": industry if industry != "other" else "none"}
-    if any(w in t for w in (
-        "文档", "计划", "方案", "构思", "说明", "教程",
-        "doc", "plan", "tutorial",
-    )):
-        return {"intent": "doc", "confidence": 0.7, "industry": industry}
-    return {"intent": "chat", "confidence": 0.5, "industry": "none"}
+        return {"level1": "translate", "level2": "text", "confidence": c(), "industry": "none"}
+
+    if any(w in t for w in ("贪吃蛇", "打砖块", "坦克大战", "射击", "消消乐", "弹球", "飞机大战", "2048")):
+        return {"level1": "build", "level2": "game", "confidence": c(), "industry": "game"}
+    if any(w in t for w in ("游戏", "game", "小游戏")):
+        return {"level1": "build", "level2": "game", "confidence": c(), "industry": "game"}
+
+    if any(w in t for w in ("修改", "改成", "换成", "调整", "modify")):
+        return {"level1": "build", "level2": "modify", "confidence": c(), "industry": industry}
+    if any(w in t for w in ("落地页", "主页", "landing")):
+        return {"level1": "build", "level2": "page", "confidence": c(), "industry": industry}
+    if any(w in t for w in ("网站", "官网", "商城", "后台", "页面", "网页", "site", "web")):
+        return {"level1": "build", "level2": "site", "confidence": c(), "industry": industry}
+
+    if any(w in t for w in ("readme", "README", "说明")):
+        return {"level1": "doc", "level2": "readme", "confidence": c(), "industry": industry}
+    if any(w in t for w in ("教程", "指南", "tutorial", "步骤")):
+        return {"level1": "doc", "level2": "tutorial", "confidence": c(), "industry": industry}
+    if any(w in t for w in ("方案", "计划", "设计", "架构")):
+        return {"level1": "doc", "level2": "plan", "confidence": c(), "industry": industry}
+
+    if any(w in t for w in ("组件", "按钮", "表单", "卡片", "component", "modal")):
+        return {"level1": "code", "level2": "component", "confidence": c(), "industry": "none"}
+    if any(w in t for w in ("修复", "bug", "改一下", "不对", "有问题", "fix", "error", "报错")):
+        return {"level1": "code", "level2": "fix", "confidence": c(), "industry": "none"}
+    if any(w in t for w in ("重构", "优化", "改进", "refactor")):
+        return {"level1": "code", "level2": "refactor", "confidence": c(), "industry": "none"}
+    if any(w in t for w in ("代码", "函数", "脚本", "写一个", "snippet", "算法", "编程")):
+        return {"level1": "code", "level2": "snippet", "confidence": c(), "industry": "none"}
+
+    if any(w in t for w in ("报错", "错误", "error", "异常", "exception", "崩溃", "排查")):
+        return {"level1": "learn", "level2": "debug", "confidence": c(), "industry": "none"}
+    if any(w in t for w in ("对比", "区别", "比较", "选型", "vs", "哪个好")):
+        return {"level1": "learn", "level2": "compare", "confidence": c(), "industry": "none"}
+    if any(w in t for w in ("你好", "谢谢", "再见", "哈哈", "hello", "hi")):
+        return {"level1": "learn", "level2": "casual", "confidence": c(), "industry": "none"}
+
+    return {"level1": "learn", "level2": "explain", "confidence": 0.5, "industry": "none"}

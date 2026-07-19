@@ -292,9 +292,9 @@ async def worker_loop(concurrency: int = 1):
             try:
                 # 意图分类 → 路由到对应 Skill
                 intent = detect_intent(messages, model_id)
-                skill_name = skill or skill_for(intent["intent"]) or "explain"
+                skill_name = skill or skill_for(intent["level1"], intent["level2"]) or "explain"
 
-                if intent["intent"] == "unsupported":
+                if intent["level1"] == "unsupported":
                     # 记录 unsupported 统计(给业务端 metrics 用)
                     async for event in run_skill(
                         "explain", model_id, messages,

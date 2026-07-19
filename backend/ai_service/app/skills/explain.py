@@ -1,33 +1,43 @@
-"""Skill: explain(解释/问答 · 单次 LLM 直出 · §5.2)。"""
+"""Skill: explain(解释/问答 · 按 level2 切 System Prompt · §5.1)。"""
 
 from __future__ import annotations
 
 import logging
 import time
 
-from ..events import ev
 from ..providers import ModelUnavailableError, get_chat_model, resolve_fallback_order
 from ..registry import register_skill
 
 
-SYS_EXPLAIN = "你是一名耐心、严谨的助手。回答用户问题,给出准确、易懂的解释,必要时举例。"
+# 按 level2 子意图切换 System Prompt
+SYS_PROMPTS: dict[str, str] = {
+    "explain": "你是编程入门导师，用通俗易懂的中文解释概念和知识点，多举实际例子。",
+    "debug": "你是资深 Debug 专家。根据用户贴的错误信息给出根因分析、修复方案和预防建议。用中文。",
+    "compare": "你是技术选型顾问。对比用户提到的技术方案，列出各自优劣、适用场景和推荐。用中文。",
+    "casual": "你是友好的编程助手，轻松自然地回答用户的日常问题。",
+    "text": "你是翻译专家。把用户提供的文本准确翻译到目标语言，只输出翻译结果。",
+}
+SYS_DEFAULT = SYS_PROMPTS["explain"]
 
 SKILL_LOG = logging.getLogger("ai_service.explain")
 
 
-async def explain_skill(model_id: str, messages: list, **kwargs) -> str:
-    trace_id = kwargs.get("trace_id", "-")
-    SKILL_LOG.info("[chat] 问答开始 trace=%s model=%s", trace_id, model_id)
+async def explain_skill(
+    model_id: str,
+    messages: list,
+    trace_id: str | None = None,
+    level2: str | None = None,
+    **kwargs,
+) -> str:
+    sys_prompt = SYS_PROMPTS.get(level2 or "", SYS_DEFAULT)
+    SKILL_LOG.info("[chat] 问答开始 trace=%s model=%s level2=%s", trace_id, model_id, level2)
     t0 = time.time()
     try:
         chat = get_chat_model(model_id, streaming=False)
-        resp = chat.invoke([{"role": "system", "content": SYS_EXPLAIN}, *messages])
+        resp = chat.invoke([{"role": "system", "content": sys_prompt}, *messages])
         result = resp.content
         elapsed = time.time() - t0
-        SKILL_LOG.info(
-            "[chat] 回答完成 trace=%s chars=%s 耗时 %.1fs",
-            trace_id, len(result), elapsed,
-        )
+        SKILL_LOG.info("[chat] 回答完成 trace=%s chars=%s 耗时 %.1fs", trace_id, len(result), elapsed)
         return result
     except Exception as e:
         order = resolve_fallback_order(model_id)
@@ -40,8 +50,6 @@ async def explain_skill(model_id: str, messages: list, **kwargs) -> str:
 
 register_skill(
     name="explain",
-    intent_tags=["解释", "问答", "问", "什么", "怎么", "为什么", "explain", "问问题"],
     handler=explain_skill,
-    is_graph=False,
-    description="解释/问答(单次 LLM 直出)",
+    description="解释/问答/调试/翻译(按 level2 切 prompt)",
 )
