@@ -20,6 +20,7 @@ import MessageBubble from '../components/MessageBubble.vue'
 import { useRouter } from 'vue-router'
 import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
 import { useAuth } from '../composables/useAuth'
+import { warmupWebLLM } from '../composables/useWebLLM'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
 import type { ModelInfo, PlanEvent, ThoughtStep } from '../types'
@@ -62,6 +63,8 @@ const auth = useAuth()
 const projectStore = useProjectStore()
 const convStore = useConversationStore()
 const router = useRouter()
+// TODO(④-b): 当 isLocalModel 为 true 时,Planner 走本地 WebLLM, Coder 仍走云端
+// const isLocalModel = computed(() => model.value === 'local-webllm')
 
 const messages = computed(() => convStore.messages)
 const currentProjectName = computed(
@@ -372,6 +375,10 @@ onMounted(async () => {
   await auth.init()
   const m = await fetchModels()
   if (m.length) models.value = m
+  // ④-b 本地 WebLLM 选项(仅 Planner, Coder 走云端;在 useWebLLM.isWebGPUSupported() 时可用)
+  models.value.push({ id: 'local-webllm', label: '本地 WebLLM(Planner)' })
+  // 后台预取 WebLLM 模型权重(首屏空闲触发,幂等)
+  warmupWebLLM()
   await projectStore.load()
   await loadCurrentProject()
   await maybeResume()
