@@ -370,6 +370,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       clearActiveGen()
       loadArtifacts()
+      // 从 DB 同步当前会话消息(替换乐观更新的 id:0)
+      if (projectStore.currentProjectId) convStore.loadConversations(projectStore.currentProjectId)
       dequeueAndSend()
     },
     onAborted: () => {
@@ -377,6 +379,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       errorMsg.value = '已取消'
       clearActiveGen()
+      if (projectStore.currentProjectId) convStore.loadConversations(projectStore.currentProjectId)
       dequeueAndSend()
     },
     onRetry: (d: RetryEvent) => {

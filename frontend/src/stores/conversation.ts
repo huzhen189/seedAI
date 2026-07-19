@@ -61,17 +61,23 @@ export const useConversationStore = defineStore('conversation', () => {
   /** 上翻加载更早会话(每次 5 屏,只加载会话元数据,点击展开后再加载消息)。 */
   async function loadMoreHistory(): Promise<boolean> {
     const batch = 5
-    const start = loadedPastCount.value + 1  // 跳过当前会话(第 0 个)
+    const start = loadedPastCount.value + 1
     const end = Math.min(start + batch - 1, conversations.value.length - 1)
     if (start > end) return false
     loadingMore.value = true
     try {
       for (let i = start; i <= end; i++) {
         const conv = conversations.value[i]
+        // 加载历史会话的消息(与当前会话同接口, 保证格式统一)
+        let msgs: Message[] = []
+        try {
+          const c = await projectsApi.getConversation(conv.id)
+          msgs = c.messages || []
+        } catch { /* 忽略单条加载失败 */ }
         pastSessions.value.push({
           conv,
           collapsed: true,
-          messages: [],
+          messages: msgs,
           loading: false,
         })
       }
