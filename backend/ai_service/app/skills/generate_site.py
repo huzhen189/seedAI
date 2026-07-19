@@ -52,6 +52,15 @@ SYS_CODER = (
     "把 CSS 和 JS 全部内联在 <style> 和 <script> 中,可直接用 iframe 预览。"
     "只输出完整 HTML 代码,不要解释、不要 markdown 代码块围栏(```)。"
 )
+
+SYS_CODER_GAME = (
+    "你是一名游戏开发者。生成一个完整的单文件 HTML 互动小游戏。"
+    "必须引入 Three.js CDN: "
+    "<script src=\"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js\"></script>。"
+    "游戏要素: 3D/2D 场景 + 玩家控制(键盘+触屏) + 碰撞/得分 + 开始/重新开始按钮 + 操作提示。"
+    "把 CSS/JS 全部内联,只输出完整 HTML,不要解释、不要 markdown 代码块围栏(```)。"
+    "确保兼容移动端触屏操作和 PC 键盘操作。"
+)
 SYS_REVIEWER = (
     "你是严格的代码评审。检查给定 HTML 是否:① 以 <html 开头且结构基本完整;② 标签基本闭合;"
     "③ 不含明显会白屏的致命错误(eval / 未定义脚本、外部不可达资源)。"
@@ -177,7 +186,11 @@ async def generate_stream(
     messages: list,
     trace_id: Optional[str] = None,
     is_cancelled=None,
+    intent: Optional[str] = None,
 ) -> AsyncGenerator[Dict, None]:
+    # 根据意图选 Coder 系统提示(游戏 vs 建站)
+    coder_prompt = SYS_CODER_GAME if intent == "game" else SYS_CODER
+
     # ②-a RAG 增强:带超时保护,Chroma 不可达时 5s 后跳过,不阻塞生成
     first_user_msg = ""
     for m in messages:
@@ -226,7 +239,7 @@ async def generate_stream(
         user_msgs = [{"role": "user", "content": f"需求规格:\n{spec}"}] + messages
         html_parts: list = []
         token_count = 0
-        async for chunk, _ in astream_with_fallback(model_id, user_msgs, system=SYS_CODER):
+        async for chunk, _ in astream_with_fallback(model_id, user_msgs, system=coder_prompt):
             if await _cancelled_now(is_cancelled):
                 yield ev("aborted")
                 return
@@ -262,7 +275,7 @@ async def generate_stream(
                 }
             ]
             html_parts = []
-            async for chunk, _ in astream_with_fallback(model_id, fix_msgs, system=SYS_CODER):
+            async for chunk, _ in astream_with_fallback(model_id, fix_msgs, system=coder_prompt):
                 if await _cancelled_now(is_cancelled):
                     yield ev("aborted")
                     return

@@ -57,6 +57,7 @@ async def run_skill(
                 messages=messages,
                 trace_id=trace_id,
                 is_cancelled=is_cancelled,
+                intent=intent_info.get("intent") if intent_info else None,
             ):
                 if isinstance(item, dict) and "event" in item:
                     yield item

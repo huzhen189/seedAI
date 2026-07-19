@@ -23,9 +23,10 @@ INTENT_SKILL_MAP = {
     "chat": "explain",
     "doc": "generate_doc",
     "generate": "generate_site",
-    "modify": "generate_site",  # 复用 generate_site, 带上下文
-    "translate": "explain",     # 用 explain + translate system prompt
+    "modify": "generate_site",
+    "translate": "explain",
     "code": "write_code",
+    "game": "generate_site",  # 游戏用 generate_site, Coder 切游戏模式
 }
 
 INTENT_LABELS = {
@@ -33,6 +34,7 @@ INTENT_LABELS = {
     "doc": "文档",
     "generate": "生成网站",
     "modify": "修改网站",
+    "game": "生成游戏",
     "translate": "翻译",
     "code": "编程",
     "unsupported": "不支持",
