@@ -6,6 +6,7 @@
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+import uuid
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,6 +77,70 @@ async def rename_project(
     proj.name = req.name
     await db.commit()
     await db.refresh(proj)
+    return proj
+
+
+# ---------- 分享(⑤-b):最小分享 = 生成 COS 预览直链 + 公开开关 ----------
+@router.post("/projects/{project_id}/share", response_model=ProjectResp)
+async def share_project(
+    project_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """开启分享:生成 share_id(UUID)并置 is_public=True;返回含 preview_url 的项目。
+
+    最小分享方案(⑤-b,不做独立分享页):前端用返回的 preview_url 直接「复制预览链接」。
+    """
+    proj = (
+        await db.execute(
+            select(Project).where(Project.id == project_id, Project.user_id == user.id)
+        )
+    ).scalar_one_or_none()
+    if proj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if not proj.share_id:
+        proj.share_id = uuid.uuid4().hex
+    proj.is_public = True
+    await db.commit()
+    await db.refresh(proj)
+    return proj
+
+
+@router.delete("/projects/{project_id}/share", response_model=ProjectResp)
+async def unshare_project(
+    project_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """关闭分享:清空 share_id 并置 is_public=False。"""
+    proj = (
+        await db.execute(
+            select(Project).where(Project.id == project_id, Project.user_id == user.id)
+        )
+    ).scalar_one_or_none()
+    if proj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    proj.share_id = None
+    proj.is_public = False
+    await db.commit()
+    await db.refresh(proj)
+    return proj
+
+
+@router.get("/share/{share_id}", response_model=ProjectResp)
+async def get_shared_project(
+    share_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """公开只读分享入口(无鉴权):仅当 is_public=True 时返回项目(含 preview_url)。
+
+    供未来只读分享页 / 复制链接校验使用。
+    """
+    proj = (
+        await db.execute(select(Project).where(Project.share_id == share_id))
+    ).scalar_one_or_none()
+    if proj is None or not proj.is_public:
+        raise HTTPException(status_code=404, detail="share not found or not public")
     return proj
 
 

@@ -67,6 +67,9 @@ class ProjectResp(BaseModel):
     name: str
     created_at: datetime
     updated_at: datetime
+    share_id: str | None = None
+    is_public: bool = False
+    preview_url: str | None = None
 
 
 class MessageResp(BaseModel):

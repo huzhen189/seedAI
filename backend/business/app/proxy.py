@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import settings
 from .db import get_db
 from .metrics import consume_daily_quota, record_model_usage
-from .models import Conversation, Message, User
+from .models import Conversation, Message, Project, User
 from .security import ACCESS_COOKIE, CurrentUser, decode_token
 
 
@@ -207,6 +207,7 @@ async def chat(
         # read 不超时(生成可能持续数分钟),connect 给 10s
         timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
         assistant_parts: list[str] = []
+        preview_url: str | None = None  # 捕获预览直链(供分享「复制预览链接」使用)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 try:
@@ -230,6 +231,14 @@ async def chat(
                                     data = "\n".join(data_parts)
                                     if event == "token":
                                         assistant_parts.append(data)
+                                    elif event == "node":
+                                        # 捕获预览直链(供分享「复制预览链接」使用)
+                                        try:
+                                            nd = json.loads(data)
+                                            if nd.get("stage") == "preview" and nd.get("url"):
+                                                preview_url = nd["url"]
+                                        except Exception:
+                                            pass
                                     # 重建标准 SSE 帧透传(兼容前端 EventSource)
                                     frame = ""
                                     if event:
@@ -254,7 +263,14 @@ async def chat(
             # 流结束(正常/中断)均尝试落库;失败仅记录,不阻塞已返回的流
             try:
                 await _persist_conversation(
-                    db, user, conversation_id, model, user_text, "".join(assistant_parts), tid
+                    db,
+                    user,
+                    conversation_id,
+                    model,
+                    user_text,
+                    "".join(assistant_parts),
+                    tid,
+                    preview_url=preview_url,
                 )
             except Exception as e:  # 落库失败不影响已完成生成
                 logger.warning("persist conversation failed: %s", e)
@@ -278,11 +294,13 @@ async def _persist_conversation(
     user_text: str,
     assistant_text: str,
     trace_id: str,
+    preview_url: str | None = None,
 ) -> None:
     """SSE 结束后落库:用户消息 + AI 回复;更新会话标题/updated_at。
 
     幂等(重连 / 续传):同一 trace_id 只插一条 user 消息;assistant 消息按 trace_id
     upsert(首落 insert、续传 update),避免刷新 / 重连导致重复行。
+    preview_url:本次生成的 COS 预览直链,回填到所属 Project(供分享「复制预览链接」)。
     """
     conv = (
         await db.execute(
@@ -294,6 +312,12 @@ async def _persist_conversation(
     ).scalar_one_or_none()
     if conv is None:
         return  # 会话不存在或不属于该用户,跳过落库
+
+    # 回填最新预览直链到项目(⑤-b 分享用)
+    if preview_url:
+        proj = await db.get(Project, conv.project_id)
+        if proj is not None:
+            proj.preview_url = preview_url
 
     # user 消息:同 trace_id 已存在则跳过(重连不会重复插入)
     user_msg = (

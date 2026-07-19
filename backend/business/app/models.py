@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -39,6 +39,13 @@ class Project(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+    # 分享(⑤-b):share_id 为公开访问令牌(UUID,可空);is_public 控制是否允许公开访问;
+    # preview_url 缓存最新一次生成的 COS 预览直链,供「复制预览链接」按钮使用。
+    share_id: Mapped[Optional[str]] = mapped_column(
+        String(36), nullable=True, unique=True, index=True
+    )
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    preview_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class Conversation(Base):
