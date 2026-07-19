@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .db import get_db
 from .metrics import snapshot
 from .models import User
+from .orchestrator import run_scale, run_start, run_stop
 from .schemas import AdminUserResp, SetPlanReq, SetRoleReq
 from .security import (
     CurrentUser,
@@ -111,14 +112,23 @@ async def scale_service(
     replicas: int,
     _=Depends(require_super_admin),
 ):
-    """手动扩缩容占位(控制面,仅超管;M1 接 DockerComposeOrchestrator/K8s)。"""
-    return {"ack": True, "service": name, "target_replicas": replicas, "note": "stub"}
+    """手动扩缩容(⑥-b):真实调用 `docker compose up -d --scale`,返回执行日志。"""
+    result = await run_scale(name, replicas)
+    return {"ack": True, "service": name, "target_replicas": replicas, **result}
 
 
 @router.post("/stop")
 async def stop_service(name: str, _=Depends(require_super_admin)):
-    """手动停止占位(控制面,仅超管)。"""
-    return {"ack": True, "service": name, "note": "stub"}
+    """手动停止(⑥-b):真实调用 `docker compose stop`,返回执行日志。"""
+    result = await run_stop(name)
+    return {"ack": True, "service": name, **result}
+
+
+@router.post("/start")
+async def start_service(name: str, _=Depends(require_super_admin)):
+    """手动启动(⑥-b 补充):真实调用 `docker compose start`,返回执行日志。"""
+    result = await run_start(name)
+    return {"ack": True, "service": name, **result}
 
 
 # 保留角色常量导出(供其他模块引用,避免散落字符串)
