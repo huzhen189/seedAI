@@ -50,6 +50,8 @@ async def write_code_skill(
 
 register_skill(
     name="write_code",
+    intent_tags=["代码", "函数", "snippet", "组件", "bug", "fix", "重构", "翻译"],
     handler=write_code_skill,
+    is_graph=False,
     description="编码实战(代码片段/组件/Bug修复/重构/跨语言翻译, 按 level2 切 prompt)",
 )

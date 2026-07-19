@@ -50,6 +50,8 @@ async def explain_skill(
 
 register_skill(
     name="explain",
+    intent_tags=["解释", "问答", "问", "debug", "对比", "翻译"],
     handler=explain_skill,
+    is_graph=False,
     description="解释/问答/调试/翻译(按 level2 切 prompt)",
 )
