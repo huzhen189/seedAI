@@ -504,6 +504,10 @@ async def _persist_conversation(
         conv.title = user_text[:20]
     conv.updated_at = datetime.utcnow()
     await db.commit()
+    logger.info(
+        "[chat] 消息落库成功 conv=%s user_msg=%s assistant_len=%s",
+        conv.id, bool(user_text), len(assistant_text),
+    )
 
 
 @router.post("/feedback")

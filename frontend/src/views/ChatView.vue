@@ -17,15 +17,13 @@ import ThoughtTrail from '../components/ThoughtTrail.vue'
 import PreviewPane from '../components/PreviewPane.vue'
 import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
-import { useRouter } from 'vue-router'
 import JSZip from 'jszip'
 import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
-import { listArtifacts } from '../api/projects'
+import { getConversation, listArtifacts, renameProject } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
-import { warmupWebLLM } from '../composables/useWebLLM'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { Artifact, ModelInfo, PlanEvent, RetryEvent, ThoughtStep } from '../types'
+import type { Artifact, Conversation, Message, ModelInfo, PlanEvent, RetryEvent, ThoughtStep } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
   enter_router: '路由分发',
@@ -141,15 +139,96 @@ const lastSentText = ref('')
 const auth = useAuth()
 const projectStore = useProjectStore()
 const convStore = useConversationStore()
-const router = useRouter()
-// TODO(④-b): 当 isLocalModel 为 true 时,Planner 走本地 WebLLM, Coder 仍走云端
-// const isLocalModel = computed(() => model.value === 'local-webllm')
 
-const messages = computed(() => convStore.messages)
+// 合并所有会话卡片: 历史(collapsed) + 当前(expanded), 用于统一渲染
+interface SessionCard {
+  conv: Conversation
+  collapsed: boolean
+  loading: boolean
+  msgs: Message[]
+  msgCount: number
+}
+const allSessions = computed<SessionCard[]>(() => {
+  // 历史折叠会话
+  const past: SessionCard[] = convStore.pastSessions.map(s => ({
+    conv: s.conv,
+    collapsed: s.collapsed,
+    loading: s.loading,
+    msgs: s.messages,
+    msgCount: s.messages.length || (s.conv as any).messages?.length || 0,
+  }))
+  // 当前会话 (只填 DB 消息, 实时消息走 liveMessages)
+  // 当前会话 (只填 DB 消息, 实时消息走 liveMessages)
+  const cur = convStore.conversations[0]
+  if (cur && convStore.currentConvId === cur.id && !past.some(p => p.conv.id === cur.id)) {
+    past.unshift({
+      conv: cur,
+      collapsed: false,
+      loading: false,
+      msgs: convStore.messages,  // 从 DB 加载的
+      msgCount: convStore.messages.length || (cur as any).messages?.length || 0,
+    })
+  }
+  return past
+})
+
+// 本次会话实时消息(乐观更新 + SSE token 累积, 不写入 DB 版本)
+const liveMessages = computed(() => {
+  // 如果当前会话就是 conversations[0] 且已有 DB 消息, 实时消息是增量
+  const cur = convStore.conversations[0]
+  if (cur && convStore.currentConvId === cur.id) {
+    return convStore.messages
+  }
+  return []
+})
+
+async function toggleSession(idx: number) {
+  const s = allSessions.value[idx]
+  if (!s) return
+  if (!s.collapsed) {
+    s.collapsed = true
+    return
+  }
+  if (s.msgs.length === 0 && s.conv.id) {
+    s.loading = true
+    try {
+      const c = await getConversation(s.conv.id)
+      s.msgs = c.messages || []
+      s.msgCount = s.msgs.length
+    } finally {
+      s.loading = false
+    }
+  }
+  s.collapsed = false
+}
+
 const currentProjectName = computed(
   () =>
     projectStore.projects.find((p) => p.id === projectStore.currentProjectId)?.name || '未选择项目',
 )
+const currentProjectDate = computed(
+  () =>
+    projectStore.projects.find((p) => p.id === projectStore.currentProjectId)?.created_at?.slice(0, 10) || '',
+)
+
+// 项目名行内编辑
+const editingProject = ref(false)
+const editProjectName = ref('')
+const projInput = ref<HTMLInputElement | null>(null)
+function startEditProject() {
+  editProjectName.value = currentProjectName.value
+  editingProject.value = true
+  nextTick(() => projInput.value?.focus())
+}
+async function saveProjectName() {
+  if (!editingProject.value) return
+  const name = editProjectName.value.trim()
+  if (name && name !== currentProjectName.value && projectStore.currentProjectId) {
+    await renameProject(projectStore.currentProjectId, name)
+    await projectStore.load()
+  }
+  editingProject.value = false
+}
 
 // 生成本次对话的链路 id(trace_id):
 // 优先用 crypto.randomUUID(安全随机);老浏览器无该 API 时退化为"时间戳+随机"拼接。
@@ -273,7 +352,6 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       generating.value = false
       finished.value = true
       clearActiveGen()
-      convStore.loadConversations(projectStore.currentProjectId!)
       loadArtifacts()
     },
     onAborted: () => {
@@ -318,17 +396,6 @@ async function loadCurrentProject() {
   await convStore.loadConversations(pid)
 }
 
-async function newConversation() {
-  const pid = projectStore.currentProjectId
-  if (pid == null) {
-    alert('请先在左侧新建项目')
-    return
-  }
-  convStore.create(pid)
-  generatedHtml.value = ''
-  previewUrl.value = null
-}
-
 async function send() {
   const text = input.value.trim()
   if (!text || generating.value) return
@@ -343,8 +410,8 @@ async function send() {
     alert('请先在左侧新建项目')
     return
   }
-  // 会话不存在则按需自动创建(标题取首条消息前 20 字)。
-  if (convStore.currentConvId == null) {
+  // 会话不存在或消息为空(页面刷新后)则创建新会话
+  if (convStore.currentConvId == null || convStore.messages.length === 0) {
     await convStore.create(pid, text.slice(0, 20))
   }
 
@@ -414,7 +481,7 @@ async function maybeResume() {
   const ag = getActiveGen()
   if (!ag || generating.value) return
   if (convStore.currentConvId !== ag.convId) {
-    await convStore.loadMessagesInto(ag.convId, 'replace')
+    await convStore.loadConversations(projectStore.currentProjectId!)
   }
   resume(ag.convId, ag.traceId)
 }
@@ -464,10 +531,6 @@ onMounted(async () => {
   await auth.init()
   const m = await fetchModels()
   if (m.length) models.value = m
-  // ④-b 本地 WebLLM 选项(仅 Planner, Coder 走云端;在 useWebLLM.isWebGPUSupported() 时可用)
-  models.value.push({ id: 'local-webllm', label: '本地 WebLLM(Planner)' })
-  // 后台预取 WebLLM 模型权重(首屏空闲触发,幂等)
-  warmupWebLLM()
   if (auth.user.value) {
     await projectStore.load()
     await loadCurrentProject()
@@ -494,7 +557,7 @@ watch(
   () => convStore.pendingConvId,
   async (id) => {
     if (id != null) {
-      await convStore.loadMessagesInto(id, 'replace')
+      await convStore.loadConversations(projectStore.currentProjectId!)
       convStore.pendingConvId = null
       await maybeResume()
     }
@@ -548,23 +611,52 @@ watch(pendingRetry, (r) => {
   <div class="chat">
     <div class="left-col" :class="{ full: !isGenerateIntent }">
       <div class="conv-bar">
-        <span class="proj">📁 {{ currentProjectName }}</span>
-        <span v-if="convStore.currentConvId" class="conv-title">
-          {{ convStore.conversations[0]?.title || '新对话' }}
-        </span>
-        <button class="newconv" @click="newConversation">＋</button>
+        <span class="proj">📁</span>
+        <span v-if="!editingProject" class="proj-name">{{ currentProjectName }}</span>
+        <input
+          v-else
+          ref="projInput"
+          v-model="editProjectName"
+          class="proj-input"
+          @keyup.enter="saveProjectName"
+          @blur="saveProjectName"
+          @keyup.escape="editingProject = false"
+        />
+        <button class="proj-edit" title="修改项目名" @click="startEditProject">✏️</button>
+        <span class="proj-date">{{ currentProjectDate }}</span>
       </div>
 
       <div ref="convRef" class="conv">
         <div v-if="convStore.loadingMore" class="loading-more">加载更早的会话…</div>
         <div ref="sentinel" class="sentinel"></div>
-        <div v-if="messages.length === 0" class="empty">
-          在下方描述你想生成的网站，AI 会先规划需求，再流式产出并实时预览。
+
+        <!-- 全新项目无任何会话 -->
+        <div v-if="convStore.conversations.length === 0" class="empty">
+          在下方输入你想做的事，AI 会智能识别意图并给出回复。
         </div>
-        <MessageBubble v-for="(m, i) in messages" :key="i" :role="m.role" :content="m.content" />
+
+        <!-- 所有会话以卡片展示(最新自动展开, 其余折叠) -->
+        <div v-for="(s, idx) in allSessions" :key="s.conv.id" class="past-card">
+          <div class="past-head" @click="toggleSession(idx)">
+            <span class="past-arrow">{{ s.collapsed ? '▶' : '▼' }}</span>
+            <span class="past-title">{{ s.conv.title || '新会话' }}</span>
+            <span class="past-meta">{{ s.msgCount }} 条消息</span>
+            <span class="past-time">{{ s.conv.updated_at?.slice(0, 10) || '' }}</span>
+          </div>
+          <div v-if="!s.collapsed" class="past-body">
+            <div v-if="s.loading" class="loading-more">加载中…</div>
+            <div v-else-if="s.msgs.length === 0" class="empty-session">该会话暂无消息记录</div>
+            <MessageBubble v-for="(m, i) in s.msgs" :key="i" :role="m.role" :content="m.content" />
+          </div>
+        </div>
+
+        <!-- 当前会话的实时消息(发送中 / 本次新发) -->
+        <template v-if="convStore.currentConvId && liveMessages.length">
+          <MessageBubble v-for="(m, i) in liveMessages" :key="'live-'+i" :role="m.role" :content="m.content" />
+        </template>
       </div>
 
-      <div v-if="thoughtSteps.length || planNodes.length" class="trail-wrap">
+      <div v-if="isGenerateIntent && (thoughtSteps.length || planNodes.length)" class="trail-wrap">
         <ThoughtTrail
           :steps="thoughtSteps"
           :plans="planNodes"
@@ -582,10 +674,9 @@ watch(pendingRetry, (r) => {
           :models="models"
           @send="send"
           @stop="stop"
-          @open-settings="router.push('/settings')"
         />
         <div v-if="errorMsg" class="error">⚠ {{ errorMsg }}</div>
-        <div v-if="finished && !errorMsg && (generatedHtml || previewUrl)" class="feedback">
+        <div v-if="finished && !errorMsg" class="feedback">
           <span class="rate-label">评分 (1-10):</span>
           <template v-for="n in 10" :key="n">
             <button
@@ -730,6 +821,11 @@ watch(pendingRetry, (r) => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.proj-name { font-weight: 700; font-size: 14px; color: #1e293b; }
+.proj-input { font-weight: 700; font-size: 14px; border: 1px solid var(--brand); border-radius: 6px; padding: 2px 6px; color: #1e293b; background: #fff; outline: none; width: 180px; }
+.proj-edit { border: none; background: none; cursor: pointer; font-size: 13px; padding: 2px 4px; opacity: .5; transition: opacity .15s; }
+.proj-edit:hover { opacity: 1; }
+.proj-date { font-size: 11px; color: var(--muted); margin-left: auto; }
 .newconv {
   margin-left: auto;
   border: 1px solid var(--brand);
@@ -752,6 +848,16 @@ watch(pendingRetry, (r) => {
 }
 .sentinel { height: 1px; }
 .loading-more { text-align: center; color: var(--muted); font-size: 12px; padding: 8px; }
+
+/* 历史会话折叠卡片 */
+.past-card { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.past-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; background: #f8fafc; transition: background .15s; }
+.past-head:hover { background: #f1f5f9; }
+.past-arrow { font-size: 10px; color: var(--muted); flex-shrink: 0; }
+.past-title { font-weight: 600; font-size: 13px; color: #334155; flex: 1; }
+.past-meta { font-size: 11px; color: var(--muted); }
+.past-time { font-size: 11px; color: var(--muted); }
+.past-body { padding: 8px 14px 12px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); background: #fff; }
 .empty {
   color: var(--muted);
   font-size: 13px;
