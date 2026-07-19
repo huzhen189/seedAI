@@ -22,7 +22,15 @@ _pool: Optional[aioredis.Redis] = None
 async def get_redis() -> aioredis.Redis:
     global _pool
     if _pool is None:
-        _pool = aioredis.from_url(settings.redis_url, decode_responses=True, protocol=2)
+        # health_check_interval=30:每 30s 发 PING 保活,防公网 NAT 掐断空闲连接
+        # socket_keepalive:TCP 层 keepalive 双保险
+        _pool = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            protocol=2,
+            health_check_interval=30,
+            socket_keepalive=True,
+        )
     return _pool
 
 
