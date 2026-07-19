@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "backend" / "business"))
 
 from app.config import settings  # noqa: E402
 from app.db import SessionLocal, engine, init_db  # noqa: E402
-from sqlalchemy import text, inspect  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 
 
 async def reset() -> None:
@@ -27,11 +27,15 @@ async def reset() -> None:
 
     # 1) DROP 所有表
     async with engine.begin() as conn:
-        insp = inspect(conn.sync_connection)
-        tables = insp.get_table_names()
-        if tables:
+        def _drop(sync_conn):
+            from sqlalchemy import inspect
+            insp = inspect(sync_conn)
+            tables = insp.get_table_names()
             for t in tables:
-                await conn.execute(text(f"DROP TABLE IF EXISTS `{t}`"))
+                sync_conn.execute(text(f"DROP TABLE IF EXISTS `{t}`"))
+            return tables
+        tables = await conn.run_sync(_drop)
+        if tables:
             print(f"  >> 已 DROP {len(tables)} 张表: {', '.join(tables)}")
         else:
             print("  >> 无表需清理")

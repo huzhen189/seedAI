@@ -123,7 +123,7 @@ async def init_db():
     await _seed_default_user()
 
 
-async def _seed_default_user() -> None:
+async def _seed_super_admin() -> None:
     """把 settings.seed_super_admin 指定的用户提升为 super_admin(若不存在则跳过)。"""
     username = (settings.seed_super_admin or "").strip()
     if not username:

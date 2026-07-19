@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT / "backend" / "business"))
 from app.config import settings  # noqa: E402
 from app.db import SessionLocal, engine, init_db  # noqa: E402
 from app.models import Base, Conversation, Feedback, Message, Project, Trace, TraceEvent, UsageLog, User  # noqa: E402
-from sqlalchemy import delete, select, text, inspect  # noqa: E402
+from sqlalchemy import delete, select, text  # noqa: E402
 
 
 async def _log(msg: str) -> None:
@@ -103,13 +103,14 @@ async def cmd_nuke() -> None:
     if confirm.lower() != "y":
         print("  已取消")
         return
-    async with SessionLocal() as s:
-        conn = await s.connection()
-        insp = inspect(conn.sync_connection)
-        tables = insp.get_table_names()
-        for t in tables:
-            await conn.execute(text(f"DROP TABLE IF EXISTS `{t}`"))
-        await conn.commit()
+    async with engine.begin() as conn:
+        def _drop(sync_conn):
+            insp = inspect(sync_conn)
+            tables = insp.get_table_names()
+            for t in tables:
+                sync_conn.execute(text(f"DROP TABLE IF EXISTS `{t}`"))
+            return tables
+        tables = await conn.run_sync(_drop)
         print(f"  已 DROP {len(tables)} 张表")
 
 
