@@ -29,7 +29,7 @@ from fastapi.security import HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import settings
+from .analytics import record_skill_outcome
 from .db import get_db
 from .metrics import consume_daily_quota, record_model_usage, record_unsupported
 from .models import Artifact, Conversation, Message, Project, User
@@ -387,6 +387,11 @@ async def chat(
                     except Exception as e:
                         logger.warning("[chat] artifact 保存失败: %s", e)
                 logger.info("[chat] 落库完成 trace=%s", tid)
+                # 记录分析统计(技能成效 + 意图命中率)
+                skill = "generate_site"
+                status = "ok" if terminal_status == "done" else ("abort" if terminal_status == "aborted" else "fail")
+                elapsed_ms = sum(event_counts.values()) * 50  # 粗略估算
+                await record_skill_outcome(skill, status, float(elapsed_ms))
             except Exception as e:
                 logger.warning("[chat] 落库失败 trace=%s: %s", tid, e)
 

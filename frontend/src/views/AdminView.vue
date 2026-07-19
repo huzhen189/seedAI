@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { get, post } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import { ROLE_LABELS, type AdminUser, type MetricsSnapshot, type Role } from '../types'
@@ -11,11 +11,12 @@ const currentRoleLabel = computed(
 )
 
 // ---- 标签页(RBAC:用户管理 / 控制面 仅超管可见) ----
-type Tab = 'metrics' | 'users' | 'control' | 'quality' | 'replay'
+type Tab = 'metrics' | 'users' | 'control' | 'quality' | 'replay' | 'analytics'
 const tabs: { key: Tab; label: string; superOnly: boolean }[] = [
   { key: 'metrics', label: '运行指标', superOnly: false },
   { key: 'quality', label: 'AI 质量', superOnly: false },
   { key: 'replay', label: '回放', superOnly: false },
+  { key: 'analytics', label: '系统分析', superOnly: false },
   { key: 'users', label: '用户管理', superOnly: true },
   { key: 'control', label: '控制面', superOnly: true },
 ]
@@ -182,6 +183,38 @@ async function viewTrace(traceId: string) {
   } catch { /* ignore */ }
 }
 
+// ---- 系统分析(命中率/准确率/响应时间/前端性能) ----
+interface LatencyBucket { p50: number; p90: number; p99: number; avg: number; samples: number }
+interface IntentStat { ok: number; total: number; rate: number }
+interface SkillStat { ok: number; fail: number; abort: number; total: number; success_rate: number }
+interface AnalyticsSnapshot {
+  intent_stats: Record<string, IntentStat>
+  skill_outcomes: Record<string, SkillStat>
+  gen_stages: Record<string, LatencyBucket>
+  api_latency: Record<string, LatencyBucket>
+  frontend_perf: Record<string, LatencyBucket>
+  generation_rate: { total: number; done: number; rate: number }
+  error?: string
+}
+const al = ref<AnalyticsSnapshot | null>(null)
+const alLoading = ref(false)
+
+async function fetchAnalytics() {
+  alLoading.value = true
+  try {
+    al.value = await get('/admin/analytics')
+  } catch { /* ignore */ }
+  finally { alLoading.value = false }
+}
+
+const PERF_LABELS: Record<string, string> = {
+  page_load: '全页加载', ttfb: '首字节(TTFB)', dom_ready: 'DOM 就绪',
+}
+const STAGE_LABELS_ANA: Record<string, string> = {
+  enter_planner: 'Planner', enter_coder: 'Coder', enter_reviewer: 'Reviewer', previewing: '预览投递',
+}
+function fmtMs(v: number): string { return Math.round(v) + 'ms' }
+
 function statusLabel(s: string) {
   const m: Record<string, string> = { running: '生成中', done: '完成', error: '错误', aborted: '已取消' }
   return m[s] || s
@@ -198,6 +231,7 @@ onMounted(() => {
   fetchQuality()
   fetchTraces()
 })
+watch(activeTab, (t) => { if (t === 'analytics' && !al.value) fetchAnalytics() })
 onUnmounted(() => {
   es?.close()
 })
@@ -359,6 +393,97 @@ onUnmounted(() => {
         </tbody>
       </table>
       <p v-if="!traces.length && !tracesLoading" class="muted">暂无生成记录</p>
+    </section>
+
+    <!-- 系统分析 -->
+    <section v-else-if="activeTab === 'analytics'" class="panel">
+      <div class="bar"><h3>系统分析</h3><button class="refresh" :disabled="alLoading" @click="fetchAnalytics">刷新</button></div>
+      <div v-if="al?.error" class="muted">加载失败: {{ al.error }}</div>
+      <template v-else-if="al">
+        <!-- 意图命中率 -->
+        <div class="block">
+          <h4>意图命中率</h4>
+          <table v-if="al.intent_stats && Object.keys(al.intent_stats).length" class="atable">
+            <thead><tr><th>意图</th><th>命中</th><th>总数</th><th>命中率</th><th>指示</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.intent_stats" :key="k">
+                <td>{{ k }}</td><td>{{ v.ok }}</td><td>{{ v.total }}</td>
+                <td>{{ (v.rate * 100).toFixed(0) }}%</td>
+                <td><span class="dot" :style="{ background: v.rate > 0.7 ? '#22c55e' : v.rate > 0.3 ? '#f59e0b' : '#ef4444' }"></span></td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="muted">暂无数据</p>
+        </div>
+        <!-- Skill 成功率 -->
+        <div class="block">
+          <h4>Skill 成效</h4>
+          <table v-if="al.skill_outcomes && Object.keys(al.skill_outcomes).length" class="atable">
+            <thead><tr><th>技能</th><th>成功</th><th>失败</th><th>中断</th><th>成功率</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.skill_outcomes" :key="k">
+                <td>{{ k }}</td><td>{{ v.ok }}</td><td>{{ v.fail }}</td><td>{{ v.abort }}</td>
+                <td>{{ (v.success_rate * 100).toFixed(0) }}%</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="muted">暂无数据</p>
+        </div>
+        <!-- 生成阶段耗时 -->
+        <div class="block">
+          <h4>生成阶段耗时</h4>
+          <table v-if="al.gen_stages && Object.keys(al.gen_stages).length" class="atable">
+            <thead><tr><th>阶段</th><th>P50</th><th>P90</th><th>P99</th><th>均值</th><th>样本</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.gen_stages" :key="k">
+                <td>{{ STAGE_LABELS_ANA[k] || k }}</td>
+                <td>{{ fmtMs(v.p50) }}</td><td>{{ fmtMs(v.p90) }}</td><td>{{ fmtMs(v.p99) }}</td>
+                <td>{{ fmtMs(v.avg) }}</td><td>{{ v.samples }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="muted">暂无数据</p>
+        </div>
+        <!-- API 延迟 -->
+        <div class="block">
+          <h4>API 响应时间</h4>
+          <table v-if="al.api_latency && Object.keys(al.api_latency).length" class="atable">
+            <thead><tr><th>端点</th><th>P50</th><th>P90</th><th>P99</th><th>均值</th><th>样本</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.api_latency" :key="k">
+                <td>{{ k }}</td>
+                <td>{{ fmtMs(v.p50) }}</td><td>{{ fmtMs(v.p90) }}</td><td>{{ fmtMs(v.p99) }}</td>
+                <td>{{ fmtMs(v.avg) }}</td><td>{{ v.samples }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="muted">暂无数据</p>
+        </div>
+        <!-- 前端性能 -->
+        <div class="block">
+          <h4>前端加载性能</h4>
+          <table v-if="al.frontend_perf && Object.keys(al.frontend_perf).length" class="atable">
+            <thead><tr><th>指标</th><th>P50</th><th>P90</th><th>P99</th><th>均值</th><th>样本</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.frontend_perf" :key="k">
+                <td>{{ PERF_LABELS[k] || k }}</td>
+                <td>{{ fmtMs(v.p50) }}</td><td>{{ fmtMs(v.p90) }}</td><td>{{ fmtMs(v.p99) }}</td>
+                <td>{{ fmtMs(v.avg) }}</td><td>{{ v.samples }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="muted">暂无数据</p>
+        </div>
+        <!-- 生成成功率 -->
+        <div v-if="al.generation_rate" class="block">
+          <h4>总体生成成功率</h4>
+          <div class="rate-bar" :style="{ '--rate': al.generation_rate.rate * 100 + '%' }">
+            <span>{{ (al.generation_rate.rate * 100).toFixed(1) }}%</span>
+            <span class="rate-sub">({{ al.generation_rate.done }}/{{ al.generation_rate.total }})</span>
+          </div>
+        </div>
+      </template>
+      <p v-if="!al && !alLoading" class="muted">点击刷新加载分析数据</p>
     </section>
 
     <!-- 用户管理(仅超管) -->
@@ -665,4 +790,14 @@ onUnmounted(() => {
 .db-stat.ok { color: #22c55e; }
 .db-stat.err { color: var(--err); }
 .db-pool { font-size: 11px; color: var(--muted); margin-left: auto; }
+
+/* 系统分析表 */
+.atable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.atable th { text-align: left; padding: 6px 8px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }
+.atable td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.atable .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.rate-bar { display: flex; align-items: center; gap: 12px; font-size: 22px; font-weight: 700; color: #1e293b; position: relative; padding: 10px 0; }
+.rate-bar::before { content: ''; position: absolute; bottom: 0; left: 0; height: 4px; border-radius: 2px; background: linear-gradient(90deg, #22c55e var(--rate), #fee2e2 var(--rate)); width: 100%; }
+.rate-sub { font-size: 13px; color: var(--muted); font-weight: 400; }
+h4 { margin: 12px 0 8px; font-size: 14px; color: #1e293b; }
 </style>

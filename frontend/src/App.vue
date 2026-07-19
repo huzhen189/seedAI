@@ -4,6 +4,10 @@ import TopNav from './components/TopNav.vue'
 import Sidebar from './components/Sidebar.vue'
 import { useAuthStore } from './stores/auth'
 import { useProjectStore } from './stores/project'
+import { initPerfTracking } from './composables/usePerf'
+
+// 启动前端性能追踪(首次加载时上报 TTFB/dom_ready/page_load)
+initPerfTracking()
 
 const collapsed = ref(false)
 const auth = useAuthStore()

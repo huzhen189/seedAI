@@ -11,7 +11,7 @@ admin 进入后控制面板置灰 / 隐藏,仅 super_admin 可见可执行。
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +41,32 @@ async def health():
     return await _db_status()
 
 
+    from .metrics import snapshot as metrics_snapshot
+
+
+@router.get("/analytics")
+async def analytics(_=Depends(require_admin)):
+    """全量分析看板:意图命中率/Skill成效/API延迟/前端性能/生成阶段耗时。"""
+    from .analytics import analytics_snapshot
+    return await analytics_snapshot()
+
+
+@router.post("/analytics/perf")
+async def report_frontend_perf(request: Request):
+    """客户端上报前端性能(不计鉴权,轻量上报)。"""
+    from .analytics import record_frontend_perf
+    try:
+        body = await request.json()
+        for metric in ("page_load", "ttfb", "dom_ready"):
+            val = body.get(metric)
+            if isinstance(val, (int, float)) and val > 0:
+                await record_frontend_perf(metric, float(val))
+        return {"ack": True}
+    except Exception:
+        return {"ack": False}
+
+
+# ---------- 指标 SSE ----------
 @router.get("/metrics")
 async def metrics_stream(_=Depends(require_admin)):
     """实时指标:每 2s 推一帧快照(轮询兜底见前端)。"""
