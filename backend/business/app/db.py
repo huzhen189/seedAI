@@ -92,28 +92,36 @@ def _add_missing_columns(sync_conn) -> list[str]:
 
 
 async def init_db():
-    """建表 + 增量补齐缺失列。
+    """安全初始化:补齐缺失列 + 种子用户。
 
-    1. `create_all`:表不存在时建整张表(model 声明的全部列都在);
-    2. `_add_missing_columns`:表已存在时,对比 model 与真实 schema,缺列则按 model 的
-       字段结构/类型自动 ALTER ADD —— **改了 model(加字段)后,重启即自动补齐数据库**,
-       无需手写迁移,适合开发期与小版本平滑升级。
-
-    说明:这套 diff 是轻量自动迁移,**不替代 Alembic 这类正式迁移工具**;生产环境仍建议
-    用迁移脚本管理 schema 演进(本项目约定 schema 由迁移统一管理)。它只补缺失列,
-    不会删多余列、不会改列类型,避免误伤既有数据。
+    建表由 scripts/reset_all.py 统一管理;这里不自动建表,
+    避免重启时意外触发 schema 变更。
+    若关键表不存在则告警,提示运行 reset_all.py。
     """
     from .models import Base
 
     async with engine.begin() as conn:
-        # 第一步:确保每张表存在(缺失的表一次建好,含 model 声明的全部列)
-        await conn.run_sync(Base.metadata.create_all)
-        # 第二步:对已有表补缺失列(未来 model 加新字段时自动生效)
-        added = await conn.run_sync(_add_missing_columns)
-    if added:
-        logger.info("数据库 schema 已自动补齐缺失列: %s", ", ".join(added))
-    else:
-        logger.debug("数据库 schema 与 model 一致,无缺失列需补齐")
+        # 检查关键表是否存在(防御性检查;不自动建表)
+        def _check_tables(sync_conn):
+            from sqlalchemy import inspect, text
+            insp = inspect(sync_conn)
+            existing = set(insp.get_table_names())
+            expected = set(Base.metadata.tables.keys())
+            missing = expected - existing
+            if missing:
+                logger.warning(
+                    "数据库缺少以下表: %s。请运行 scripts/reset_all.bat 初始化。",
+                    ", ".join(sorted(missing)),
+                )
+            return existing
+        existing_tables = await conn.run_sync(_check_tables)
+        # 仅当表已存在时才做增量补齐(不建新表)
+        if existing_tables:
+            added = await conn.run_sync(_add_missing_columns)
+            if added:
+                logger.info("数据库 schema 已自动补齐缺失列: %s", ", ".join(added))
+            else:
+                logger.debug("数据库 schema 与 model 一致,无缺失列需补齐")
 
     # 第三步:超级管理员种子注入(文档 §2.3)。
     # 首次启动(或任何时候)把 SEED_SUPER_ADMIN 指定的用户名角色置为 super_admin,

@@ -54,9 +54,15 @@ async def reset() -> None:
         except Exception as e:
             print(f"  >> Redis 清理失败: {e}")
 
-    # 3) 重建表 + 自动创建默认用户
+    # 3) 重建表
+    from app.models import Base  # noqa: E402
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    print("  >> 表已重建")
+
+    # 4) 补齐缺失列 + 自动创建默认用户
     await init_db()
-    print("  >> 表已重建, 默认用户已就绪")
+    print("  >> 默认用户已就绪")
 
     await engine.dispose()
 
