@@ -14,11 +14,13 @@ from __future__ import annotations
 import inspect
 import os
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from pathlib import Path
 from typing import Dict, Optional
 
 from ..events import ev
 from ..providers import astream_with_fallback, get_chat_model
+from ..rag import build_rag_context, save_memory
 from ..registry import register_skill
 
 
@@ -157,9 +159,22 @@ async def generate_stream(
     trace_id: Optional[str] = None,
     is_cancelled=None,
 ) -> AsyncGenerator[Dict, None]:
+    # ②-a RAG 增强:取首条用户需求,检索 components + memory 注入 Planner 上下文
+    first_user_msg = ""
+    for m in messages:
+        if m.get("role") == "user":
+            first_user_msg = m.get("content", "") or ""
+            break
+    rag_ctx = build_rag_context(first_user_msg)
+
     # 1) Planner
     yield ev("node", stage="enter_planner")
-    spec = _chat(model_id, SYS_PLANNER, messages)
+    planner_msgs = [{"role": "user", "content": first_user_msg or (messages[-1].get("content", "") if messages else "")}]
+    if rag_ctx:
+        planner_msgs.append(
+            {"role": "user", "content": f"【参考上下文(组件库 / 历史记忆)】\n{rag_ctx}"}
+        )
+    spec = _chat(model_id, SYS_PLANNER, planner_msgs)
     plan = _parse_plan(spec)
     # 思考流:Planner 的拆解思路(分步思考的一部分)
     if plan.get("reasoning"):
@@ -224,6 +239,16 @@ async def generate_stream(
     yield ev("node", stage="previewing")
     url = _deliver(html, trace_id)
     yield ev("node", stage="preview", url=url, fallback="srcdoc" if not url else None)
+
+    # ②-a 记忆闭环:生成成功后回写 memory 集合(供未来检索增强)
+    with suppress(Exception):
+        save_memory(
+            trace_id or "site",
+            plan.get("title", "建站"),
+            html[:1500],
+            plan.get("steps", []),
+        )
+
     yield ev("node", stage="done")
 
 
