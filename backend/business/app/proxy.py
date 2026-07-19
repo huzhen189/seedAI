@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .db import get_db
-from .metrics import consume_daily_quota, record_model_usage
+from .metrics import consume_daily_quota, record_model_usage, record_unsupported
 from .models import Artifact, Conversation, Message, Project, User
 from .schemas import FeedbackReq
 from .security import ACCESS_COOKIE, CurrentUser, decode_token, get_current_user
@@ -288,7 +288,7 @@ async def chat(
                                     )
                                     if event == "token":
                                         assistant_parts.append(data)
-                                    elif event in ("node", "think", "plan", "error", "aborted", "degraded"):
+                                    elif event in ("node", "think", "plan", "error", "aborted", "degraded", "unsupported"):
                                         try:
                                             payload_obj = json.loads(data) if data else None
                                         except Exception:
@@ -307,6 +307,10 @@ async def chat(
                                             terminal_status = "aborted"
                                         elif event == "error":
                                             terminal_status = "error"
+                                        elif event == "unsupported":
+                                            terminal_status = "unsupported"
+                                            # 记录到统计系统(供管理后台回归分析)
+                                            await record_unsupported(user.id, user_text)
                                         logger.info(
                                             "[chat] SSE 事件 seq=%s type=%s stage=%s",
                                             event_seq, event, stage or "-",

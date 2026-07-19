@@ -6,7 +6,19 @@ defineProps<{
   plans: PlanEvent[]
   degraded: boolean
   current: string
+  /** 意图识别结果(顶部横幅) */
+  intent: string
 }>()
+
+const INTENT_COLORS: Record<string, string> = {
+  generate: '#eef2ff',
+  modify: '#fef3c7',
+  doc: '#dcfce7',
+  chat: '#f0fdf4',
+  code: '#f5f3ff',
+  translate: '#fdf2f8',
+  unsupported: '#fee2e2',
+}
 
 const STAGE_LABELS: Record<string, string> = {
   enter_router: '路由分发',
@@ -18,10 +30,27 @@ const STAGE_LABELS: Record<string, string> = {
   preview: '生成预览',
   done: '完成',
 }
+
+
+function intentLabel(intent: string): string {
+  const map: Record<string, string> = {
+    generate: '生成网站',
+    modify: '修改网站',
+    doc: '生成文档',
+    chat: '问答聊天',
+    code: '编写代码',
+    translate: '翻译文本',
+    unsupported: '不支持',
+  }
+  return map[intent] || intent
+}
 </script>
 
 <template>
   <div class="trail">
+    <div v-if="intent" class="intent-badge" :style="{ background: INTENT_COLORS[intent] || '#f1f5f9' }">
+      🧠 已识别: {{ intentLabel(intent) }}
+    </div>
     <div v-if="degraded" class="badge warn">⚠ 主模型不可用,已降级到备用模型</div>
 
     <!-- 计划 / 目标特殊节点:大计划作为卡片渲染,区别于普通思考文本 -->
@@ -69,6 +98,14 @@ const STAGE_LABELS: Record<string, string> = {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+.intent-badge {
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e293b;
+  border: 1px solid rgba(0, 0, 0, 0.06);
 }
 .badge {
   display: inline-block;

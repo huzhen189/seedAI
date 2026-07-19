@@ -254,6 +254,21 @@ async def quality(_=Depends(require_admin), db: AsyncSession = Depends(get_db)):
     total = len(traces)
     done = sum(1 for t in traces if t.status == "done")
 
+    from .cache import get_redis
+    try:
+        r = await get_redis()
+        unsupported_total = int((await r.get("stats:unsupported:total")) or 0)
+        samples_raw = await r.lrange("stats:unsupported_samples", 0, 19)
+        samples = []
+        for s in samples_raw:
+            try:
+                samples.append(json.loads(s))
+            except Exception:
+                pass
+    except Exception:
+        unsupported_total = 0
+        samples = []
+
     return {
         "feedback_count": len(ratings),
         "avg_rating": avg,
@@ -263,6 +278,8 @@ async def quality(_=Depends(require_admin), db: AsyncSession = Depends(get_db)):
         "reviewer_total": len(rev_events),
         "generation_total": total,
         "generation_success_rate": round(done / max(total, 1), 3),
+        "unsupported_count": unsupported_total,
+        "unsupported_samples": samples,
     }
 
 

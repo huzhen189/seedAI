@@ -6,6 +6,7 @@
 MVP 不引 Prometheus;后期可平滑替换为 /metrics 暴露文本格式。
 """
 
+import json
 import logging
 import time
 from datetime import datetime, timedelta
@@ -132,3 +133,22 @@ async def _db_status() -> dict:
         result["redis"] = {"ok": False, "error": str(e)[:200]}
 
     return result
+
+
+async def record_unsupported(user_id: int, text: str) -> None:
+    """记录不支持意图到 Redis(供管理后台统计 + 用户回归分析)。
+
+    - stats:unsupported:total → 原子自增总数
+    - stats:unsupported_samples → 最近 50 条采样(文本截 200 字, 带时间戳)
+    """
+    try:
+        r = await get_redis()
+        await r.incr("stats:unsupported:total")
+        sample = json.dumps(
+            {"user": user_id, "text": text[:200], "ts": int(time.time())},
+            ensure_ascii=False,
+        )
+        await r.lpush("stats:unsupported_samples", sample)
+        await r.ltrim("stats:unsupported_samples", 0, 49)  # 保留最近 50 条
+    except Exception as e:
+        logger.warning("record_unsupported failed: %s", e)

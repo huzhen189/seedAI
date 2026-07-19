@@ -42,6 +42,18 @@ export interface RetryEvent {
   message?: string
 }
 
+/** 意图识别结果(前端显示标签 + 控制面板). */
+export interface IntentEvent {
+  intent?: string
+  label?: string
+  confidence?: number
+}
+
+/** 不支持的功能提示. */
+export interface UnsupportedEvent {
+  message?: string
+}
+
 /** 思考时间线中的一步:每个 agent 节点对应一步,含该步的思考文本与状态。 */
 export interface ThoughtStep {
   stage: string

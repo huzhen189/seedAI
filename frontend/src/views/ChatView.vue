@@ -54,6 +54,12 @@ const generatedHtml = ref('')
 const previewUrl = ref<string | null>(null)
 const errorMsg = ref('')
 
+// 意图识别(由 AI intent 事件设置; 控制右侧面板显示)
+const currentIntent = ref('')
+const isGenerateIntent = computed(() =>
+  ['generate', 'modify', ''].includes(currentIntent.value),
+)
+
 async function downloadArtifactZip(artifact: Artifact) {
   if (!artifact.files) return
   const zip = new JSZip()
@@ -165,11 +171,12 @@ function resetGenState() {
   rating.value = 0
   rateComment.value = ''
   rateSubmitted.value = false
+  currentIntent.value = ''
   pendingRetry.value = null
 }
 
-function upsertStep(stage: string, status: ThoughtStep['status']) {
-  const label = STAGE_LABELS[stage] || stage
+function upsertStep(stage: string, status: ThoughtStep['status'], customLabel?: string) {
+  const label = customLabel || STAGE_LABELS[stage] || stage
   const existing = thoughtSteps.value.find((s) => s.stage === stage)
   if (existing) existing.status = status
   else thoughtSteps.value.push({ stage, label, status, think: '' })
@@ -255,6 +262,19 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
         suggested: d.suggested || [],
         message: d.message || '模型不可用',
       }
+    },
+    onIntent: (d) => {
+      currentIntent.value = d.intent || ''
+      // 在思考时间线顶部插入意图识别步骤
+      if (d.label) {
+        upsertStep('intent_' + (d.intent || 'unknown'), 'done', d.label)
+      }
+    },
+    onUnsupported: () => {
+      generating.value = false
+      finished.value = true
+      errorMsg.value = '暂不支持此功能，请尝试其他类型请求'
+      clearActiveGen()
     },
     onError: (m) => {
       generating.value = false
@@ -513,7 +533,7 @@ watch(pendingRetry, (r) => {
 
 <template>
   <div class="chat">
-    <div class="left-col">
+    <div class="left-col" :class="{ full: !isGenerateIntent }">
       <div class="conv-bar">
         <span class="proj">📁 {{ currentProjectName }}</span>
         <select :value="convStore.currentConvId ?? ''" @change="onConvChange">
@@ -538,6 +558,7 @@ watch(pendingRetry, (r) => {
           :plans="planNodes"
           :degraded="degraded"
           :current="currentStage"
+          :intent="currentIntent"
         />
       </div>
 
@@ -592,7 +613,7 @@ watch(pendingRetry, (r) => {
       </div>
     </div>
 
-    <div class="right-pane">
+    <div v-if="isGenerateIntent" class="right-pane">
       <!-- 生成产物文件面板(按项目) -->
       <div class="artifact-panel">
         <div class="artifact-head">📁 生成产物</div>
@@ -631,6 +652,9 @@ watch(pendingRetry, (r) => {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+}
+.left-col.full {
+  max-width: 100%;
 }
 .right-pane {
   width: 46%;

@@ -138,6 +138,7 @@ interface QualityData {
   reviewer_total: number
   generation_total: number
   generation_success_rate: number
+  unsupported_count?: number
 }
 const quality = ref<QualityData | null>(null)
 const qualityLoading = ref(false)
@@ -242,10 +243,10 @@ onUnmounted(() => {
       </div>
 
       <!-- 数据库状态 -->
-      <div class="block" v-if="dbItems.length">
+      <div v-if="dbItems.length" class="block">
         <h3>数据库状态</h3>
         <div class="db-grid">
-          <div class="db-card" v-for="item in dbItems" :key="item.key">
+          <div v-for="item in dbItems" :key="item.key" class="db-card">
             <span class="db-icon" :class="item.ok ? 'ok' : 'err'">{{ item.ok ? '●' : '●' }}</span>
             <span class="db-name">{{ item.key }}</span>
             <span class="db-stat" :class="item.ok ? 'ok' : 'err'">{{ item.ok ? '正常' : (item.error || '不可达') }}</span>
@@ -296,6 +297,10 @@ onUnmounted(() => {
         <div class="card">
           <div class="k">生成成功率</div>
           <div class="v">{{ (quality.generation_success_rate * 100).toFixed(0) }}%</div>
+        </div>
+        <div class="card">
+          <div class="k">不支持意图</div>
+          <div class="v">{{ quality.unsupported_count ?? 0 }}</div>
         </div>
       </div>
       <div v-if="quality && quality.rating_distribution && Object.keys(quality.rating_distribution).length" class="block">

@@ -63,7 +63,7 @@ async def run_skill(
                 else:
                     yield ev("token", data=item if isinstance(item, str) else str(item))
         else:
-            result = await handler(model_id=model_id, messages=messages)
+            result = await handler(model_id=model_id, messages=messages, trace_id=trace_id)
             if isinstance(result, dict) and "event" in result:
                 yield result
             else:

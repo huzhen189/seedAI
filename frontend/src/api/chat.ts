@@ -1,4 +1,4 @@
-import type { ChatMessage, ModelInfo, NodeEvent, PlanEvent, RetryEvent, ThinkEvent } from '../types'
+import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent } from '../types'
 import { notifyAuthRequired } from '../stores/auth'
 import { post, publicGet } from './client'
 
@@ -14,6 +14,10 @@ export interface ChatCallbacks {
   onError?: (msg: string) => void
   /** 主模型不可用时触发(data 含 failed/suggested/message),前端弹框待用户选替代模型后重发 */
   onRetry?: (data: RetryEvent) => void
+  /** 意图识别结果(7 类: chat/doc/generate/modify/translate/code/unsupported) */
+  onIntent?: (data: IntentEvent) => void
+  /** 不支持的功能提示(意图不属于已知范围) */
+  onUnsupported?: (data: UnsupportedEvent) => void
 }
 
 export interface StartChatOptions {
@@ -47,6 +51,8 @@ export function startChat(opts: StartChatOptions): EventSource {
   es.addEventListener('node', (e) => opts.cb.onNode?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('think', (e) => opts.cb.onThink?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('plan', (e) => opts.cb.onPlan?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('intent', (e) => opts.cb.onIntent?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('unsupported', (e) => opts.cb.onUnsupported?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('token', (e) => {
     const d = safeParse((e as MessageEvent).data)
     const text = typeof d.data === 'string' ? d.data : (e as MessageEvent).data
