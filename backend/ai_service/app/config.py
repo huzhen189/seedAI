@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     # 数据层
     redis_url: str = "redis://redis:6379/0"
     chroma_url: str = "http://chroma:8000"
+    # 本地开发用内存队列(进程内,不依赖 Redis),生产环境应设为 false 走 Redis Stream
+    dev_memory_queue: bool = False
 
     # 向量检索 / 记忆(Chroma + Qwen text-embedding,§7)
     qwen_embedding_key: str = ""  # DashScope embedding key(可复用 Qwen 大模型 key)

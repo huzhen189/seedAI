@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from typing import Any, Dict, Optional
 
 from .config import settings
@@ -26,6 +28,8 @@ from .runner import run_skill
 
 _JOB_QUEUE = "queue:generate"
 _STREAM_PREFIX = "gen:stream:"  # + trace_id -> Redis Stream(可回放进度)
+
+logger = logging.getLogger(__name__)
 
 
 class QueueBackend:
@@ -144,9 +148,16 @@ class RedisBackend(QueueBackend):
         except Exception as e:  # 含连接失败、HELLO/AUTH 不兼容等
             raise ConnectionError(f"Redis 不可用或不兼容: {e}") from e
 
-        # 异步客户端同样强制 protocol=2,与探测保持一致,避免首条命令就 HELLO 报错。
+        # 异步客户端:强制 protocol=2 + 心跳保活,防止公网 NAT/防火墙在长连接
+        # xread BLOCK 时静默掐断。health_check_interval=30 每 30s 发 PING 维持连接;
+        # socket_keepalive 启用 TCP keepalive;retry_on_timeout 读超时自动重试。
         self._r = aioredis.from_url(
-            settings.redis_url, decode_responses=True, protocol=2
+            settings.redis_url,
+            decode_responses=True,
+            protocol=2,
+            health_check_interval=30,
+            socket_keepalive=True,
+            retry_on_timeout=True,
         )
 
     def _key(self, trace_id: str) -> str:
@@ -179,11 +190,29 @@ class RedisBackend(QueueBackend):
                 return
         if hist:
             last_id = hist[-1][0]
-        # 2) 续接实时(阻塞等待新事件)
+        # 2) 续接实时(阻塞等待新事件,带连接断开重连)
+        import redis.asyncio as aioredis
+
         while True:
-            resp = await self._r.xread({key: last_id}, block=5000, count=100)
+            try:
+                resp = await self._r.xread({key: last_id}, block=5000, count=100)
+            except (aioredis.TimeoutError, aioredis.ConnectionError, OSError) as e:
+                # 公网 NAT/防火墙掐断长连接时触发;重建客户端从 last_id 续接
+                logger.warning("subscribe xread 断连, %s 秒后重连: %s", 1, e)
+                await asyncio.sleep(1)
+                with suppress(Exception):
+                    await self._r.aclose()
+                self._r = aioredis.from_url(
+                    settings.redis_url,
+                    decode_responses=True,
+                    protocol=2,
+                    health_check_interval=30,
+                    socket_keepalive=True,
+                    retry_on_timeout=True,
+                )
+                continue
             if not resp:
-                # 超时:再探一次,避免长空闲误判结束;若流已含终止事件则退出
+                # 超时无新数据:再探一次,避免长空闲误判;若流已含终止事件则退出
                 continue
             for _k, entries in resp:
                 for entry_id, fields in entries:
