@@ -20,6 +20,7 @@ export const useConversationStore = defineStore('conversation', () => {
   const loadedPastCount = ref(0)                       // 已加载到第几个历史会话
   const pendingConvId = ref<number | null>(null)
   const creating = ref(false)  // 防并发创建
+  let _busy = false            // 防 loadConversations 并发
 
   /** 当前会话标题 */
   const currentTitle = computed(() =>
@@ -28,6 +29,8 @@ export const useConversationStore = defineStore('conversation', () => {
 
   /** 切换项目: 加载会话列表 + 恢复或新建会话。 */
   async function loadConversations(projectId: number) {
+    if (_busy) return  // 防并发: 前一次未完成时忽略后续调用
+    _busy = true
     loading.value = true
     try {
       conversations.value = await projectsApi.listConversations(projectId)
@@ -55,6 +58,7 @@ export const useConversationStore = defineStore('conversation', () => {
       await loadMoreHistory()
     } finally {
       loading.value = false
+      _busy = false
     }
   }
 

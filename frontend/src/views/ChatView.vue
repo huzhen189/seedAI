@@ -674,9 +674,6 @@ watch(pendingRetry, (r) => {
             <span>{{ s.conv.title || '会话' }} · {{ s.conv.updated_at?.slice(0, 10) || '' }}</span>
           </div>
           <div v-if="s.loading" class="loading-more">加载中…</div>
-          <div v-else-if="s.msgs.length === 0 && si === 0 && !generating" class="empty">
-            在下方输入你想做的事，AI 会智能识别意图并给出回复。
-          </div>
           <MessageBubble
             v-for="(m, i) in s.msgs"
             :key="`s${si}-${i}`"
@@ -685,11 +682,6 @@ watch(pendingRetry, (r) => {
             :time="m.role === 'user' ? (m.created_at || '') : ''"
           />
         </template>
-
-        <!-- 全新项目无任何会话 -->
-        <div v-if="convStore.conversations.length === 0" class="empty">
-          在下方输入你想做的事，AI 会智能识别意图并给出回复。
-        </div>
       </div>
 
       <div v-if="isGenerateIntent && (thoughtSteps.length || planNodes.length)" class="trail-wrap">
