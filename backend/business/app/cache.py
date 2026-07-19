@@ -30,6 +30,7 @@ async def get_redis() -> aioredis.Redis:
             protocol=2,
             health_check_interval=30,
             socket_keepalive=True,
+            socket_timeout=10,
         )
     return _pool
 

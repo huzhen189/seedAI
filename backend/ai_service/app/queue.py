@@ -148,9 +148,10 @@ class RedisBackend(QueueBackend):
         except Exception as e:  # 含连接失败、HELLO/AUTH 不兼容等
             raise ConnectionError(f"Redis 不可用或不兼容: {e}") from e
 
-        # 异步客户端:强制 protocol=2 + 心跳保活,防止公网 NAT/防火墙在长连接
-        # xread BLOCK 时静默掐断。health_check_interval=30 每 30s 发 PING 维持连接;
-        # socket_keepalive 启用 TCP keepalive;retry_on_timeout 读超时自动重试。
+        # 异步客户端:强制 protocol=2 + 心跳保活 + 显式 socket_timeout。
+        # health_check_interval=30 每 30s 发 PING 维持连接;
+        # socket_keepalive 启用 TCP keepalive;retry_on_timeout 读超时自动重试;
+        # socket_timeout=10 给足 xread block 的缓冲(block=3000,超时后 1s 重连)。
         self._r = aioredis.from_url(
             settings.redis_url,
             decode_responses=True,
@@ -158,6 +159,7 @@ class RedisBackend(QueueBackend):
             health_check_interval=30,
             socket_keepalive=True,
             retry_on_timeout=True,
+            socket_timeout=10,
         )
 
     def _key(self, trace_id: str) -> str:
@@ -195,7 +197,7 @@ class RedisBackend(QueueBackend):
 
         while True:
             try:
-                resp = await self._r.xread({key: last_id}, block=5000, count=100)
+                resp = await self._r.xread({key: last_id}, block=3000, count=100)
             except (aioredis.TimeoutError, aioredis.ConnectionError, OSError) as e:
                 # 公网 NAT/防火墙掐断长连接时触发;重建客户端从 last_id 续接
                 logger.warning("subscribe xread 断连, %s 秒后重连: %s", 1, e)
@@ -209,6 +211,7 @@ class RedisBackend(QueueBackend):
                     health_check_interval=30,
                     socket_keepalive=True,
                     retry_on_timeout=True,
+                    socket_timeout=10,
                 )
                 continue
             if not resp:
