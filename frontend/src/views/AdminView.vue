@@ -102,6 +102,39 @@ const scaleReplicas = ref(2)
 const stopName = ref('ai_service')
 const ctrlMsg = ref('')
 
+// ---- 重置系统(超管) ----
+const resetLoading = ref(false)
+const resetMsg = ref('')
+async function doReset() {
+   
+  const ok = confirm('⚠ 此操作将清空全部数据库记录 + Redis 缓存。系统将重建表并创建默认超管用户 huzhen。前端本地数据也将一并清除。是否继续？')
+  if (!ok) return
+  resetLoading.value = true
+  resetMsg.value = ''
+  try {
+    // 1) 清理前端本地数据
+    localStorage.clear()
+    sessionStorage.clear()
+    if (window.indexedDB?.databases) {
+      try {
+        const dbs = await window.indexedDB.databases()
+        for (const db of dbs) { if (db.name) window.indexedDB.deleteDatabase(db.name) }
+      } catch { /* IndexedDB 清理静默忽略 */ }
+    }
+    // 2) 调后端清库
+    const r = await post('/admin/reset?confirm=yes')
+    if (r.success) {
+      resetMsg.value = `✅ ${r.message}\n已 DROP ${r.tables_dropped} 张表, Redis ${r.redis_cleared ? '已清空' : '清理失败'}。\n请立即重启两个后端服务(业务 7101 + AI 7102)，刷新本页面重新登录。`
+    } else {
+      resetMsg.value = `❌ 重置失败: ${r.error || '未知错误'}`
+    }
+  } catch (e: unknown) {
+    resetMsg.value = `❌ 网络错误: ${e instanceof Error ? e.message : String(e)}`
+  } finally {
+    resetLoading.value = false
+  }
+}
+
 // ---- DB 状态展示(类型桥接 v-for) ----
 interface DbItem { key: string; ok: boolean; error?: string; pool_size?: number; checked_in?: number; overflow?: number }
 const dbItems = computed<DbItem[]>(() => {
@@ -553,6 +586,14 @@ onUnmounted(() => {
           <button class="danger" @click="doStop">停止</button>
         </div>
       </div>
+      <div class="block">
+        <h3>🛡 重置系统</h3>
+        <p class="hint">清空全部数据库 + Redis + 前端本地数据，重建表并创建默认超管。需重启服务。</p>
+        <button class="danger" :disabled="resetLoading" @click="doReset">
+          {{ resetLoading ? '执行中…' : '确认重置' }}
+        </button>
+        <pre v-if="resetMsg" class="reset-log">{{ resetMsg }}</pre>
+      </div>
       <p v-if="ctrlMsg" class="ctrlmsg">{{ ctrlMsg }}</p>
       <p class="hint">控制面为占位实现(M1 接 DockerComposeOrchestrator / K8s),当前仅 ack。</p>
     </section>
@@ -800,4 +841,5 @@ onUnmounted(() => {
 .rate-bar::before { content: ''; position: absolute; bottom: 0; left: 0; height: 4px; border-radius: 2px; background: linear-gradient(90deg, #22c55e var(--rate), #fee2e2 var(--rate)); width: 100%; }
 .rate-sub { font-size: 13px; color: var(--muted); font-weight: 400; }
 h4 { margin: 12px 0 8px; font-size: 14px; color: #1e293b; }
+.reset-log { white-space: pre-wrap; font-size: 12px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 12px; margin-top: 10px; color: #991b1b; line-height: 1.6; }
 </style>

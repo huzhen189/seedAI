@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_db
+from .db import reset_db as do_reset_db
 from .metrics import snapshot
 from .models import Feedback, Trace, TraceEvent, UsageLog, User
 from .orchestrator import run_scale, run_start, run_stop
@@ -149,6 +150,23 @@ async def scale_service(
     """手动扩缩容(⑥-b):真实调用 `docker compose up -d --scale`,返回执行日志。"""
     result = await run_scale(name, replicas)
     return {"ack": True, "service": name, "target_replicas": replicas, **result}
+
+
+@router.post("/reset")
+async def reset_system(confirm: str = Query(""), _=Depends(require_super_admin)):
+    """全量重置系统(超管): 清空数据库+Redis → 重建表 → 种子用户。
+
+    前端调用前应先清理本地数据(localStorage/sessionStorage/IndexedDB)。
+    返回后需手动重启两个后端服务。
+    """
+    if confirm != "yes":
+        raise HTTPException(400, detail="请在 query 中传 confirm=yes 以确认")
+    try:
+        result = await do_reset_db()
+        return result
+    except Exception as e:
+        logger.exception("reset_db 失败")
+        return {"success": False, "error": str(e)}
 
 
 @router.post("/stop")

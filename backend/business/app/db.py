@@ -188,6 +188,52 @@ async def _seed_default_user() -> None:
         logger.warning("默认用户创建失败(已跳过): %s", e)
 
 
+async def reset_db() -> dict:
+    """前端触发的全量重置: DROP 表 → FLUSHDB Redis → 重建 → 种子用户。
+
+    返回 {success, tables_dropped, redis_cleared, message}。
+    注意: 调用后服务需重启才能完全生效(进程内 engine 连接已失效)。
+    """
+    from .models import Base
+
+    result: dict = {"success": True, "tables_dropped": 0, "redis_cleared": False}
+
+    # 1) DROP 所有表
+    async with engine.begin() as conn:
+        def _drop(sync_conn):
+            insp = inspect(sync_conn)
+            tables = insp.get_table_names()
+            for t in tables:
+                sync_conn.execute(text(f"DROP TABLE IF EXISTS `{t}`"))
+            return tables
+        tables = await conn.run_sync(_drop)
+        result["tables_dropped"] = len(tables)
+        logger.info("reset_db: 已 DROP %s 张表", len(tables))
+
+    # 2) FLUSHDB Redis
+    try:
+        from .cache import get_redis
+        r = await get_redis()
+        await r.flushdb()
+        result["redis_cleared"] = True
+        logger.info("reset_db: Redis 已清空")
+    except Exception as e:
+        logger.warning("reset_db: Redis 清理失败: %s", e)
+
+    # 3) 重建表
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("reset_db: 表已重建")
+
+    # 4) 补齐列 + 种子用户
+    await init_db()
+
+    await engine.dispose()
+    result["message"] = "数据已全部清理并重建。请重启两个后端服务(业务 7101 + AI 7102)完成生效。"
+    logger.info("reset_db: 完成, engine 已 dispose, 等待重启")
+    return result
+
+
 async def get_db():
     async with SessionLocal() as session:
         yield session
