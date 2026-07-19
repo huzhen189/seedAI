@@ -7,6 +7,7 @@ publish → 本端点订阅该频道并转成 SSE 帧透传给业务服务(§3.7
 
 from __future__ import annotations
 
+import logging
 import uuid
 from contextlib import asynccontextmanager
 
@@ -27,6 +28,8 @@ from .registry import SkillRegistry, ToolRegistry
 # 初始化日志:控制台 + 本地按日期滚动文件(backend/ai_service/logs/ai_service.log)。
 # 必须在 bootstrap/路由装配前调用,确保启动期与注册期日志也能落盘。
 setup_logging("ai_service")
+
+logger = logging.getLogger("ai_service.main")
 
 # 引导注册(导入 skills + tools 包,完成全部注册)
 _REGISTRY = bootstrap()
@@ -108,13 +111,9 @@ async def registry_summary():
 
 @app.post("/generate")
 async def generate(req: GenerateReq, after: str | None = None):
-    """SSE 生成端点:入队 → 订阅进度流 → 透传事件流(§3.7 / 1-C)。
-
-    - trace_id 已存在(进度流已建立)→ **续接已有流**(回放 + 实时),不再重新入队;
-      这是「离线继续 + 重连回放」的关键:Worker 独立运行,断线重连只是重新订阅同一流。
-    - after 为断点(stream id):仅回放其后的增量;为 None 则从头全量回放。
-    """
+    """SSE 生成端点:入队 → 订阅进度流 → 透传事件流(§3.7 / 1-C)。"""
     q = get_queue()
+    queue_type = type(q).__name__
     trace_id = req.trace_id or uuid.uuid4().hex
     resuming = await q.stream_exists(trace_id)
     if not resuming:
@@ -127,10 +126,23 @@ async def generate(req: GenerateReq, after: str | None = None):
             "skill": req.skill,
         }
         await q.enqueue(job)
+        logger.info(
+            "[generate] 新任务 trace=%s model=%s 消息数=%s skill=%s queue=%s",
+            trace_id, req.model_id, len(req.messages), req.skill or "auto", queue_type,
+        )
+    else:
+        after_info = f" after={after}" if after else " 全量回放"
+        logger.info(
+            "[generate] 续接已有流 trace=%s%s queue=%s", trace_id, after_info, queue_type
+        )
 
+    event_count = 0
     async def stream():
+        nonlocal event_count
         async for event in q.subscribe(trace_id, after):
+            event_count += 1
             yield to_sse(event)
+        logger.info("[generate] 流结束 trace=%s 事件数=%s", trace_id, event_count)
 
     return EventSourceResponse(stream())
 

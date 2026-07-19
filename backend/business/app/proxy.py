@@ -176,44 +176,48 @@ async def chat(
     鉴权失败:返回 SSE error 事件(code=AUTH_REQUIRED),而非 JSON 401,
     以便前端 EventSource 识别并主动弹出登录框。
     """
-    # 手动解析登录态;未登录则下发 SSE auth error(浏览器读不到 401 状态码)。
+    # --- 1) 鉴权 ---
     user = await _resolve_user(request)
     if user is None:
+        logger.info("[chat] 鉴权失败 — 未登录或 token 无效")
         return _sse_auth_error()
+    logger.info("[chat] 鉴权通过 user_id=%s role=%s", user.id, user.role)
 
+    # --- 2) 解析消息 ---
     messages = _parse_messages(request)
     tid = trace_id or uuid.uuid4().hex
-
-    # 取首条用户消息文本(用于落库 + 自动标题)
     user_text = ""
     for m in messages:
         if m.get("role") == "user":
             user_text = m.get("content", "") or ""
             break
+    logger.info(
+        "[chat] trace=%s conv=%s model=%s 消息数=%s 首条=%.60s",
+        tid, conversation_id, model, len(messages), user_text,
+    )
 
-    # 每日配额检查(①-b):基于 user_id,free 默认 50 次/天,超额返回 RATE_LIMITED 帧
+    # --- 3) 配额检查 ---
     plan = (
         await db.execute(select(User.plan).where(User.id == user.id))
     ).scalar_one_or_none() or "free"
-    allowed, _ = await consume_daily_quota(user.id, plan)
+    allowed, remaining = await consume_daily_quota(user.id, plan)
     if not allowed:
+        logger.warning("[chat] 配额用尽 user=%s plan=%s", user.id, plan)
         return _sse_error_frame(
             "RATE_LIMITED",
             f"今日生成次数已用尽（{settings.free_daily_quota} 次/天），请明日再来或升级套餐",
         )
+    logger.info("[chat] 配额检查通过 plan=%s 剩余=%s", plan, remaining)
 
-    # 已登录用户按真实 user_id 计量
+    # --- 4) 计量 + Trace ---
     await record_model_usage(user.id, model)
-
-    # 新建 Trace(③-a:对话追踪 / 回放 / 质量统计)
     await create_trace(db, user.id, conversation_id, tid, model)
+    logger.info("[chat] trace 已创建 + 模型用量已记录")
 
     payload = {"model_id": model, "messages": messages, "trace_id": tid}
-    # 续传:把 after 作为查询参数转发给 AI /generate(断点续接同一进度流)
     gen_url = f"{settings.ai_service_url}/generate"
     if after:
         from urllib.parse import urlencode
-
         gen_url += "?" + urlencode({"after": after})
 
     async def publisher():
@@ -223,6 +227,8 @@ async def chat(
         preview_url: str | None = None  # 捕获预览直链(供分享「复制预览链接」使用)
         event_seq: int = 0  # 结构化事件序号(供回放重建时间线)
         terminal_status: str = "done"  # 终态:done|error|aborted
+        event_counts: dict[str, int] = {}  # 各类 SSE 事件计数(供日志)
+        logger.info("[chat] 开始连接 AI 服务 %s", gen_url)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 try:
@@ -232,23 +238,27 @@ async def chat(
                         json=payload,
                     ) as resp:
                         if resp.status_code >= 400:
-                            # 上游报错:翻译成 SSE error 帧(而非裸字节),
-                            # 浏览器 EventSource 才能识别并提示明确文案。
                             err_text = await resp.aread()
                             code, message = _map_upstream_error(resp.status_code, err_text)
                             terminal_status = "error"
+                            logger.warning(
+                                "[chat] AI 服务返回 %s: %s", resp.status_code, message
+                            )
                             yield _error_frame(code, message)
                             return
+                        logger.info("[chat] AI 服务已连接, 开始接收事件流")
                         event = None
                         data_parts: list[str] = []
                         async for raw_line in resp.aiter_lines():
                             if raw_line == "":
                                 if event is not None or data_parts:
                                     data = "\n".join(data_parts)
+                                    event_counts[event or "message"] = (
+                                        event_counts.get(event or "message", 0) + 1
+                                    )
                                     if event == "token":
                                         assistant_parts.append(data)
                                     elif event in ("node", "think", "plan", "error", "aborted", "degraded"):
-                                        # 结构化事件落库(③-a:回放 / 质量统计)
                                         try:
                                             payload_obj = json.loads(data) if data else None
                                         except Exception:
@@ -256,14 +266,9 @@ async def chat(
                                         stage = None
                                         if isinstance(payload_obj, dict) and event in ("node", "think"):
                                             stage = payload_obj.get("stage")
-                                        # 捕获预览直链(⑤-b:复制预览链接)
-                                        if (
-                                            event == "node"
-                                            and isinstance(payload_obj, dict)
-                                            and payload_obj.get("stage") == "preview"
-                                            and payload_obj.get("url")
-                                        ):
-                                            preview_url = payload_obj["url"]
+                                        if event == "node" and isinstance(payload_obj, dict):
+                                            if payload_obj.get("stage") == "preview" and payload_obj.get("url"):
+                                                preview_url = payload_obj["url"]
                                         event_seq += 1
                                         await append_trace_event(
                                             db, tid, event_seq, event, stage=stage, payload=payload_obj
@@ -272,7 +277,10 @@ async def chat(
                                             terminal_status = "aborted"
                                         elif event == "error":
                                             terminal_status = "error"
-                                    # 重建标准 SSE 帧透传(兼容前端 EventSource)
+                                        logger.info(
+                                            "[chat] SSE 事件 seq=%s type=%s stage=%s",
+                                            event_seq, event, stage or "-",
+                                        )
                                     frame = ""
                                     if event:
                                         frame += f"event: {event}\n"
@@ -284,20 +292,22 @@ async def chat(
                                 event = raw_line[6:].strip()
                             elif raw_line.startswith("data:"):
                                 data_parts.append(raw_line[5:].strip())
-                                # 其他行(id:/retry:/注释)忽略透传
                 except httpx.HTTPError as e:
-                    # 上游连接/读取异常(AI 服务宕机、Redis 未起导致
-                    # /generate 入队失败而 5xx 等):下发 SSE error 帧,
-                    # 避免连接裸断让前端只能笼统报“连接中断”。
-                    logger.warning("upstream request failed: %s", e)
+                    logger.warning("[chat] AI 连接异常: %s", e)
                     terminal_status = "error"
                     yield _error_frame("UPSTREAM_ERROR", "AI 服务暂时不可用，请稍后重试")
                     return
         finally:
-            # 流结束(正常/中断)均尝试落库;失败仅记录,不阻塞已返回的流
+            approx_tokens = max(0, len("".join(assistant_parts)) // 4)
+            logger.info(
+                "[chat] 流结束 trace=%s 状态=%s 事件数=%s tokens≈%s preview=%s",
+                tid,
+                terminal_status,
+                sum(event_counts.values()),
+                approx_tokens,
+                bool(preview_url),
+            )
             try:
-                # 结束 Trace + 写用量账本(③-a)
-                approx_tokens = max(0, len("".join(assistant_parts)) // 4)
                 await finish_trace(db, tid, terminal_status, approx_tokens)
                 await log_usage(
                     db,
@@ -307,7 +317,6 @@ async def chat(
                     model,
                     completion_tokens=approx_tokens,
                 )
-                # 落库对话(含预览直链回填)
                 await _persist_conversation(
                     db,
                     user,
@@ -318,8 +327,9 @@ async def chat(
                     tid,
                     preview_url=preview_url,
                 )
-            except Exception as e:  # 落库失败不影响已完成生成
-                logger.warning("persist conversation failed: %s", e)
+                logger.info("[chat] 落库完成 trace=%s", tid)
+            except Exception as e:
+                logger.warning("[chat] 落库失败 trace=%s: %s", tid, e)
 
     return StreamingResponse(
         publisher(),

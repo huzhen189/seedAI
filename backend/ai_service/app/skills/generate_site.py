@@ -12,6 +12,7 @@ M0 实现为显式异步生成器(比 LangGraph astream_events 更易产出结�
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 from collections.abc import AsyncGenerator
 from contextlib import suppress
@@ -19,9 +20,17 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from ..events import ev
-from ..providers import ModelUnavailableError, astream_with_fallback, get_chat_model, resolve_fallback_order
+from ..providers import (
+    ModelUnavailableError,
+    astream_with_fallback,
+    get_chat_model,
+    resolve_fallback_order,
+)
 from ..rag import build_rag_context, save_memory
 from ..registry import register_skill
+
+
+GEN_LOG = logging.getLogger("ai_service.generate")
 
 
 SYS_PLANNER = (
@@ -178,6 +187,7 @@ async def generate_stream(
     try:
         # 1) Planner
         yield ev("node", stage="enter_planner")
+        GEN_LOG.info("[gen] Planner 开始 trace=%s model=%s rag=%schars", trace_id, model_id, len(rag_ctx))
         planner_msgs = [{"role": "user", "content": first_user_msg or (messages[-1].get("content", "") if messages else "")}]
         if rag_ctx:
             planner_msgs.append(
@@ -185,6 +195,10 @@ async def generate_stream(
             )
         spec = _chat(model_id, SYS_PLANNER, planner_msgs)
         plan = _parse_plan(spec)
+        GEN_LOG.info(
+            "[gen] Planner 完成 trace=%s title=%s steps=%s",
+            trace_id, plan.get("title", "-"), len(plan.get("steps", [])),
+        )
         # 思考流:Planner 的拆解思路(分步思考的一部分)
         if plan.get("reasoning"):
             yield ev("think", stage="planner", content=plan["reasoning"])
@@ -198,23 +212,34 @@ async def generate_stream(
 
         # 2) Coder(流式,模型不可用时不自动降级,由前端确认后重发)
         yield ev("node", stage="enter_coder")
+        GEN_LOG.info("[gen] Coder 开始 trace=%s model=%s", trace_id, model_id)
         user_msgs = [{"role": "user", "content": f"需求规格:\n{spec}"}] + messages
         html_parts: list = []
-        async for chunk, mid in astream_with_fallback(model_id, user_msgs, system=SYS_CODER):
+        token_count = 0
+        async for chunk, _ in astream_with_fallback(model_id, user_msgs, system=SYS_CODER):
             if await _cancelled_now(is_cancelled):
                 yield ev("aborted")
                 return
             text = getattr(chunk, "content", chunk)
             if text:
                 html_parts.append(text)
+                token_count += 1
                 yield ev("token", data=text)
-        yield ev("degraded", model=mid, requested=model_id)
+        yield ev("degraded", model=model_id, requested=model_id)
         html = _extract_html("".join(html_parts))
+        GEN_LOG.info(
+            "[gen] Coder 完成 trace=%s chars=%s chunks=%s model=%s",
+            trace_id, len(html), token_count, model_id,
+        )
 
         # 3) Reviewer + Reflexion(≤3 轮)
         for attempt in range(3):
             yield ev("node", stage="enter_reviewer", attempt=attempt + 1)
             review = _review(model_id, html)
+            GEN_LOG.info(
+                "[gen] Reviewer 第%s轮 trace=%s passed=%s",
+                attempt + 1, trace_id, review["passed"],
+            )
             yield ev("think", stage="reviewer", passed=review["passed"], comment=review["comment"])
             if review["passed"]:
                 break
@@ -227,7 +252,7 @@ async def generate_stream(
                 }
             ]
             html_parts = []
-            async for chunk, mid in astream_with_fallback(model_id, fix_msgs, system=SYS_CODER):
+            async for chunk, _ in astream_with_fallback(model_id, fix_msgs, system=SYS_CODER):
                 if await _cancelled_now(is_cancelled):
                     yield ev("aborted")
                     return
@@ -235,12 +260,13 @@ async def generate_stream(
                 if text:
                     html_parts.append(text)
                     yield ev("token", data=text)
-            yield ev("degraded", model=mid, requested=model_id)
+            yield ev("degraded", model=model_id, requested=model_id)
             html = _extract_html("".join(html_parts))
 
         # 4) 预览投递(COS 直链,§10)
         yield ev("node", stage="previewing")
         url = _deliver(html, trace_id)
+        GEN_LOG.info("[gen] 预览投递 trace=%s url=%s", trace_id, url or "无(srcdoc 兜底)")
         yield ev("node", stage="preview", url=url, fallback="srcdoc" if not url else None)
 
         # ②-a 记忆闭环:生成成功后回写 memory 集合(供未来检索增强)
@@ -253,8 +279,12 @@ async def generate_stream(
             )
 
         yield ev("node", stage="done")
+        GEN_LOG.info("[gen] 完成 trace=%s html=%schars", trace_id, len(html))
 
     except ModelUnavailableError as e:
+        GEN_LOG.warning(
+            "[gen] 模型不可用 trace=%s failed=%s suggested=%s", trace_id, e.failed, e.suggested
+        )
         yield ev(
             "retry",
             failed=e.failed,
