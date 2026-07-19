@@ -49,6 +49,10 @@ async def run_skill(
 
     yield ev("node", stage="dispatch", skill=entry.name)
 
+    # 行业信息透传(供 Planner 注入设计约束)
+    industry = intent_info.get("industry", "other") if intent_info else "other"
+    intent = intent_info.get("intent") if intent_info else None
+
     handler = entry.handler
     try:
         if entry.is_graph or inspect.isasyncgenfunction(handler):
@@ -57,7 +61,8 @@ async def run_skill(
                 messages=messages,
                 trace_id=trace_id,
                 is_cancelled=is_cancelled,
-                intent=intent_info.get("intent") if intent_info else None,
+                intent=intent,
+                industry=industry,
             ):
                 if isinstance(item, dict) and "event" in item:
                     yield item

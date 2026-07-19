@@ -68,6 +68,22 @@ SYS_REVIEWER = (
     '{"passed": true/false, "comment": "..."}'
 )
 
+# 行业→设计约束(注入 Planner)
+INDUSTRY_DESIGN: dict[str, str] = {
+    "restaurant": "暖色系(橙/红), 大图Banner, 菜单卡片, 预约/订座按钮, 电话醒目, 食品照突出",
+    "ecommerce": "商品网格布局, 搜索+筛选栏, 购物车图标, 促销标签, 评分星级, 分类导航",
+    "gov": "蓝白/红白主色调, 庄重权威, 无障碍访问(aria标签), 公告栏置顶, 政务标识",
+    "edu": "清新蓝绿, 课程卡片列表, 报名表单, 师资展示, 学生作品, 联系方式",
+    "health": "柔和蓝白/米色, 信任感强, 预约挂号按钮, 医生卡片, 卫生标识, 保险提示",
+    "finance": "深蓝/金色, 专业严谨, 数据图表, 合规声明, 安全标识, 客服入口",
+    "game": "暗色/赛博朋克, 动效丰富, 全屏沉浸, 开始游戏大按钮, 操作提示, Three.js",
+    "personal": "简约留白, 个人头像, 作品集卡片, 社交媒体链接, 时间线布局, 关于我",
+    "corp": "品牌色主调, 大图+视频Hero, 案例/客户Logo墙, 联系方式醒目, 关于我们",
+    "tech": "深色渐变, 产品截图/动图, 技术特性图标, CTA按钮, 代码风格, 功能介绍",
+    "media": "视觉冲击, 引导关注, 瀑布流布局, 视频嵌入, 订阅入口, 社交分享",
+    "other": "现代简约, 卡片布局, 响应式, 清新配色",
+}
+
 
 def _chat(model_id: str, system: str, user_msgs: list) -> str:
     """同步调用模型(Planner/Reviewer)。失败时不自动降级,抛 ModelUnavailableError 让前端选替代。"""
@@ -187,6 +203,7 @@ async def generate_stream(
     trace_id: Optional[str] = None,
     is_cancelled=None,
     intent: Optional[str] = None,
+    industry: Optional[str] = None,
 ) -> AsyncGenerator[Dict, None]:
     # 根据意图选 Coder 系统提示(游戏 vs 建站)
     coder_prompt = SYS_CODER_GAME if intent == "game" else SYS_CODER
@@ -215,6 +232,12 @@ async def generate_stream(
         if rag_ctx:
             planner_msgs.append(
                 {"role": "user", "content": f"【参考上下文(组件库 / 历史记忆)】\n{rag_ctx}"}
+            )
+        # 注入行业设计约束
+        if industry and industry != "none":
+            design_hint = INDUSTRY_DESIGN.get(industry, INDUSTRY_DESIGN["other"])
+            planner_msgs.append(
+                {"role": "user", "content": f"【行业设计约束: {industry}】\n{design_hint}"}
             )
         spec = _chat(model_id, SYS_PLANNER, planner_msgs)
         plan = _parse_plan(spec)

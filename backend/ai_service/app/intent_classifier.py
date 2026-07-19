@@ -16,7 +16,8 @@ from .providers import get_chat_model, resolve_fallback_order
 
 INTENT_SYSTEM = (
     "你是意图分类器。根据用户输入, 只返回一个 JSON, 不要额外文字。\n"
-    "{\"intent\": \"chat|doc|generate|modify|translate|code|game|unsupported\", \"confidence\": 0.0~1.0}\n\n"
+    "{\"intent\": \"chat|doc|generate|modify|translate|code|game|unsupported\", \"confidence\": 0.0~1.0, "
+    "\"industry\": \"restaurant|ecommerce|gov|edu|health|finance|game|personal|corp|tech|media|other|none\"}\n\n"
     "分类规则:\n"
     "- chat: 闲聊、知识问答、解释概念、日常对话\n"
     "- doc: 生成文档、产品构思、方案计划、说明、教程\n"
@@ -26,6 +27,11 @@ INTENT_SYSTEM = (
     "- code: 编写代码片段/函数/脚本(不是完整网页)\n"
     "- game: 生成互动小游戏(贪吃蛇、打砖块、射击、2048等)\n"
     "- unsupported: 以上都不匹配\n\n"
+    "industry(12选1, 仅 build/doc/game 时必填, 其他填 \"none\"):\n"
+    "restaurant(餐饮/美食/外卖) | ecommerce(电商/零售/商城) | gov(政府/政务/机构)\n"
+    "| edu(教育/培训/学校) | health(医疗/健康/养生) | finance(金融/银行/保险)\n"
+    "| game(游戏) | personal(个人/博客/简历) | corp(企业/公司/集团)\n"
+    "| tech(科技/SaaS/IT) | media(媒体/视频/娱乐) | other(其他/不明确)\n\n"
     "用户输入: "
 )
 
@@ -49,7 +55,7 @@ def classify(messages: list[dict], model_id: str = "hy3") -> dict:
         for m in messages
     )
     if has_html:
-        return {"intent": "modify", "confidence": 0.99}
+        return {"intent": "modify", "confidence": 0.99, "industry": "other"}
 
     # LLM 分类
     order = resolve_fallback_order(model_id)
@@ -65,11 +71,18 @@ def classify(messages: list[dict], model_id: str = "hy3") -> dict:
             data = json.loads(m.group(0)) if m else {}
             intent = data.get("intent", "")
             confidence = float(data.get("confidence", 0.5))
+            industry = data.get("industry", "none") or "none"
+            VALID_INDUSTRIES = (
+                "restaurant", "ecommerce", "gov", "edu", "health",
+                "finance", "game", "personal", "corp", "tech", "media", "other", "none",
+            )
+            if industry not in VALID_INDUSTRIES:
+                industry = "other"
             if intent in (
                 "chat", "doc", "generate", "modify",
                 "translate", "code", "game", "unsupported",
             ):
-                return {"intent": intent, "confidence": confidence}
+                return {"intent": intent, "confidence": confidence, "industry": industry}
             # 无效分类 → 关键词兜底
             break
         except Exception as e:
@@ -81,24 +94,50 @@ def classify(messages: list[dict], model_id: str = "hy3") -> dict:
 
 
 def _keyword_fallback(text: str) -> dict:
+    """关键词兜底(分类器全失败时)，返回 {intent, confidence, industry}。"""
     t = text.lower()
+    # 先探测行业
+    industry = "other"
+    if any(w in t for w in ("餐饮", "餐厅", "饭店", "美食", "外卖", "菜单")):
+        industry = "restaurant"
+    elif any(w in t for w in ("电商", "商城", "购物", "商品", "店铺", "淘宝")):
+        industry = "ecommerce"
+    elif any(w in t for w in ("政府", "政务", "机关", "机构", "办事", "大厅", "民政")):
+        industry = "gov"
+    elif any(w in t for w in ("教育", "学校", "培训", "课程", "学生", "教师", "大学")):
+        industry = "edu"
+    elif any(w in t for w in ("医疗", "医院", "健康", "诊所", "医生", "预约", "挂号")):
+        industry = "health"
+    elif any(w in t for w in ("金融", "银行", "保险", "理财", "证券", "基金", "贷款")):
+        industry = "finance"
+    elif any(w in t for w in ("游戏", "game", "娱乐")):
+        industry = "game"
+    elif any(w in t for w in ("个人", "博客", "简历", "作品集", "portfolio")):
+        industry = "personal"
+    elif any(w in t for w in ("企业", "公司", "集团", "品牌", "corp")):
+        industry = "corp"
+    elif any(w in t for w in ("科技", "SaaS", "软件", "平台", "系统", "App", "IT")):
+        industry = "tech"
+    elif any(w in t for w in ("媒体", "视频", "抖音", "直播", "娱乐")):
+        industry = "media"
+
     if any(w in t for w in ("翻译", "translate", "译成")):
-        return {"intent": "translate", "confidence": 0.7}
+        return {"intent": "translate", "confidence": 0.7, "industry": "none"}
     if any(w in t for w in (
         "游戏", "game", "贪吃蛇", "打砖块", "坦克大战", "射击",
         "2048", "消消乐", "弹球", "飞机大战", "小游戏",
     )):
-        return {"intent": "game", "confidence": 0.7}
+        return {"intent": "game", "confidence": 0.7, "industry": "game"}
     if any(w in t for w in (
         "网站", "页面", "网页", "落地页", "主页", "官网",
         "site", "landing", "homepage", "web",
     )):
-        return {"intent": "generate", "confidence": 0.7}
+        return {"intent": "generate", "confidence": 0.7, "industry": industry}
     if any(w in t for w in ("代码", "函数", "脚本", "写一个", "snippet", "编程")):
-        return {"intent": "code", "confidence": 0.7}
+        return {"intent": "code", "confidence": 0.7, "industry": industry if industry != "other" else "none"}
     if any(w in t for w in (
         "文档", "计划", "方案", "构思", "说明", "教程",
         "doc", "plan", "tutorial",
     )):
-        return {"intent": "doc", "confidence": 0.7}
-    return {"intent": "chat", "confidence": 0.5}
+        return {"intent": "doc", "confidence": 0.7, "industry": industry}
+    return {"intent": "chat", "confidence": 0.5, "industry": "none"}

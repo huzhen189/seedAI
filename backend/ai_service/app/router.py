@@ -54,6 +54,7 @@ def detect_intent(messages: list[dict], model_id: str = "hy3") -> dict:
         elapsed,
     )
     result["label"] = INTENT_LABELS.get(intent, intent)
+    result["industry"] = result.get("industry", "other") or "other"
     return result
 
 
