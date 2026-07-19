@@ -19,11 +19,11 @@ import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
 import JSZip from 'jszip'
 import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
-import { getConversation, listArtifacts, renameProject, patch } from '../api/projects'
+import { listArtifacts, renameProject, patch } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { Artifact, Conversation, Message, ModelInfo, PlanEvent, RetryEvent, ThoughtStep } from '../types'
+import type { Artifact, ModelInfo, PlanEvent, RetryEvent, ThoughtStep } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
   enter_router: '路由分发',
@@ -207,67 +207,17 @@ const auth = useAuth()
 const projectStore = useProjectStore()
 const convStore = useConversationStore()
 
-// 合并所有会话卡片: 历史(collapsed) + 当前(expanded), 用于统一渲染
-interface SessionCard {
-  conv: Conversation
-  collapsed: boolean
-  loading: boolean
-  msgs: Message[]
-  msgCount: number
-}
-const allSessions = computed<SessionCard[]>(() => {
-  // 历史折叠会话
-  const past: SessionCard[] = convStore.pastSessions.map(s => ({
-    conv: s.conv,
-    collapsed: s.collapsed,
-    loading: s.loading,
-    msgs: s.messages,
-    msgCount: s.messages.length || (s.conv as any).messages?.length || 0,
+const allSessions = computed(() => {
+  const past = convStore.pastSessions.map(s => ({
+    conv: s.conv, loading: s.loading,
+    msgs: s.messages.length ? s.messages : [],
   }))
-  // 当前会话 (只填 DB 消息, 实时消息走 liveMessages)
-  // 当前会话 (只填 DB 消息, 实时消息走 liveMessages)
   const cur = convStore.conversations[0]
   if (cur && convStore.currentConvId === cur.id && !past.some(p => p.conv.id === cur.id)) {
-    past.unshift({
-      conv: cur,
-      collapsed: false,
-      loading: false,
-      msgs: convStore.messages,  // 从 DB 加载的
-      msgCount: convStore.messages.length || (cur as any).messages?.length || 0,
-    })
+    past.unshift({ conv: cur, loading: false, msgs: convStore.messages })
   }
   return past
 })
-
-// 本次会话实时消息(乐观更新 + SSE token 累积, 不写入 DB 版本)
-const liveMessages = computed(() => {
-  // 如果当前会话就是 conversations[0] 且已有 DB 消息, 实时消息是增量
-  const cur = convStore.conversations[0]
-  if (cur && convStore.currentConvId === cur.id) {
-    return convStore.messages
-  }
-  return []
-})
-
-async function toggleSession(idx: number) {
-  const s = allSessions.value[idx]
-  if (!s) return
-  if (!s.collapsed) {
-    s.collapsed = true
-    return
-  }
-  if (s.msgs.length === 0 && s.conv.id) {
-    s.loading = true
-    try {
-      const c = await getConversation(s.conv.id)
-      s.msgs = c.messages || []
-      s.msgCount = s.msgs.length
-    } finally {
-      s.loading = false
-    }
-  }
-  s.collapsed = false
-}
 
 const currentProjectName = computed(
   () =>
@@ -715,25 +665,28 @@ watch(pendingRetry, (r) => {
           在下方输入你想做的事，AI 会智能识别意图并给出回复。
         </div>
 
-        <!-- 所有会话以卡片展示(最新自动展开, 其余折叠) -->
-        <div v-for="(s, idx) in allSessions" :key="s.conv.id" class="past-card">
-          <div class="past-head" @click="toggleSession(idx)">
-            <span class="past-arrow">{{ s.collapsed ? '▶' : '▼' }}</span>
-            <span class="past-title">{{ s.conv.title || '新会话' }}</span>
-            <span class="past-meta">{{ s.msgCount }} 条消息</span>
-            <span class="past-time">{{ s.conv.updated_at?.slice(0, 10) || '' }}</span>
+        <!-- 所有会话统一消息流(当前+历史同一格式, 会话间仅 thin 分割线) -->
+        <template v-for="(s, si) in allSessions" :key="s.conv.id">
+          <div v-if="si > 0" class="session-divider">
+            <span>{{ s.conv.title || '会话' }} · {{ s.conv.updated_at?.slice(0, 10) || '' }}</span>
           </div>
-          <div v-if="!s.collapsed" class="past-body">
-            <div v-if="s.loading" class="loading-more">加载中…</div>
-            <div v-else-if="s.msgs.length === 0" class="empty-session">该会话暂无消息记录</div>
-            <MessageBubble v-for="(m, i) in s.msgs" :key="i" :role="m.role" :content="m.content" />
+          <div v-if="s.loading" class="loading-more">加载中…</div>
+          <div v-else-if="s.msgs.length === 0 && si === 0 && !generating" class="empty">
+            在下方输入你想做的事，AI 会智能识别意图并给出回复。
           </div>
-        </div>
-
-        <!-- 当前会话的实时消息(发送中 / 本次新发) -->
-        <template v-if="convStore.currentConvId && liveMessages.length">
-          <MessageBubble v-for="(m, i) in liveMessages" :key="'live-'+i" :role="m.role" :content="m.content" />
+          <MessageBubble
+            v-for="(m, i) in s.msgs"
+            :key="`s${si}-${i}`"
+            :role="m.role"
+            :content="m.content"
+            :time="m.role === 'user' ? (m.created_at || '') : ''"
+          />
         </template>
+
+        <!-- 全新项目无任何会话 -->
+        <div v-if="convStore.conversations.length === 0" class="empty">
+          在下方输入你想做的事，AI 会智能识别意图并给出回复。
+        </div>
       </div>
 
       <div v-if="isGenerateIntent && (thoughtSteps.length || planNodes.length)" class="trail-wrap">
@@ -955,14 +908,8 @@ watch(pendingRetry, (r) => {
 .loading-more { text-align: center; color: var(--muted); font-size: 12px; padding: 8px; }
 
 /* 历史会话折叠卡片 */
-.past-card { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
-.past-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; background: #f8fafc; transition: background .15s; }
-.past-head:hover { background: #f1f5f9; }
-.past-arrow { font-size: 10px; color: var(--muted); flex-shrink: 0; }
-.past-title { font-weight: 600; font-size: 13px; color: #334155; flex: 1; }
-.past-meta { font-size: 11px; color: var(--muted); }
-.past-time { font-size: 11px; color: var(--muted); }
-.past-body { padding: 8px 14px 12px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); background: #fff; }
+.session-divider { text-align: center; padding: 12px 0 6px; margin: 0 8px 6px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+.session-divider span { background: #f8fafc; padding: 2px 10px; border-radius: 4px; }
 .empty {
   color: var(--muted);
   font-size: 13px;

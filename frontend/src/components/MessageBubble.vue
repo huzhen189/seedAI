@@ -2,13 +2,19 @@
 import { ref } from 'vue'
 import MarkdownView from './MarkdownView.vue'
 
-defineProps<{ role: string; content: string }>()
+defineProps<{ role: string; content: string; time?: string }>()
 const expanded = ref(false)
+function fmtTime(t: string): string {
+  if (!t) return ''
+  const d = new Date(t)
+  if (isNaN(d.getTime())) return ''
+  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
 </script>
 
 <template>
   <div class="bubble" :class="role">
-    <div class="role">{{ role === 'user' ? '你' : 'AI' }}</div>
+    <div class="role">{{ role === 'user' ? '你' : 'AI' }}<span v-if="time" class="time">{{ fmtTime(time) }}</span></div>
     <div class="body" :class="{ clamped: !expanded && role === 'assistant' }">
       <MarkdownView v-if="role === 'assistant'" :content="content" />
       <span v-else>{{ content }}</span>
@@ -51,4 +57,5 @@ const expanded = ref(false)
   padding: 2px 8px;
   background: #fff;
 }
+.time { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 6px; }
 </style>
