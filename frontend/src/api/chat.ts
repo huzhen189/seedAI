@@ -1,5 +1,6 @@
 import type { ChatMessage, ModelInfo, NodeEvent, PlanEvent, RetryEvent, ThinkEvent } from '../types'
 import { notifyAuthRequired } from '../stores/auth'
+import { post, publicGet } from './client'
 
 export interface ChatCallbacks {
   onNode?: (data: NodeEvent) => void
@@ -109,22 +110,16 @@ export function startChat(opts: StartChatOptions): EventSource {
 /** 级联取消(C1):通知业务 → AI 标记 cancel。 */
 export async function cancelChat(traceId: string): Promise<void> {
   try {
-    await fetch('/api/cancel', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ trace_id: traceId }),
-    })
+    await post('/api/cancel', { trace_id: traceId })
   } catch {
     /* 忽略取消失败 */
   }
 }
 
-/** 拉取可用模型列表(供选择器)。 */
+/** 拉取可用模型列表(公开接口,无需登录)。 */
 export async function fetchModels(): Promise<ModelInfo[]> {
   try {
-    const r = await fetch('/api/models')
-    if (!r.ok) return []
-    const data = await r.json()
+    const data = await publicGet('/api/models')
     return Array.isArray(data) ? data : []
   } catch {
     return []
@@ -139,17 +134,13 @@ export async function sendFeedback(
   comment?: string,
 ): Promise<boolean> {
   try {
-    const r = await fetch('/api/feedback', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        trace_id: traceId,
-        conversation_id: conversationId ?? null,
-        rating,
-        comment: comment || null,
-      }),
+    await post('/api/feedback', {
+      trace_id: traceId,
+      conversation_id: conversationId ?? null,
+      rating,
+      comment: comment || null,
     })
-    return r.ok
+    return true
   } catch {
     return false
   }

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { get, post } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import { ROLE_LABELS, type AdminUser, type MetricsSnapshot, type Role } from '../types'
 
@@ -61,8 +62,7 @@ const usersLoading = ref(false)
 async function fetchUsers() {
   usersLoading.value = true
   try {
-    const r = await fetch('/admin/users')
-    if (r.ok) users.value = await r.json()
+    users.value = await get('/admin/users')
   } catch {
     /* 忽略 */
   } finally {
@@ -72,39 +72,19 @@ async function fetchUsers() {
 
 async function changeRole(u: AdminUser, role: string) {
   try {
-    const r = await fetch(`/admin/users/${u.id}/role`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role }),
-    })
-    if (r.ok) {
-      const updated = await r.json()
-      u.role = updated.role
-    } else {
-      const e = await r.json().catch(() => ({}))
-      alert(e.detail || '修改角色失败')
-    }
-  } catch {
-    alert('网络错误')
+    const updated = await post(`/admin/users/${u.id}/role`, { role })
+    u.role = updated.role
+  } catch (e: any) {
+    if (e?.message !== 'AUTH_REQUIRED') alert(e?.message || '网络错误')
   }
 }
 
 async function changePlan(u: AdminUser, plan: string) {
   try {
-    const r = await fetch(`/admin/users/${u.id}/plan`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan }),
-    })
-    if (r.ok) {
-      const updated = await r.json()
-      u.plan = updated.plan
-    } else {
-      const e = await r.json().catch(() => ({}))
-      alert(e.detail || '修改套餐失败')
-    }
-  } catch {
-    alert('网络错误')
+    const updated = await post(`/admin/users/${u.id}/plan`, { plan })
+    u.plan = updated.plan
+  } catch (e: any) {
+    if (e?.message !== 'AUTH_REQUIRED') alert(e?.message || '网络错误')
   }
 }
 
@@ -131,23 +111,18 @@ const dbItems = computed<DbItem[]>(() => {
 
 async function doScale() {
   try {
-    const r = await fetch(
+    const d = await post(
       `/admin/scale?name=${encodeURIComponent(scaleName.value)}&replicas=${scaleReplicas.value}`,
-      { method: 'POST' },
     )
-    const d = await r.json().catch(() => ({}))
-    ctrlMsg.value = d.note || (d.ack ? '已提交扩缩容' : '操作失败')
+    ctrlMsg.value = d.log || (d.ack ? '已提交扩缩容' : '操作失败')
   } catch {
     ctrlMsg.value = '网络错误'
   }
 }
 async function doStop() {
   try {
-    const r = await fetch(`/admin/stop?name=${encodeURIComponent(stopName.value)}`, {
-      method: 'POST',
-    })
-    const d = await r.json().catch(() => ({}))
-    ctrlMsg.value = d.note || (d.ack ? '已提交停止' : '操作失败')
+    const d = await post(`/admin/stop?name=${encodeURIComponent(stopName.value)}`)
+    ctrlMsg.value = d.log || (d.ack ? '已提交停止' : '操作失败')
   } catch {
     ctrlMsg.value = '网络错误'
   }
@@ -170,8 +145,7 @@ const qualityLoading = ref(false)
 async function fetchQuality() {
   qualityLoading.value = true
   try {
-    const r = await fetch('/admin/quality')
-    if (r.ok) quality.value = await r.json()
+    quality.value = await get('/admin/quality')
   } catch { /* ignore */ }
   finally { qualityLoading.value = false }
 }
@@ -196,16 +170,14 @@ const selectedTrace = ref<TraceDetail | null>(null)
 async function fetchTraces() {
   tracesLoading.value = true
   try {
-    const r = await fetch('/admin/traces?limit=50')
-    if (r.ok) traces.value = await r.json()
+    traces.value = await get('/admin/traces?limit=50')
   } catch { /* ignore */ }
   finally { tracesLoading.value = false }
 }
 
 async function viewTrace(traceId: string) {
   try {
-    const r = await fetch(`/admin/traces/${traceId}`)
-    if (r.ok) selectedTrace.value = await r.json()
+    selectedTrace.value = await get(`/admin/traces/${traceId}`)
   } catch { /* ignore */ }
 }
 
