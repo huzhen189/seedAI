@@ -29,7 +29,7 @@ from fastapi.security import HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .analytics import record_skill_outcome
+from .analytics import record_intent_result, record_skill_outcome
 from .db import get_db
 from .metrics import consume_daily_quota, record_model_usage, record_unsupported
 from .models import Artifact, Conversation, Message, Project, User
@@ -288,7 +288,7 @@ async def chat(
                                     )
                                     if event == "token":
                                         assistant_parts.append(data)
-                                    elif event in ("node", "think", "plan", "error", "aborted", "degraded", "unsupported"):
+                                    elif event in ("node", "think", "plan", "error", "aborted", "degraded", "unsupported", "intent"):
                                         try:
                                             payload_obj = json.loads(data) if data else None
                                         except Exception:
@@ -309,8 +309,19 @@ async def chat(
                                             terminal_status = "error"
                                         elif event == "unsupported":
                                             terminal_status = "unsupported"
-                                            # 记录到统计系统(供管理后台回归分析)
                                             await record_unsupported(user.id, user_text)
+                                        elif event == "intent" and isinstance(payload_obj, dict):
+                                            # 两级意图记录(供管理后台系统分析)
+                                            l1 = payload_obj.get("level1") or payload_obj.get("intent") or "unknown"
+                                            l2 = payload_obj.get("level2") or "unknown"
+                                            await record_intent_result(l1, l2, True)
+                                            logger.info(
+                                                "[chat] 意图 %s/%s label=%s industry=%s confidence=%s",
+                                                l1, l2,
+                                                payload_obj.get("label", "-"),
+                                                payload_obj.get("industry", "-"),
+                                                payload_obj.get("confidence", "-"),
+                                            )
                                         logger.info(
                                             "[chat] SSE 事件 seq=%s type=%s stage=%s",
                                             event_seq, event, stage or "-",
