@@ -6,6 +6,9 @@ export interface ChatMessage {
 export interface ModelInfo {
   id: string
   label: string
+  version?: string
+  speed?: string
+  desc?: string
 }
 
 export interface NodeEvent {

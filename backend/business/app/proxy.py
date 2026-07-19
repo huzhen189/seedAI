@@ -37,6 +37,32 @@ from .schemas import FeedbackReq
 from .security import ACCESS_COOKIE, CurrentUser, decode_token, get_current_user
 from .tracing import append_trace_event, create_trace, finish_trace, log_usage
 
+import html as _html
+import re
+
+
+# ---------- 内容安全 ----------
+_SENSITIVE_PATTERNS: list[re.Pattern] = [
+    re.compile(r"<script[^>]*>.*?</script>", re.I | re.S),
+    re.compile(r"javascript\s*:", re.I),
+    re.compile(r"on\w+\s*=", re.I),
+]
+_INPUT_MAX_LEN = 8000
+
+
+def _sanitize_input(text: str) -> str:
+    if len(text) > _INPUT_MAX_LEN:
+        text = text[:_INPUT_MAX_LEN]
+    for pat in _SENSITIVE_PATTERNS:
+        text = pat.sub("[已过滤]", text)
+    return text
+
+
+def _sanitize_html(html_str: str) -> str:
+    for pat in _SENSITIVE_PATTERNS:
+        html_str = pat.sub("[已过滤]", html_str)
+    return html_str
+
 
 # 模型 id -> 供应商(用于用量账本成本归集;与 providers.py 的适配器命名保持一致)
 _PROVIDER_BY_MODEL = {
@@ -183,8 +209,12 @@ async def chat(
         return _sse_auth_error()
     logger.info("[chat] 鉴权通过 user_id=%s role=%s", user.id, user.role)
 
-    # --- 2) 解析消息 ---
+    # --- 2) 解析消息(含内容安全) ---
     messages = _parse_messages(request)
+    # 清洗用户输入(防 XSS/注入)
+    for m in messages:
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            m["content"] = _sanitize_input(m["content"])
     tid = trace_id or uuid.uuid4().hex
     user_text = ""
     for m in messages:

@@ -30,6 +30,26 @@ class ModelUnavailableError(Exception):
         super().__init__(message)
 
 
+# 模型元数据(版本 / 速度 / 特性, 供前端显示)
+PROVIDER_META: dict[str, dict] = {
+    "hy3": {
+        "version": "HY3-Turbo",
+        "speed": "快 (~50t/s)",
+        "desc": "腾讯混元3，综合能力强，建站和长文档首选",
+    },
+    "qwen": {
+        "version": "Qwen-Plus",
+        "speed": "中 (~30t/s)",
+        "desc": "通义千问增强版，准确率高，规划和评审出色",
+    },
+    "deepseek": {
+        "version": "DeepSeek-V3",
+        "speed": "较快 (~40t/s)",
+        "desc": "DeepSeek 旗舰版，中文理解好，编码和翻译强",
+    },
+}
+
+
 class ProviderConfig:
     def __init__(self, id: str, label: str, base_url: str, api_key: str, model: str):
         self.id = id
@@ -66,7 +86,16 @@ PROVIDERS: dict[str, ProviderConfig] = {
 
 
 def list_providers() -> list[dict]:
-    return [{"id": p.id, "label": p.label} for p in PROVIDERS.values()]
+    return [
+        {
+            "id": p.id,
+            "label": p.label,
+            "version": (PROVIDER_META.get(p.id, {}).get("version", "")),
+            "speed": (PROVIDER_META.get(p.id, {}).get("speed", "")),
+            "desc": (PROVIDER_META.get(p.id, {}).get("desc", "")),
+        }
+        for p in PROVIDERS.values()
+    ]
 
 
 def available_model_ids() -> List[str]:

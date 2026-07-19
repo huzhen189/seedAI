@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 
 from .config import settings
 from .events import TERMINAL_EVENTS
+from .router import detect_intent, skill_for
 from .runner import run_skill
 
 
@@ -289,12 +290,32 @@ async def worker_loop(concurrency: int = 1):
                 return await q.is_cancelled(trace_id) if trace_id else False
 
             try:
+                # 意图分类 → 路由到对应 Skill
+                intent = detect_intent(messages, model_id)
+                skill_name = skill or skill_for(intent["intent"]) or "explain"
+
+                if intent["intent"] == "unsupported":
+                    # 记录 unsupported 统计(给业务端 metrics 用)
+                    async for event in run_skill(
+                        "explain", model_id, messages,
+                        trace_id=trace_id, is_cancelled=_cancelled,
+                        intent_info=intent,
+                    ):
+                        await q.publish(trace_id, event)
+                    # 额外发一个 unsupported 事件
+                    await q.publish(
+                        trace_id,
+                        {"event": "unsupported", "data": {
+                            "input": (messages[-1].get("content", "") if messages else "")[:200],
+                        }},
+                    )
+                    await q.publish(trace_id, {"event": "done", "data": {}})
+                    continue
+
                 async for event in run_skill(
-                    skill or "generate_site",
-                    model_id,
-                    messages,
-                    trace_id=trace_id,
-                    is_cancelled=_cancelled,
+                    skill_name, model_id, messages,
+                    trace_id=trace_id, is_cancelled=_cancelled,
+                    intent_info=intent,
                 ):
                     await q.publish(trace_id, event)
             except Exception as e:  # 防御:避免 Worker 崩溃
