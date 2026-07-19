@@ -52,7 +52,9 @@ const previewUrl = ref<string | null>(null)
 const errorMsg = ref('')
 const traceId = ref('')
 const esRef = ref<EventSource | null>(null)
-const rating = ref<'' | 'up' | 'down'>('')
+const rating = ref(0)
+const rateComment = ref('')
+const rateSubmitted = ref(false)
 
 const pendingSend = ref(false)
 
@@ -112,7 +114,9 @@ function resetGenState() {
   previewUrl.value = null
   errorMsg.value = ''
   finished.value = false
-  rating.value = ''
+  rating.value = 0
+  rateComment.value = ''
+  rateSubmitted.value = false
 }
 
 function upsertStep(stage: string, status: ThoughtStep['status']) {
@@ -332,9 +336,35 @@ async function stop() {
   esRef.value = null
 }
 
-async function rate(r: 'up' | 'down') {
-  rating.value = r
-  if (traceId.value) await sendFeedback(traceId.value, r)
+async function rate(val: number) {
+  rating.value = val
+}
+
+async function submitRate() {
+  if (rating.value < 1 || rating.value > 10) return
+  rateSubmitted.value = true
+  const ok = await sendFeedback(
+    traceId.value,
+    rating.value,
+    convStore.currentConvId ?? undefined,
+    rateComment.value || undefined,
+  )
+  if (!ok) rateSubmitted.value = false
+}
+
+function copyPreviewLink() {
+  const url = previewUrl.value
+  if (!url) return
+  navigator.clipboard.writeText(url).catch(() => {
+    // fallback: select and copy
+    const t = document.createElement('textarea')
+    t.value = url
+    document.body.appendChild(t)
+    t.select()
+    document.execCommand('copy')
+    document.body.removeChild(t)
+  })
+  alert('预览链接已复制到剪贴板')
 }
 
 onMounted(async () => {
@@ -427,9 +457,38 @@ watch(
         />
         <div v-if="errorMsg" class="error">⚠ {{ errorMsg }}</div>
         <div v-if="finished && !errorMsg && (generatedHtml || previewUrl)" class="feedback">
-          <span>这次生成质量如何?</span>
-          <button :class="{ on: rating === 'up' }" @click="rate('up')">👍</button>
-          <button :class="{ on: rating === 'down' }" @click="rate('down')">👎</button>
+          <span class="rate-label">评分 (1-10):</span>
+          <template v-for="n in 10" :key="n">
+            <button
+              :class="{ on: rating >= n, sel: rating === n }"
+              class="star-btn"
+              @click="rate(n)"
+            >
+              {{ rating >= n ? '★' : '☆' }}
+            </button>
+          </template>
+          <input
+            v-if="rating >= 1 && !rateSubmitted"
+            v-model="rateComment"
+            class="comment-inp"
+            placeholder="写点评语（可选）"
+          />
+          <button
+            v-if="rating >= 1 && !rateSubmitted"
+            class="submit-rate"
+            @click="submitRate"
+          >
+            提交评分
+          </button>
+          <span v-if="rateSubmitted" class="rated">已评价 {{ rating }} 分 ✓</span>
+          <button
+            v-if="previewUrl"
+            class="copy-link"
+            title="复制预览链接"
+            @click="copyPreviewLink"
+          >
+            🔗 复制预览链接
+          </button>
           <a v-if="previewUrl" :href="previewUrl" target="_blank" rel="noreferrer" class="open">
             打开线上预览 ↗
           </a>
@@ -530,22 +589,54 @@ watch(
 .feedback {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
+  flex-wrap: wrap;
   font-size: 13px;
   color: var(--muted);
   margin-top: 8px;
 }
-.feedback button {
-  border: 1px solid var(--border);
-  background: var(--panel);
-  border-radius: 8px;
-  padding: 4px 10px;
+.rate-label { margin-right: 4px; }
+.star-btn {
+  border: none;
+  background: none;
+  color: #d4d4d8;
   cursor: pointer;
-  font-size: 15px;
+  font-size: 16px;
+  padding: 0 2px;
+  transition: color .15s;
 }
-.feedback button.on {
-  border-color: var(--brand2);
-  background: #eef2ff;
+.star-btn.on { color: #f59e0b; }
+.star-btn.sel { color: #e17800; }
+.comment-inp {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  width: 140px;
+  color: var(--text);
+  background: var(--panel);
+}
+.submit-rate {
+  border: 1px solid var(--brand);
+  background: var(--brand);
+  color: #fff;
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+.rated { color: var(--brand2); font-weight: 600; }
+.copy-link {
+  border: 1px solid var(--brand);
+  background: transparent;
+  color: var(--brand);
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  margin-left: 4px;
 }
 .feedback .open {
   margin-left: auto;

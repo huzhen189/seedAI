@@ -10,9 +10,11 @@ const currentRoleLabel = computed(
 )
 
 // ---- 标签页(RBAC:用户管理 / 控制面 仅超管可见) ----
-type Tab = 'metrics' | 'users' | 'control'
+type Tab = 'metrics' | 'users' | 'control' | 'quality' | 'replay'
 const tabs: { key: Tab; label: string; superOnly: boolean }[] = [
   { key: 'metrics', label: '运行指标', superOnly: false },
+  { key: 'quality', label: 'AI 质量', superOnly: false },
+  { key: 'replay', label: '回放', superOnly: false },
   { key: 'users', label: '用户管理', superOnly: true },
   { key: 'control', label: '控制面', superOnly: true },
 ]
@@ -143,9 +145,77 @@ async function doStop() {
   }
 }
 
+// ---- AI 质量(③-a) ----
+interface QualityData {
+  feedback_count: number
+  avg_rating: number | null
+  rating_distribution: Record<number, number>
+  model_usage: Record<string, number>
+  reviewer_pass_rate: number
+  reviewer_total: number
+  generation_total: number
+  generation_success_rate: number
+}
+const quality = ref<QualityData | null>(null)
+const qualityLoading = ref(false)
+
+async function fetchQuality() {
+  qualityLoading.value = true
+  try {
+    const r = await fetch('/admin/quality')
+    if (r.ok) quality.value = await r.json()
+  } catch { /* ignore */ }
+  finally { qualityLoading.value = false }
+}
+
+// ---- 回放(③-a) ----
+interface TraceItem {
+  id: number; trace_id: string; user_id: number; model_id: string | null
+  status: string; total_tokens: number; started_at: string | null; finished_at: string | null
+}
+interface TraceEventItem {
+  seq: number; event_type: string; stage: string | null
+  payload: unknown; created_at: string | null
+}
+interface TraceDetail {
+  trace: TraceItem
+  events: TraceEventItem[]
+}
+const traces = ref<TraceItem[]>([])
+const tracesLoading = ref(false)
+const selectedTrace = ref<TraceDetail | null>(null)
+
+async function fetchTraces() {
+  tracesLoading.value = true
+  try {
+    const r = await fetch('/admin/traces?limit=50')
+    if (r.ok) traces.value = await r.json()
+  } catch { /* ignore */ }
+  finally { tracesLoading.value = false }
+}
+
+async function viewTrace(traceId: string) {
+  try {
+    const r = await fetch(`/admin/traces/${traceId}`)
+    if (r.ok) selectedTrace.value = await r.json()
+  } catch { /* ignore */ }
+}
+
+function statusLabel(s: string) {
+  const m: Record<string, string> = { running: '生成中', done: '完成', error: '错误', aborted: '已取消' }
+  return m[s] || s
+}
+
+function eventTypeLabel(t: string) {
+  const m: Record<string, string> = { node: '节点', think: '思考', plan: '计划', token: '输出', error: '错误', done: '完成', aborted: '取消', degraded: '降级' }
+  return m[t] || t
+}
+
 onMounted(() => {
   connectMetrics()
   if (isSuper.value) fetchUsers()
+  fetchQuality()
+  fetchTraces()
 })
 onUnmounted(() => {
   es?.close()
@@ -209,11 +279,93 @@ onUnmounted(() => {
       </div>
     </section>
 
+    <!-- AI 质量(③-a) -->
+    <section v-else-if="activeTab === 'quality'" class="panel">
+      <div class="bar">
+        <h3>AI 生成质量</h3>
+        <button class="refresh" :disabled="qualityLoading" @click="fetchQuality">刷新</button>
+      </div>
+      <div v-if="quality" class="cards" style="grid-template-columns: repeat(4, 1fr);">
+        <div class="card">
+          <div class="k">平均评分</div>
+          <div class="v">{{ quality.avg_rating ?? '-' }}</div>
+        </div>
+        <div class="card">
+          <div class="k">评价数</div>
+          <div class="v">{{ quality.feedback_count }}</div>
+        </div>
+        <div class="card">
+          <div class="k">评审通过率</div>
+          <div class="v">{{ (quality.reviewer_pass_rate * 100).toFixed(0) }}%</div>
+        </div>
+        <div class="card">
+          <div class="k">生成成功率</div>
+          <div class="v">{{ (quality.generation_success_rate * 100).toFixed(0) }}%</div>
+        </div>
+      </div>
+      <div v-if="quality && quality.rating_distribution && Object.keys(quality.rating_distribution).length" class="block">
+        <h3>评分分布</h3>
+        <div class="dist">
+          <template v-for="n in 10" :key="n">
+            <span class="dn">{{ n }}</span>
+            <span class="dbar"><span class="dfill" :style="{ width: (quality.feedback_count ? ((quality.rating_distribution[n] || 0) / quality.feedback_count * 100) : 0) + '%' }"></span></span>
+            <span class="dcnt">{{ quality.rating_distribution[n] || 0 }}</span>
+          </template>
+        </div>
+      </div>
+      <div v-if="quality && quality.model_usage && Object.keys(quality.model_usage).length" class="block">
+        <h3>模型用量(生成次数)</h3>
+        <ul class="usage">
+          <li v-for="(cnt, model) in quality.model_usage" :key="model">
+            <span class="mname">{{ model }}</span>
+            <span class="mcnt">{{ cnt }}</span>
+          </li>
+        </ul>
+      </div>
+      <div v-if="!quality && !qualityLoading" class="muted">暂无质量数据</div>
+    </section>
+
+    <!-- 回放(③-a) -->
+    <section v-else-if="activeTab === 'replay'" class="panel">
+      <div class="bar">
+        <h3>生成回放</h3>
+        <button class="refresh" :disabled="tracesLoading" @click="fetchTraces">刷新</button>
+      </div>
+      <div v-if="selectedTrace" class="block">
+        <button class="back" @click="selectedTrace = null">← 返回列表</button>
+        <p class="hint">Trace: {{ selectedTrace.trace.trace_id }} | 模型: {{ selectedTrace.trace.model_id || '-' }} | 状态: {{ statusLabel(selectedTrace.trace.status) }} | Token: ~{{ selectedTrace.trace.total_tokens }}</p>
+        <div v-if="selectedTrace.events.length" class="events">
+          <div v-for="(e, i) in selectedTrace.events" :key="i" class="evt">
+            <span class="eseq">{{ e.seq }}</span>
+            <span class="etype">{{ eventTypeLabel(e.event_type) }}</span>
+            <span v-if="e.stage" class="estage">{{ e.stage }}</span>
+            <span v-if="e.payload && typeof e.payload === 'object' && (e.payload as any).comment" class="ecomment">{{ (e.payload as any).comment }}</span>
+          </div>
+        </div>
+        <p v-else class="muted">该 Trace 没有结构化事件</p>
+      </div>
+      <table v-else class="utable">
+        <thead>
+          <tr><th>Trace ID</th><th>模型</th><th>状态</th><th>Token</th><th>时间</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="t in traces" :key="t.id" style="cursor:pointer;" @click="viewTrace(t.trace_id)">
+            <td>{{ t.trace_id.slice(0, 12) }}</td>
+            <td>{{ t.model_id || '-' }}</td>
+            <td>{{ statusLabel(t.status) }}</td>
+            <td>~{{ t.total_tokens }}</td>
+            <td>{{ t.started_at?.slice(0, 19) || '-' }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-if="!traces.length && !tracesLoading" class="muted">暂无生成记录</p>
+    </section>
+
     <!-- 用户管理(仅超管) -->
     <section v-else-if="activeTab === 'users' && isSuper" class="panel">
       <div class="bar">
         <h3>用户列表</h3>
-        <button class="refresh" @click="fetchUsers" :disabled="usersLoading">刷新</button>
+        <button class="refresh" :disabled="usersLoading" @click="fetchUsers">刷新</button>
       </div>
       <table class="utable">
         <thead>
@@ -485,4 +637,22 @@ onUnmounted(() => {
   font-size: 13px;
   color: var(--brand);
 }
+.dist {
+  display: grid;
+  grid-template-columns: 24px 1fr 32px;
+  gap: 4px 8px;
+  align-items: center;
+  font-size: 12px;
+}
+.dn { color: var(--muted); text-align: right; }
+.dbar { height: 10px; background: var(--border); border-radius: 999px; overflow: hidden; }
+.dfill { display: block; height: 100%; background: var(--brand); }
+.dcnt { color: var(--muted); }
+.events { max-height: 400px; overflow: auto; }
+.evt { display: flex; gap: 10px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.eseq { width: 28px; color: var(--muted); text-align: right; }
+.etype { width: 48px; font-weight: 600; color: var(--brand); }
+.estage { color: #64748b; }
+.ecomment { color: var(--muted); font-style: italic; margin-left: auto; }
+.back { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 4px 12px; cursor: pointer; font-size: 13px; margin-bottom: 8px; }
 </style>

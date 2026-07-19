@@ -123,19 +123,26 @@ export async function fetchModels(): Promise<ModelInfo[]> {
   }
 }
 
-/** 提交评价(后端若未实现 /api/feedback,静默忽略)。 */
+/** 提交 1-10 评分评价(③-a:统计 + 回归数据集)。后端 /api/feedback 已实现。 */
 export async function sendFeedback(
   traceId: string,
-  rating: 'up' | 'down',
+  rating: number,
+  conversationId?: number,
   comment?: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
-    await fetch('/api/feedback', {
+    const r = await fetch('/api/feedback', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ trace_id: traceId, rating, comment }),
+      body: JSON.stringify({
+        trace_id: traceId,
+        conversation_id: conversationId ?? null,
+        rating,
+        comment: comment || null,
+      }),
     })
+    return r.ok
   } catch {
-    /* 静默 */
+    return false
   }
 }
