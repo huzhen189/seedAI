@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from ..events import ev
-from ..providers import astream_with_fallback, get_chat_model
+from ..providers import astream_with_fallback, get_chat_model, resolve_fallback_order
 from ..rag import build_rag_context, save_memory
 from ..registry import register_skill
 
@@ -50,9 +50,22 @@ SYS_REVIEWER = (
 
 
 def _chat(model_id: str, system: str, user_msgs: list) -> str:
-    chat = get_chat_model(model_id, streaming=False)
-    resp = chat.invoke([{"role": "system", "content": system}, *user_msgs])
-    return resp.content
+    """同步调用模型(Planner/Reviewer),带降级回退(与 astream_with_fallback 一致)。"""
+    import logging
+
+    _log = logging.getLogger(__name__)
+    order = resolve_fallback_order(model_id)
+    last_err: Exception | None = None
+    for mid in order:
+        try:
+            chat = get_chat_model(mid, streaming=False)
+            resp = chat.invoke([{"role": "system", "content": system}, *user_msgs])
+            return resp.content
+        except Exception as e:
+            last_err = e
+            _log.warning("模型 %s 不可用,回退: %s", mid, e)
+            continue
+    raise last_err or RuntimeError("所有模型均不可用")
 
 
 async def _cancelled_now(fn) -> bool:
