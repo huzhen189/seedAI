@@ -375,20 +375,6 @@ async def chat(
                                         frame += f"event: {event}\n"
                                     frame += f"data: {data}\n\n"
                                     yield frame.encode("utf-8")
-                                    # 断点续跑(§7): 每帧后检测客户端是否断开
-                                    if await request.is_disconnected():
-                                        logger.info("[chat] 客户端已断开 trace=%s, 通知 AI 保存断点", tid)
-                                        # 发 cancel 到 AI, Worker 的 is_cancelled 返回 True
-                                        try:
-                                            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=5)) as c:
-                                                await c.post(
-                                                    f"{settings.ai_service_url}/cancel",
-                                                    json={"trace_id": tid},
-                                                )
-                                        except Exception:
-                                            pass
-                                        terminal_status = "paused"
-                                        break
                                 event, data_parts = None, []
                                 continue
                             if raw_line.startswith("event:"):

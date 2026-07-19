@@ -1,75 +1,131 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import * as projectsApi from '../api/projects'
 import type { Conversation, Message } from '../types'
 
+export interface PastSession {
+  conv: Conversation
+  collapsed: boolean
+  messages: Message[]
+  loading: boolean
+}
+
 export const useConversationStore = defineStore('conversation', () => {
-  const conversations = ref<Conversation[]>([])       // 当前项目所有会话(倒序)
-  const currentConvId = ref<number | null>(null)       // 当前活跃会话(最新一条)
-  const messages = ref<Message[]>([])                  // 合并多轮会话消息(时间轴)
+  const conversations = ref<Conversation[]>([])       // 当前项目所有会话(倒序,最新在前)
+  const currentConvId = ref<number | null>(null)       // 当前活跃会话(最新)
+  const messages = ref<Message[]>([])                  // 当前会话消息(完整显示)
+  const pastSessions = ref<PastSession[]>([])          // 更早会话(折叠卡片,按需展开)
   const loading = ref(false)
   const loadingMore = ref(false)                       // 上翻加载更早会话中
-  const loadedConvIdx = ref(0)                         // 已加载到第几个会话(从 0 开始)
+  const loadedPastCount = ref(0)                       // 已加载到第几个历史会话
   const pendingConvId = ref<number | null>(null)
+  const creating = ref(false)  // 防并发创建
 
-  /** 切换项目时加载会话列表并取最新会话的消息。 */
+  /** 当前会话标题 */
+  const currentTitle = computed(() =>
+    conversations.value[0]?.title || '新对话',
+  )
+
+  /** 切换项目: 加载会话列表 + 恢复或新建会话。 */
   async function loadConversations(projectId: number) {
     loading.value = true
     try {
       conversations.value = await projectsApi.listConversations(projectId)
-      loadedConvIdx.value = 0
-      messages.value = []
-      if (conversations.value.length) {
-        await loadMessagesInto(conversations.value[0].id, 'replace')
+      pastSessions.value = []
+      loadedPastCount.value = 0
+
+      // 恢复会话: 优先用 sessionStorage 记忆的 convId
+      const storedCid = sessionStorage.getItem('activeConv_' + projectId)
+      let targetConv: Conversation | undefined
+      if (storedCid) {
+        targetConv = conversations.value.find(c => c.id === Number(storedCid))
       }
+      if (!targetConv) targetConv = conversations.value[0]
+
+      if (targetConv) {
+        currentConvId.value = targetConv.id
+        const c = await projectsApi.getConversation(targetConv.id)
+        messages.value = c.messages || []
+      } else {
+        currentConvId.value = null
+        messages.value = []
+      }
+
+      // 加载历史会话卡片
+      await loadMoreHistory()
     } finally {
       loading.value = false
     }
   }
 
-  /** 上翻加载更早的会话消息(追加到 messages 头部)。 */
+  /** 上翻加载更早会话(每次 5 屏,只加载会话元数据,点击展开后再加载消息)。 */
   async function loadMoreHistory(): Promise<boolean> {
-    const nextIdx = loadedConvIdx.value + 1
-    if (nextIdx >= conversations.value.length) return false
+    const batch = 5
+    const start = loadedPastCount.value + 1  // 跳过当前会话(第 0 个)
+    const end = Math.min(start + batch - 1, conversations.value.length - 1)
+    if (start > end) return false
     loadingMore.value = true
     try {
-      await loadMessagesInto(conversations.value[nextIdx].id, 'prepend')
-      loadedConvIdx.value = nextIdx
-      return true
+      for (let i = start; i <= end; i++) {
+        const conv = conversations.value[i]
+        pastSessions.value.push({
+          conv,
+          collapsed: true,
+          messages: [],
+          loading: false,
+        })
+      }
+      loadedPastCount.value = end
+      return end < conversations.value.length - 1
     } finally {
       loadingMore.value = false
     }
   }
 
-  /** 加载指定的会话消息, replace=替换现有 / prepend=头部追加。 */
-  async function loadMessagesInto(convId: number, mode: 'replace' | 'prepend') {
-    const c = await projectsApi.getConversation(convId)
-    const newMsgs = c.messages || []
-    if (mode === 'replace') {
-      messages.value = newMsgs
-      currentConvId.value = convId
-    } else {
-      messages.value = [...newMsgs, ...messages.value]
+  /** 展开/折叠某个历史会话。 */
+  async function togglePast(idx: number) {
+    const s = pastSessions.value[idx]
+    if (!s) return
+    if (!s.collapsed) {
+      s.collapsed = true
+      return
     }
+    // 展开 → 首次加载消息
+    if (s.messages.length === 0) {
+      s.loading = true
+      try {
+        const c = await projectsApi.getConversation(s.conv.id)
+        s.messages = c.messages || []
+      } finally {
+        s.loading = false
+      }
+    }
+    s.collapsed = false
   }
 
-  /** 新建会话(当前项目下), 清空消息区。 */
+  /** 新建会话(当前项目下)。 */
   async function create(projectId: number, title?: string): Promise<Conversation> {
-    const c = await projectsApi.createConversation(projectId, title)
-    conversations.value.unshift(c)
-    currentConvId.value = c.id
-    messages.value = []
-    loadedConvIdx.value = 0
-    return c
-  }
-
-  async function remove(id: number) {
-    await projectsApi.deleteConversation(id)
-    conversations.value = conversations.value.filter((c) => c.id !== id)
-    if (currentConvId.value === id) {
-      currentConvId.value = conversations.value[0]?.id ?? null
-      if (currentConvId.value) await loadMessagesInto(currentConvId.value, 'replace')
-      else messages.value = []
+    creating.value = true
+    try {
+      const c = await projectsApi.createConversation(projectId, title)
+      if (!conversations.value.some(x => x.id === c.id)) {
+        conversations.value.unshift(c)
+      }
+      if (currentConvId.value && messages.value.length > 0) {
+        const oldConv = conversations.value.find(x => x.id === currentConvId.value)
+        if (oldConv) {
+          pastSessions.value.unshift({
+            conv: { ...oldConv }, collapsed: true,
+            messages: [...messages.value], loading: false,
+          })
+        }
+      }
+      currentConvId.value = c.id
+      messages.value = []
+      sessionStorage.setItem('activeConv_' + projectId, String(c.id))
+      return c
+    } finally {
+      creating.value = false
     }
   }
 
@@ -77,12 +133,13 @@ export const useConversationStore = defineStore('conversation', () => {
     conversations.value = []
     currentConvId.value = null
     messages.value = []
-    loadedConvIdx.value = 0
+    pastSessions.value = []
+    loadedPastCount.value = 0
   }
 
   return {
-    conversations, currentConvId, messages, loading, loadingMore,
-    loadedConvIdx, pendingConvId,
-    loadConversations, loadMoreHistory, loadMessagesInto, create, remove, reset,
+    conversations, currentConvId, messages, pastSessions, loading, loadingMore,
+    currentTitle, loadedPastCount, pendingConvId, creating,
+    loadConversations, loadMoreHistory, togglePast, create, reset,
   }
 })

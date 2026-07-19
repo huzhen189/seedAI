@@ -57,6 +57,23 @@ const pausedConv = computed(() =>
   convStore.conversations.find(c => c.status === 'paused'),
 )
 
+// 消息队列: 生成中用户输入排队, 完成后自动发下一条
+const msgQueue = ref<string[]>([])
+const queueVisible = ref(false)
+
+function enqueue(text: string) {
+  msgQueue.value.push(text)
+  queueVisible.value = true
+  input.value = ''
+}
+
+function dequeueAndSend() {
+  const next = msgQueue.value.shift()
+  if (!next) { queueVisible.value = false; return }
+  input.value = next
+  doSend(next)
+}
+
 async function resumeConversation() {
   const pc = pausedConv.value
   if (!pc || !projectStore.currentProjectId) return
@@ -377,12 +394,14 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       clearActiveGen()
       loadArtifacts()
+      dequeueAndSend()
     },
     onAborted: () => {
       generating.value = false
       finished.value = true
       errorMsg.value = '已取消'
       clearActiveGen()
+      dequeueAndSend()
     },
     onRetry: (d: RetryEvent) => {
       generating.value = false
@@ -422,21 +441,25 @@ async function loadCurrentProject() {
 
 async function send() {
   const text = input.value.trim()
-  if (!text || generating.value) return
-  // 鉴权门禁:未登录不发送,记 pendingSend 并弹登录框。
-  if (!auth.user.value) {
-    pendingSend.value = true
-    auth.openLogin()
-    return
-  }
+  if (!text) return
+  // 生成中: 加入队列
+  if (generating.value) { enqueue(text); return }
+  // 鉴权
+  if (!auth.user.value) { pendingSend.value = true; auth.openLogin(); return }
+  input.value = ''
+  await doSend(text)
+}
+
+async function doSend(text: string) {
   const pid = projectStore.currentProjectId
-  if (pid == null) {
-    alert('请先在左侧新建项目')
-    return
-  }
-  // 会话不存在或消息为空(页面刷新后)则创建新会话
+  if (pid == null) { alert('请先在左侧新建项目'); return }
+
+  // 防重复: 只有 id 不存在或消息为空时才创建新会话
   if (convStore.currentConvId == null || convStore.messages.length === 0) {
-    await convStore.create(pid, text.slice(0, 20))
+    // 防止并发创建——检查 conversations 是否已有 pending 的 API 调用
+    if (!convStore.creating) {
+      await convStore.create(pid, text.slice(0, 20))
+    }
   }
 
   resetGenState()
@@ -698,6 +721,11 @@ watch(pendingRetry, (r) => {
       </div>
 
       <div class="footer">
+        <!-- 消息队列(生成中等待发送) -->
+        <div v-if="queueVisible" class="queue-bar">
+          <span class="queue-label">⏳ 等待发送 ({{ msgQueue.length }})</span>
+          <div v-for="(q, i) in msgQueue" :key="i" class="queue-item">{{ q }}</div>
+        </div>
         <ChatInput
           v-model:value="input"
           v-model:model="model"
@@ -980,4 +1008,7 @@ watch(pendingRetry, (r) => {
 .paused-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 10px; font-size: 13px; margin-bottom: 8px; }
 .paused-resume { padding: 4px 12px; border: none; border-radius: 6px; background: #10b981; color: #fff; cursor: pointer; font-size: 12px; }
 .paused-abort { padding: 4px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); cursor: pointer; font-size: 12px; }
+.queue-bar { margin-bottom: 8px; padding: 6px 10px; background: #eef2ff; border-radius: 8px; font-size: 12px; }
+.queue-label { font-weight: 600; color: #4f46e5; }
+.queue-item { padding: 2px 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
