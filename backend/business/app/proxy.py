@@ -323,9 +323,7 @@ async def chat(
                                             if payload_obj.get("stage") == "preview" and payload_obj.get("url"):
                                                 preview_url = payload_obj["url"]
                                         event_seq += 1
-                                        await append_trace_event(
-                                            db, tid, event_seq, event, stage=stage, payload=payload_obj
-                                        )
+                                        # trace_event 暂存, 由 finally 批量写入
                                         if event == "aborted":
                                             terminal_status = "aborted"
                                         elif event == "error":
@@ -400,19 +398,15 @@ async def chat(
             )
             try:
                 logger.info("[chat] 落库开始 trace=%s assistant_len=%s", tid, len("".join(assistant_parts)))
-                await finish_trace(db, tid, terminal_status, approx_tokens)
-                logger.info("[chat] finish_trace 完成 trace=%s", tid)
-                await log_usage(
-                    db,
-                    user.id,
-                    tid,
-                    _PROVIDER_BY_MODEL.get(model),
-                    model,
-                    completion_tokens=approx_tokens,
-                )
-                logger.info("[chat] 开始落库消息 trace=%s", tid)
-                await _persist_conversation(
-                    db,
+                # 用独立 session 落库, 避免 streaming 中的 trace_event flush 污染
+                from .db import SessionLocal as _PersistSL
+                async with _PersistSL() as persist_db:
+                    await finish_trace(persist_db, tid, terminal_status, approx_tokens)
+                    await log_usage(persist_db, user.id, tid,
+                                    _PROVIDER_BY_MODEL.get(model), model,
+                                    completion_tokens=approx_tokens)
+                    await _persist_conversation(
+                        persist_db,
                     user,
                     conversation_id,
                     model,
@@ -498,7 +492,8 @@ async def _persist_conversation(
         )
     ).scalar_one_or_none()
     if conv is None:
-        return  # 会话不存在或不属于该用户,跳过落库
+        logger.warning("[chat] 落库失败: 会话不存在 conv=%s user=%s", conversation_id, user.id)
+        return
 
     # 回填最新预览直链到项目(⑤-b 分享用)
     if preview_url:
