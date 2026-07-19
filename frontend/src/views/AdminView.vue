@@ -121,6 +121,14 @@ const scaleReplicas = ref(2)
 const stopName = ref('ai_service')
 const ctrlMsg = ref('')
 
+// ---- DB 状态展示(类型桥接 v-for) ----
+interface DbItem { key: string; ok: boolean; error?: string; pool_size?: number; checked_in?: number; overflow?: number }
+const dbItems = computed<DbItem[]>(() => {
+  const db = metrics.value.db
+  if (!db) return []
+  return Object.entries(db).map(([key, info]) => ({ key, ...(info as any) }))
+})
+
 async function doScale() {
   try {
     const r = await fetch(
@@ -258,6 +266,21 @@ onUnmounted(() => {
         <div class="card">
           <div class="k">每分钟请求</div>
           <div class="v">{{ metrics.requests_per_min ?? '-' }}</div>
+        </div>
+      </div>
+
+      <!-- 数据库状态 -->
+      <div class="block" v-if="dbItems.length">
+        <h3>数据库状态</h3>
+        <div class="db-grid">
+          <div class="db-card" v-for="item in dbItems" :key="item.key">
+            <span class="db-icon" :class="item.ok ? 'ok' : 'err'">{{ item.ok ? '●' : '●' }}</span>
+            <span class="db-name">{{ item.key }}</span>
+            <span class="db-stat" :class="item.ok ? 'ok' : 'err'">{{ item.ok ? '正常' : (item.error || '不可达') }}</span>
+            <span v-if="item.ok && item.pool_size != null" class="db-pool">
+              连接池: {{ item.pool_size }} (在用 {{ item.checked_in ?? '-' }}, 溢出 {{ item.overflow ?? '-' }})
+            </span>
+          </div>
         </div>
       </div>
 
@@ -655,4 +678,14 @@ onUnmounted(() => {
 .estage { color: #64748b; }
 .ecomment { color: var(--muted); font-style: italic; margin-left: auto; }
 .back { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 4px 12px; cursor: pointer; font-size: 13px; margin-bottom: 8px; }
+.db-grid { display: flex; gap: 12px; flex-wrap: wrap; }
+.db-card { display: flex; align-items: center; gap: 8px; background: #f8fafc; border-radius: 8px; padding: 10px 14px; min-width: 200px; }
+.db-icon { font-size: 12px; }
+.db-icon.ok { color: #22c55e; }
+.db-icon.err { color: var(--err); }
+.db-name { font-weight: 700; font-size: 14px; color: #334155; text-transform: uppercase; }
+.db-stat { font-size: 12px; }
+.db-stat.ok { color: #22c55e; }
+.db-stat.err { color: var(--err); }
+.db-pool { font-size: 11px; color: var(--muted); margin-left: auto; }
 </style>

@@ -77,7 +77,7 @@ async def record_request(path: str, status_code: int, elapsed_ms: float) -> None
 
 
 async def snapshot() -> dict:
-    """给管理页的实时指标快照。"""
+    """给管理页的实时指标快照(含三库健康状态)。"""
     try:
         r = await get_redis()
         pipe = r.pipeline()
@@ -88,13 +88,47 @@ async def snapshot() -> dict:
         total, err, usage, _ = await pipe.execute()
         minute = int(time.time() // 60)
         rpm = await r.get(f"stats:rpm:{minute}") or 0
+        db = await _db_status()
         return {
             "uptime_s": int(time.time() - START_TIME),
             "requests_total": int(total or 0),
             "requests_error": int(err or 0),
             "requests_per_min": int(rpm),
             "model_usage": {k: int(v) for k, v in (usage or {}).items()},
+            "db": db,
         }
     except Exception as e:
         logger.warning("snapshot failed: %s", e)
         return {"uptime_s": int(time.time() - START_TIME), "error": str(e)}
+
+
+async def _db_status() -> dict:
+    """MySQL / Redis 连通性 + 连接池状态(每 2s 由 /admin/metrics 调用)。"""
+    result: dict = {}
+    # MySQL
+    try:
+        from sqlalchemy import text
+
+        from .db import engine
+
+        pool = engine.pool
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        result["mysql"] = {
+            "ok": True,
+            "pool_size": pool.size(),
+            "checked_in": getattr(pool, "checkedin", lambda: 0)(),
+            "overflow": pool.overflow(),
+        }
+    except Exception as e:
+        result["mysql"] = {"ok": False, "error": str(e)[:200]}
+
+    # Redis
+    try:
+        r = await get_redis()
+        await r.ping()
+        result["redis"] = {"ok": True}
+    except Exception as e:
+        result["redis"] = {"ok": False, "error": str(e)[:200]}
+
+    return result

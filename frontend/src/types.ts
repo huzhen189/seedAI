@@ -106,7 +106,14 @@ export interface MetricsSnapshot {
   requests_error?: number
   requests_per_min?: number
   model_usage?: Record<string, number>
+  /** 三库健康状态(业务可检的 MySQL + Redis) */
+  db?: DbStatus
   error?: string
+}
+
+export interface DbStatus {
+  mysql?: { ok: boolean; pool_size?: number; checked_in?: number; overflow?: number; error?: string }
+  redis?: { ok: boolean; error?: string }
 }
 
 /** 管理后台用户列表项(/admin/users)。 */

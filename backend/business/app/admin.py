@@ -33,6 +33,14 @@ from .security import (
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
+@router.get("/health")
+async def health():
+    """三库连通性健康检查(MySQL + Redis;Chroma 由 AI 服务托管,此处不检查)。"""
+    from .metrics import _db_status
+
+    return await _db_status()
+
+
 @router.get("/metrics")
 async def metrics_stream(_=Depends(require_admin)):
     """实时指标:每 2s 推一帧快照(轮询兜底见前端)。"""
