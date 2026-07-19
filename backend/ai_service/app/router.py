@@ -71,10 +71,10 @@ LEVEL2_LABELS: dict[str, str] = {
 }
 
 
-def detect_intent(messages: list[dict], model_id: str = "hy3") -> dict:
-    """返回 {level1, level2, confidence, industry, label}。"""
+def detect_intent(messages: list[dict], model_id: str = "hy3", checkpoint_info: dict | None = None) -> dict:
+    """返回 {level1, level2, confidence, industry, checkpoint_relation, label}。"""
     t0 = time.time()
-    result = classify(messages, model_id)
+    result = classify(messages, model_id, checkpoint_info=checkpoint_info)
     l1 = result["level1"]
     l2 = result["level2"]
     elapsed = time.time() - t0

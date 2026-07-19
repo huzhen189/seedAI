@@ -14,6 +14,8 @@ export interface ChatCallbacks {
   onError?: (msg: string) => void
   /** 主模型不可用时触发(data 含 failed/suggested/message),前端弹框待用户选替代模型后重发 */
   onRetry?: (data: RetryEvent) => void
+  /** 用户断开连接, 已保存断点(data 含 stage/progress) */
+  onPaused?: (data: Record<string, unknown>) => void
   /** 意图识别结果(7 类: chat/doc/generate/modify/translate/code/unsupported) */
   onIntent?: (data: IntentEvent) => void
   /** 不支持的功能提示(意图不属于已知范围) */
@@ -28,6 +30,10 @@ export interface StartChatOptions {
   cb: ChatCallbacks
   /** 断点续传:指定后仅回放该 stream id 之后的增量(留空=全量回放)。 */
   after?: string
+  /** 断点续跑: 设为 true 则注入 checkpoint_data */
+  resume?: boolean
+  /** 更正模式: 基于上次结果微调 */
+  correct?: boolean
 }
 
 /** 打开与业务服务的 SSE 对话流(需登录 Cookie + conversation_id)。返回 EventSource 以便取消。 */
@@ -38,6 +44,8 @@ export function startChat(opts: StartChatOptions): EventSource {
   params.set('trace_id', opts.traceId)
   params.set('conversation_id', String(opts.conversationId))
   if (opts.after) params.set('after', opts.after)
+  if (opts.resume) params.set('resume', 'true')
+  if (opts.correct) params.set('correct', 'true')
 
   const es = new EventSource(`/api/chat?${params.toString()}`)
   const safeParse = (raw: string): any => {
@@ -53,6 +61,7 @@ export function startChat(opts: StartChatOptions): EventSource {
   es.addEventListener('plan', (e) => opts.cb.onPlan?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('intent', (e) => opts.cb.onIntent?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('unsupported', (e) => opts.cb.onUnsupported?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('paused', (e) => opts.cb.onPaused?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('token', (e) => {
     const d = safeParse((e as MessageEvent).data)
     const text = typeof d.data === 'string' ? d.data : (e as MessageEvent).data

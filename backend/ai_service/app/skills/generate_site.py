@@ -12,6 +12,7 @@ M0 实现为显式异步生成器(比 LangGraph astream_events 更易产出结�
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import os
 from collections.abc import AsyncGenerator
@@ -204,9 +205,88 @@ async def generate_stream(
     is_cancelled=None,
     intent: Optional[str] = None,
     industry: Optional[str] = None,
+    checkpoint: Optional[dict] = None,
+    resume_mode: str = "resume",
 ) -> AsyncGenerator[Dict, None]:
     # 根据意图选 Coder 系统提示(游戏 vs 建站)
     coder_prompt = SYS_CODER_GAME if intent == "game" else SYS_CODER
+
+    # 断点恢复入口(§7): 跳过已完成阶段
+    if checkpoint:
+        stage = checkpoint.get("stage", "")
+        plan = checkpoint.get("plan", {})
+        html = checkpoint.get("html", "")
+        attempt = checkpoint.get("attempt", 0)
+
+        if resume_mode == "correct":
+            if stage.startswith("reviewer_r"):
+                stage = "coder_done"; attempt = 0
+
+        GEN_LOG.info("[gen] 断点恢复 trace=%s stage=%s mode=%s", trace_id, stage, resume_mode)
+
+        # 从断点恢复: 重新执行 Coder(planner_done) 或 跳过 Coder 进 Reviewer(coder_done+)
+        if stage == "planner_done":
+            yield ev("node", stage="enter_planner_done")
+            plan_msgs = [{"role": "user", "content": plan.get("goal", "")}]
+            user_msgs = [{"role": "user", "content": f"需求规格:\n{json.dumps(plan, ensure_ascii=False)}"}] + messages
+            # 重新执行 Coder
+            html_parts = []
+            async for chunk, _ in astream_with_fallback(model_id, user_msgs, system=coder_prompt):
+                if await _cancelled_now(is_cancelled):
+                    yield ev("aborted"); return
+                text = getattr(chunk, "content", chunk)
+                if text: html_parts.append(text); yield ev("token", data=text)
+            html = _extract_html("".join(html_parts))
+            # 进 Reviewer r1
+            for attempt in range(3):
+                yield ev("node", stage="enter_reviewer", attempt=attempt + 1)
+                review = _review(model_id, html)
+                GEN_LOG.info("[gen] Reviewer 第%s轮(恢复) trace=%s passed=%s", attempt + 1, trace_id, review["passed"])
+                yield ev("think", stage="reviewer", passed=review["passed"], comment=review["comment"])
+                if review["passed"]: break
+                yield ev("node", stage="enter_coder", retry=True)
+                fix_msgs = [{"role": "user", "content": f"上一版未通过:{review['comment']}\n修正 HTML:\n{html[:8000]}"}]
+                hp = []
+                async for chunk, _ in astream_with_fallback(model_id, fix_msgs, system=coder_prompt):
+                    if await _cancelled_now(is_cancelled):
+                        yield ev("aborted"); return
+                    text = getattr(chunk, "content", chunk)
+                    if text: hp.append(text); yield ev("token", data=text)
+                html = _extract_html("".join(hp))
+        else:
+            # coder_done / reviewer_rN: 直接从 Reviewer 恢复
+            yield ev("node", stage=f"resume_{stage}")
+            if stage == "coder_done":
+                attempt = 0
+            else:
+                attempt = int(stage[-1])
+            for a in range(attempt, 3):
+                yield ev("node", stage="enter_reviewer", attempt=a + 1)
+                review = _review(model_id, html)
+                if review["passed"] or a >= 2:
+                    yield ev("think", stage="reviewer", passed=review["passed"], comment=review.get("comment", ""))
+                    break
+                yield ev("think", stage="reviewer", passed=False, comment=review["comment"])
+                yield ev("node", stage="enter_coder", retry=True)
+                fix_msgs = [{"role": "user", "content": f"修正:{review['comment']}\nHTML:\n{html[:8000]}"}]
+                hp = []
+                async for chunk, _ in astream_with_fallback(model_id, fix_msgs, system=coder_prompt):
+                    if await _cancelled_now(is_cancelled):
+                        yield ev("aborted"); return
+                    text = getattr(chunk, "content", chunk)
+                    if text: hp.append(text); yield ev("token", data=text)
+                html = _extract_html("".join(hp))
+
+        # 收尾
+        yield ev("node", stage="previewing")
+        url = _deliver(html, trace_id)
+        yield ev("node", stage="preview", url=url, fallback="srcdoc" if not url else None)
+        with suppress(Exception):
+            save_memory(trace_id or "site", plan.get("title", "建站"), html[:1500], plan.get("steps", []))
+        yield ev("node", stage="done")
+        return
+
+    # ---------- 正常流程 ----------
 
     # ②-a RAG 增强:带超时保护,Chroma 不可达时 5s 后跳过,不阻塞生成
     first_user_msg = ""
@@ -248,13 +328,21 @@ async def generate_stream(
         # 思考流:Planner 的拆解思路(分步思考的一部分)
         if plan.get("reasoning"):
             yield ev("think", stage="planner", content=plan["reasoning"])
-        # 特殊节点:大计划 / 目标(title/goal/steps),前端渲染为「计划 / 流程」卡片
         yield ev(
             "plan",
             title=plan.get("title", ""),
             goal=plan.get("goal", ""),
             steps=plan.get("steps", []),
         )
+        # 检查取消(断点保存点 1: planner_done)
+        if await _cancelled_now(is_cancelled):
+            yield ev("checkpoint", stage="planner_done", data={
+                "plan": plan, "rag_ctx": rag_ctx,
+                "messages": messages[:10],  # 只保留最近 10 条
+            })
+            yield ev("paused", stage="planner_done", progress=25)
+            yield ev("done")
+            return
 
         # 2) Coder(流式,模型不可用时不自动降级,由前端确认后重发)
         yield ev("node", stage="enter_coder")
@@ -277,6 +365,15 @@ async def generate_stream(
             "[gen] Coder 完成 trace=%s chars=%s chunks=%s model=%s",
             trace_id, len(html), token_count, model_id,
         )
+        # 检查取消(断点保存点 2: coder_done)
+        if await _cancelled_now(is_cancelled):
+            yield ev("checkpoint", stage="coder_done", data={
+                "plan": plan, "html": html, "rag_ctx": rag_ctx,
+                "messages": messages[:10],
+            })
+            yield ev("paused", stage="coder_done", progress=65)
+            yield ev("done")
+            return
 
         # 3) Reviewer + Reflexion(≤3 轮)
         for attempt in range(3):
@@ -289,6 +386,14 @@ async def generate_stream(
             yield ev("think", stage="reviewer", passed=review["passed"], comment=review["comment"])
             if review["passed"]:
                 break
+            # 检查取消(断点保存点 3: reviewer_rN)
+            if await _cancelled_now(is_cancelled):
+                yield ev("checkpoint", stage=f"reviewer_r{attempt}", data={
+                    "plan": plan, "html": html, "attempt": attempt,
+                })
+                yield ev("paused", stage=f"reviewer_r{attempt}", progress=75 + attempt * 10)
+                yield ev("done")
+                return
             # Reflexion: 让 Coder 基于评审建议修正
             yield ev("node", stage="enter_coder", retry=True)
             fix_msgs = [

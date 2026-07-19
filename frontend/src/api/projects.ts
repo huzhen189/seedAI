@@ -1,6 +1,8 @@
 import type { Artifact, Conversation, Project, SearchItem } from '../types'
 import { del, get, patch, post } from './client'
 
+export { patch }
+
 export const listProjects = (): Promise<Project[]> => get('/api/projects')
 export const createProject = (name: string): Promise<Project> =>
   post('/api/projects', { name })

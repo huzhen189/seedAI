@@ -57,6 +57,17 @@ class Conversation(Base):
     project_id: Mapped[int] = mapped_column(Integer, index=True)
     user_id: Mapped[int] = mapped_column(Integer, index=True)
     title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # 断点续跑(§7): status=paused 表示用户断开但 Worker 已完成当前阶段;
+    # checkpoint_stage 标记停在哪个阶段; checkpoint_data 为 JSON 快照;
+    # progress_pct 0~100 供前端进度条。
+    status: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
+    # active | paused | completed | aborted | error
+    checkpoint_stage: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # planner_done | coder_done | reviewer_r1 | reviewer_r2 | reviewer_r3
+    checkpoint_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # JSON: {"plan":{...}, "html":"...", "attempt":0, "messages":[...]}
+    progress_pct: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # 0 ~ 100
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

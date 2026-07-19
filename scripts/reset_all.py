@@ -64,9 +64,29 @@ async def reset() -> None:
     await init_db()
     print("  >> 默认用户已就绪")
 
-    await engine.dispose()
+    # 5) 大表 HASH 分区(幂等, 已分区则跳过)
+    _PARTITIONS = {
+        "messages": ("conversation_id", 16),
+        "traces": ("user_id", 16),
+        "trace_events": ("trace_id", 16),
+        "feedbacks": ("user_id", 16),
+        "usage_logs": ("user_id", 16),
+        "artifacts": ("project_id", 8),
+    }
+    async with engine.begin() as conn:
+        def _do_partitions(sync_conn):
+            for tbl, (col, n) in _PARTITIONS.items():
+                try:
+                    sync_conn.execute(text(
+                        f"ALTER TABLE {tbl} PARTITION BY HASH({col}) PARTITIONS {n}"
+                    ))
+                    print(f"  >> {tbl} HASH({col}) {n} 分区已应用")
+                except Exception:
+                    pass  # 已分区则跳过
+        await conn.run_sync(_do_partitions)
 
-    print("\n完成。请重启两个后端服务(前后端无需重启)。")
+    await engine.dispose()
+    print("\n完成。业务服务 7101 将自动重启; AI 服务 7102 请手动重启。")
 
 
 if __name__ == "__main__":

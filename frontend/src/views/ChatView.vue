@@ -19,7 +19,7 @@ import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
 import JSZip from 'jszip'
 import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
-import { getConversation, listArtifacts, renameProject } from '../api/projects'
+import { getConversation, listArtifacts, renameProject, patch } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
@@ -51,6 +51,30 @@ const degraded = ref(false)
 const generatedHtml = ref('')
 const previewUrl = ref<string | null>(null)
 const errorMsg = ref('')
+
+// 断点续跑(§7): 检测到 status=paused 的会话
+const pausedConv = computed(() =>
+  convStore.conversations.find(c => c.status === 'paused'),
+)
+
+async function resumeConversation() {
+  const pc = pausedConv.value
+  if (!pc || !projectStore.currentProjectId) return
+  resetGenState()
+  traceId.value = genTraceId()
+  convStore.currentConvId = pc.id
+  setActiveGen(pc.id, traceId.value)
+  generating.value = true
+  startChat({ model: model.value, messages: [], traceId: traceId.value, conversationId: pc.id, cb: makeCallbacks(0), resume: true })
+}
+
+async function abortPaused() {
+  const pc = pausedConv.value
+  if (!pc) return
+  await patch(`/api/conversations/${pc.id}`, { status: 'aborted', checkpoint_data: null })
+  // 刷新会话列表
+  if (projectStore.currentProjectId) await convStore.loadConversations(projectStore.currentProjectId)
+}
 
 // 意图识别(由 AI intent 事件设置; 控制右侧面板显示)
 const currentIntent = ref<{ level1: string; level2: string }>({ level1: '', level2: '' })
@@ -626,6 +650,13 @@ watch(pendingRetry, (r) => {
         <span class="proj-date">{{ currentProjectDate }}</span>
       </div>
 
+      <!-- 断点续跑横幅(§7) -->
+      <div v-if="pausedConv" class="paused-banner">
+        <span>⚠ 未完成的生成 · {{ pausedConv.checkpoint_stage || '?' }} · 已完成 {{ pausedConv.progress_pct || 0 }}%</span>
+        <button class="paused-resume" @click="resumeConversation">继续生成</button>
+        <button class="paused-abort" @click="abortPaused">放弃</button>
+      </div>
+
       <div ref="convRef" class="conv">
         <div v-if="convStore.loadingMore" class="loading-more">加载更早的会话…</div>
         <div ref="sentinel" class="sentinel"></div>
@@ -946,4 +977,7 @@ watch(pendingRetry, (r) => {
   text-decoration: none;
   font-weight: 600;
 }
+.paused-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 10px; font-size: 13px; margin-bottom: 8px; }
+.paused-resume { padding: 4px 12px; border: none; border-radius: 6px; background: #10b981; color: #fff; cursor: pointer; font-size: 12px; }
+.paused-abort { padding: 4px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); cursor: pointer; font-size: 12px; }
 </style>

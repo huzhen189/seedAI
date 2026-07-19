@@ -31,6 +31,13 @@ INTENT_SYSTEM = (
     "industry(12选1, build/doc 时必填, 其他填 none):\n"
     "restaurant(餐饮)|ecommerce(电商)|gov(政务)|edu(教育)|health(医疗)\n"
     "|finance(金融)|game(游戏)|personal(个人)|corp(企业)|tech(科技)|media(媒体)|other\n\n"
+    "checkpoint_relation(5选1, 仅当存在断点时返回, 否则填 none):\n"
+    "- resume: 用户要继续上次的工作(如'继续''接着做')\n"
+    "- correct: 用户在旧基础上改(如'改导航''换个颜色')\n"
+    "- override: 用户要重来(如'重新做一个')\n"
+    "- unrelated: 说另一件事,和断点无关\n"
+    "- unclear: 无法判断\n"
+    "- none: 不存在断点或不需要判断\n\n"
     "用户输入: "
 )
 
@@ -63,23 +70,33 @@ OLD_TO_LEVELS: dict[str, tuple[str, str]] = {
 }
 
 
-def classify(messages: list[dict], model_id: str = "hy3") -> dict:
-    """分类用户意图, 返回 {level1, level2, confidence, industry}。失败则关键词兜底。"""
+def classify(messages: list[dict], model_id: str = "hy3", checkpoint_info: dict | None = None) -> dict:
+    """分类, 返回 {level1, level2, confidence, industry, checkpoint_relation}。"""
     last = ""
     for m in reversed(messages):
         if m.get("role") == "user":
             last = m.get("content", "") or ""
             break
     if not last.strip():
-        return {"level1": "learn", "level2": "casual", "confidence": 1.0, "industry": "none"}
+        return _default()
 
-    # 上下文捷径
+    # 上下文捷径: 已有 HTML → modify
     has_html = any(
         m.get("role") == "assistant" and ("<html" in (m.get("content") or "").lower())
         for m in messages
     )
     if has_html:
-        return {"level1": "build", "level2": "modify", "confidence": 0.99, "industry": "other"}
+        return _default(l1="build", l2="modify", conf=0.99, ind="other")
+
+    # 构建 prompt(含断点上下文)
+    sys_prompt = INTENT_SYSTEM
+    if checkpoint_info:
+        ck = checkpoint_info
+        sys_prompt = INTENT_SYSTEM.replace(
+            "用户输入: ",
+            f"断点: 阶段={ck.get('stage','?')} 进度={ck.get('pct',0)}% 标题=\"{ck.get('title','')}\"\n"
+            f"用户输入: ",
+        )
 
     # LLM 分类
     order = resolve_fallback_order(model_id)
@@ -87,26 +104,28 @@ def classify(messages: list[dict], model_id: str = "hy3") -> dict:
         try:
             chat = get_chat_model(mid, streaming=False)
             resp = chat.invoke([
-                {"role": "system", "content": INTENT_SYSTEM},
+                {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": last[:500]},
             ])
             raw = (resp.content or "").strip()
             m = re.search(r"\{.*\}", raw, re.DOTALL)
             data = json.loads(m.group(0)) if m else {}
-            l1 = data.get("level1", data.get("intent", ""))  # 兼容旧字段
+            l1 = data.get("level1", data.get("intent", ""))
             l2 = data.get("level2", "")
             confidence = float(data.get("confidence", 0.5))
             industry = data.get("industry", "none") or "none"
+            ck_rel = data.get("checkpoint_relation", "none") or "none"
 
             if industry not in VALID_INDUSTRIES:
                 industry = "other"
+            if ck_rel not in ("resume", "correct", "override", "unrelated", "unclear", "none"):
+                ck_rel = "none"
             if l1 in VALID_LEVEL1 and l2 in VALID_LEVEL2:
-                return {"level1": l1, "level2": l2, "confidence": confidence, "industry": industry}
-            # 兼容旧 intent 字段 → 映射到两级
+                return {"level1": l1, "level2": l2, "confidence": confidence, "industry": industry, "checkpoint_relation": ck_rel}
             old_intent = data.get("intent", "")
             if old_intent in OLD_TO_LEVELS:
                 l1, l2 = OLD_TO_LEVELS[old_intent]
-                return {"level1": l1, "level2": l2, "confidence": confidence, "industry": industry}
+                return {"level1": l1, "level2": l2, "confidence": confidence, "industry": industry, "checkpoint_relation": ck_rel}
             break
         except Exception as e:
             logger.warning("意图分类 %s 失败: %s", mid, e)
@@ -115,9 +134,14 @@ def classify(messages: list[dict], model_id: str = "hy3") -> dict:
     return _keyword_fallback(last)
 
 
+def _default(l1="learn", l2="casual", conf=1.0, ind="none") -> dict:
+    return {"level1": l1, "level2": l2, "confidence": conf, "industry": ind, "checkpoint_relation": "none"}
+
+
 def _keyword_fallback(text: str) -> dict:
-    """关键词兜底, 返回 {level1, level2, confidence, industry}。"""
+    """关键词兜底, 返回 {level1, level2, confidence, industry, checkpoint_relation}。"""
     t = text.lower()
+    dr = lambda l1, l2, i="none": {"level1": l1, "level2": l2, "confidence": 0.7, "industry": i, "checkpoint_relation": "none"}  # noqa: E731
 
     # 先探测行业
     industry = "other"
@@ -144,45 +168,45 @@ def _keyword_fallback(text: str) -> dict:
     elif any(w in t for w in ("媒体", "视频", "抖音", "直播", "娱乐")):
         industry = "media"
 
-    c = lambda: 0.7  # noqa: E731 — shorthand
+    c = 0.7  # noqa: E221
 
     # level2 细判(按关键词组, 用互斥优先级)
     if any(w in t for w in ("翻译", "translate", "译成")):
-        return {"level1": "translate", "level2": "text", "confidence": c(), "industry": "none"}
+        return dr("translate", "text")
 
     if any(w in t for w in ("贪吃蛇", "打砖块", "坦克大战", "射击", "消消乐", "弹球", "飞机大战", "2048")):
-        return {"level1": "build", "level2": "game", "confidence": c(), "industry": "game"}
+        return dr("build", "game", "game")
     if any(w in t for w in ("游戏", "game", "小游戏")):
-        return {"level1": "build", "level2": "game", "confidence": c(), "industry": "game"}
+        return dr("build", "game", "game")
 
     if any(w in t for w in ("修改", "改成", "换成", "调整", "modify")):
-        return {"level1": "build", "level2": "modify", "confidence": c(), "industry": industry}
+        return dr("build", "modify", industry)
     if any(w in t for w in ("落地页", "主页", "landing")):
-        return {"level1": "build", "level2": "page", "confidence": c(), "industry": industry}
+        return dr("build", "page", industry)
     if any(w in t for w in ("网站", "官网", "商城", "后台", "页面", "网页", "site", "web")):
-        return {"level1": "build", "level2": "site", "confidence": c(), "industry": industry}
+        return dr("build", "site", industry)
 
     if any(w in t for w in ("readme", "README", "说明")):
-        return {"level1": "doc", "level2": "readme", "confidence": c(), "industry": industry}
+        return dr("doc", "readme", industry)
     if any(w in t for w in ("教程", "指南", "tutorial", "步骤")):
-        return {"level1": "doc", "level2": "tutorial", "confidence": c(), "industry": industry}
+        return dr("doc", "tutorial", industry)
     if any(w in t for w in ("方案", "计划", "设计", "架构")):
-        return {"level1": "doc", "level2": "plan", "confidence": c(), "industry": industry}
+        return dr("doc", "plan", industry)
 
     if any(w in t for w in ("组件", "按钮", "表单", "卡片", "component", "modal")):
-        return {"level1": "code", "level2": "component", "confidence": c(), "industry": "none"}
+        return dr("code", "component")
     if any(w in t for w in ("修复", "bug", "改一下", "不对", "有问题", "fix", "error", "报错")):
-        return {"level1": "code", "level2": "fix", "confidence": c(), "industry": "none"}
+        return dr("code", "fix")
     if any(w in t for w in ("重构", "优化", "改进", "refactor")):
-        return {"level1": "code", "level2": "refactor", "confidence": c(), "industry": "none"}
+        return dr("code", "refactor")
     if any(w in t for w in ("代码", "函数", "脚本", "写一个", "snippet", "算法", "编程")):
-        return {"level1": "code", "level2": "snippet", "confidence": c(), "industry": "none"}
+        return dr("code", "snippet")
 
     if any(w in t for w in ("报错", "错误", "error", "异常", "exception", "崩溃", "排查")):
-        return {"level1": "learn", "level2": "debug", "confidence": c(), "industry": "none"}
+        return dr("learn", "debug")
     if any(w in t for w in ("对比", "区别", "比较", "选型", "vs", "哪个好")):
-        return {"level1": "learn", "level2": "compare", "confidence": c(), "industry": "none"}
-    if any(w in t for w in ("你好", "谢谢", "再见", "哈哈", "hello", "hi")):
-        return {"level1": "learn", "level2": "casual", "confidence": c(), "industry": "none"}
+        return dr("learn", "compare")
+    if any(w in t for w in ("你好", "谢谢", "再见", "哈哈", "hello", "hi", "我是谁", "你是谁", "我叫", "聊天", "聊聊", "在吗", "怎么样", "可以吗")):
+        return dr("learn", "casual")
 
-    return {"level1": "learn", "level2": "explain", "confidence": 0.5, "industry": "none"}
+    return dr("learn", "explain")

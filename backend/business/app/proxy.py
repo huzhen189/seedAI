@@ -194,6 +194,8 @@ async def chat(
     conversation_id: int = Query(..., description="会话 id,必填(前端先建会话)"),
     trace_id: str | None = Query(None, description="前端生成的链路 id,用于取消/续传"),
     after: str | None = Query(None, description="断点续传:仅回放该 stream id 之后的增量(留空=全量回放)"),
+    resume: bool = Query(False, description="从断点恢复(设 true 则注入 checkpoint_data)"),
+    correct: bool = Query(False, description="更正模式(基于上次结果微调)"),
 ):
     """登录后 SSE 对话端点(文档 §3.7 / §5 / §2.1 / §15.3)。
 
@@ -251,6 +253,24 @@ async def chat(
     if after:
         from urllib.parse import urlencode
         gen_url += "?" + urlencode({"after": after})
+
+    # 断点续跑(§7): 注入 checkpoint_data + resume_mode
+    if resume:
+        conv = await db.get(Conversation, conversation_id)
+        if conv and conv.checkpoint_data and conv.status == "paused":
+            try:
+                ck = json.loads(conv.checkpoint_data)
+                payload["checkpoint"] = ck
+                payload["resume_mode"] = "correct" if correct else "resume"
+                # 将 checkpoint 中的 messages 合并到消息列表(messages 是用户新输入 + 断点的旧对话)
+                if ck.get("messages"):
+                    payload["messages"] = ck["messages"] + messages
+                logger.info(
+                    "[chat] 断点恢复 trace=%s stage=%s mode=%s",
+                    tid, conv.checkpoint_stage, payload.get("resume_mode"),
+                )
+            except json.JSONDecodeError:
+                logger.warning("[chat] checkpoint_data 解析失败, 降级为普通对话")
 
     async def publisher():
         # read 不超时(生成可能持续数分钟),connect 给 10s
@@ -310,23 +330,43 @@ async def chat(
                                             terminal_status = "aborted"
                                         elif event == "error":
                                             terminal_status = "error"
-                                        elif event == "unsupported":
-                                            terminal_status = "unsupported"
-                                            await record_unsupported(user.id, user_text)
-                                        elif event == "intent" and isinstance(payload_obj, dict):
-                                            # 两级意图记录(供管理后台系统分析)
-                                            l1 = payload_obj.get("level1") or payload_obj.get("intent") or "unknown"
-                                            l2 = payload_obj.get("level2") or "unknown"
-                                            captured_level1 = l1
-                                            await record_intent_result(l1, l2, True)
-                                            logger.info(
-                                                "[chat] 意图 %s/%s label=%s industry=%s confidence=%s",
-                                                l1, l2,
-                                                payload_obj.get("label", "-"),
-                                                payload_obj.get("industry", "-"),
-                                                payload_obj.get("confidence", "-"),
-                                            )
+                                    elif event == "unsupported":
+                                        terminal_status = "unsupported"
+                                        await record_unsupported(user.id, user_text)
+                                    elif event == "checkpoint" and isinstance(payload_obj, dict):
+                                        # 断点续跑(§7): 保存 AI 断点到 conversations
+                                        stage = payload_obj.get("stage", "?")
+                                        ck_data = payload_obj.get("data", {})
+                                        try:
+                                            conv = await db.get(Conversation, conversation_id)
+                                            if conv:
+                                                conv.status = "paused"
+                                                conv.checkpoint_stage = stage
+                                                conv.checkpoint_data = json.dumps(ck_data, ensure_ascii=False)
+                                                conv.progress_pct = {
+                                                    "planner_done": 25, "coder_done": 65,
+                                                    "reviewer_r0": 75, "reviewer_r1": 85, "reviewer_r2": 95,
+                                                }.get(stage, 50)
+                                                await db.commit()
+                                                logger.info("[chat] 断点已保存 conv=%s stage=%s", conversation_id, stage)
+                                        except Exception as e:
+                                            logger.warning("[chat] 断点保存失败: %s", e)
+                                    elif event == "paused":
+                                        terminal_status = "paused"
+                                    elif event == "intent" and isinstance(payload_obj, dict):
+                                        # 两级意图记录(供管理后台系统分析)
+                                        l1 = payload_obj.get("level1") or payload_obj.get("intent") or "unknown"
+                                        l2 = payload_obj.get("level2") or "unknown"
+                                        captured_level1 = l1
+                                        await record_intent_result(l1, l2, True)
                                         logger.info(
+                                            "[chat] 意图 %s/%s label=%s industry=%s confidence=%s",
+                                            l1, l2,
+                                            payload_obj.get("label", "-"),
+                                            payload_obj.get("industry", "-"),
+                                            payload_obj.get("confidence", "-"),
+                                        )
+                                    logger.info(
                                             "[chat] SSE 事件 seq=%s type=%s stage=%s",
                                             event_seq, event, stage or "-",
                                         )
@@ -335,6 +375,20 @@ async def chat(
                                         frame += f"event: {event}\n"
                                     frame += f"data: {data}\n\n"
                                     yield frame.encode("utf-8")
+                                    # 断点续跑(§7): 每帧后检测客户端是否断开
+                                    if await request.is_disconnected():
+                                        logger.info("[chat] 客户端已断开 trace=%s, 通知 AI 保存断点", tid)
+                                        # 发 cancel 到 AI, Worker 的 is_cancelled 返回 True
+                                        try:
+                                            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=5)) as c:
+                                                await c.post(
+                                                    f"{settings.ai_service_url}/cancel",
+                                                    json={"trace_id": tid},
+                                                )
+                                        except Exception:
+                                            pass
+                                        terminal_status = "paused"
+                                        break
                                 event, data_parts = None, []
                                 continue
                             if raw_line.startswith("event:"):
@@ -405,7 +459,11 @@ async def chat(
                 logger.info("[chat] 落库完成 trace=%s", tid)
                 # 记录分析统计(技能成效 + 意图命中率)
                 skill = "generate_site"
-                status = "ok" if terminal_status == "done" else ("abort" if terminal_status == "aborted" else "fail")
+                status = "ok" if terminal_status == "done" else (
+                    "abort" if terminal_status == "aborted" else (
+                        "fail" if terminal_status == "error" else "abort"
+                    )
+                )
                 elapsed_ms = sum(event_counts.values()) * 50  # 粗略估算
                 await record_skill_outcome(skill, status, float(elapsed_ms))
                 await record_model_detail(model, terminal_status == "done", captured_level1)

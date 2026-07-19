@@ -107,6 +107,10 @@ export interface Conversation {
   created_at: string
   updated_at: string
   messages?: Message[]
+  status?: string  // active | paused | completed | aborted | error
+  checkpoint_stage?: string | null  // planner_done | coder_done | reviewer_r1..
+  checkpoint_data?: string | null   // JSON
+  progress_pct?: number  // 0~100
 }
 
 export interface SearchItem {
