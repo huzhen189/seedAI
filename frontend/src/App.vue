@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import TopNav from './components/TopNav.vue'
 import Sidebar from './components/Sidebar.vue'
 import { useAuthStore } from './stores/auth'
@@ -9,13 +9,21 @@ const collapsed = ref(false)
 const auth = useAuthStore()
 const projectStore = useProjectStore()
 
-// 全局冷启动兜底:恢复登录态 + 拉取项目列表并自动选中首个项目。
-// 避免某些入口视图未单独调 load 时,项目列表/选中态缺失,导致对话因 pid==null
-// 被"请先新建项目"拦截(即用户反馈的"后续打开没调项目接口 / 对话不行")。
+// 全局冷启动:先恢复登录态,登录后才拉项目;未登录不调鉴权接口。
 onMounted(async () => {
   await auth.init()
-  await projectStore.load()
+  if (auth.user) {
+    await projectStore.load()
+  }
 })
+
+// 登录成功后自动加载项目(401 未触发 watch,仅登录成功时执行)
+watch(
+  () => auth.user,
+  (u) => {
+    if (u) projectStore.load()
+  },
+)
 </script>
 
 <template>

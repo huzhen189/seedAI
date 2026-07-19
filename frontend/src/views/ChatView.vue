@@ -384,7 +384,7 @@ function copyPreviewLink() {
 }
 
 onMounted(async () => {
-  // 启动顺序:先恢复登录态(/auth/me) -> 拉模型列表 -> 加载项目 -> 载入首个会话。
+  // 启动顺序:先恢复登录态(/auth/me) -> 拉模型列表(公开) -> 登录后才加载项目/会话
   await auth.init()
   const m = await fetchModels()
   if (m.length) models.value = m
@@ -392,9 +392,11 @@ onMounted(async () => {
   models.value.push({ id: 'local-webllm', label: '本地 WebLLM(Planner)' })
   // 后台预取 WebLLM 模型权重(首屏空闲触发,幂等)
   warmupWebLLM()
-  await projectStore.load()
-  await loadCurrentProject()
-  await maybeResume()
+  if (auth.user.value) {
+    await projectStore.load()
+    await loadCurrentProject()
+    await maybeResume()
+  }
 })
 
 watch(
@@ -423,9 +425,10 @@ watch(
 watch(
   () => auth.user,
   (u) => {
-    // 登录成功后关闭登录框;若此前是"未登录点发送"触发的门禁,则自动重发。
+    // 登录成功后关闭登录框,加载项目/会话;若此前是"未登录点发送"则自动重发
     if (u) {
       auth.closeLogin()
+      projectStore.load().then(() => loadCurrentProject())
       if (pendingSend.value) {
         pendingSend.value = false
         send()

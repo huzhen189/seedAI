@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
+import { useAuthStore } from '../stores/auth'
 import { useProjectStore } from '../stores/project'
 
+const auth = useAuthStore()
 const projectStore = useProjectStore()
 
-onMounted(() => projectStore.load())
+onMounted(() => {
+  if (auth.user) projectStore.load()
+})
 
 async function del(id: number) {
   if (confirm('确认删除该项目及其下所有会话？')) {
