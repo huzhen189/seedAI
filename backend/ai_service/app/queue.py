@@ -280,7 +280,12 @@ async def worker_loop(concurrency: int = 1):
     # 用 asyncio 任务池模拟并发 Worker
     async def _one():
         while True:
-            job = await q.dequeue()
+            try:
+                job = await q.dequeue()
+            except Exception as e:
+                logger.warning("Worker dequeue 失败, 1s 后重试: %s", e)
+                await asyncio.sleep(1)
+                continue
             trace_id = job.get("trace_id")
             model_id = job.get("model_id")
             messages = job.get("messages", [])
@@ -290,7 +295,6 @@ async def worker_loop(concurrency: int = 1):
                 return await q.is_cancelled(trace_id) if trace_id else False
 
             try:
-                # 意图分类 → 路由到对应 Skill
                 intent = detect_intent(messages, model_id)
                 skill_name = skill or skill_for(intent["level1"], intent["level2"]) or "explain"
 
