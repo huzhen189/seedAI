@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # 缓存默认 TTL
     cache_user_ttl: int = 1800  # 30 min
 
+    # 配额限流(①-b):free 套餐默认 50 次/天;可扩展各套餐每日上限。
+    # 全局令牌桶(方案 a)本期未做,仅做基于 user_id 的每日配额。
+    free_daily_quota: int = 50
+    plan_daily_quota: dict = {"free": 50, "pro": 500, "enterprise": 5000}
+
     # 站点域名(§4-C:主站 + 隔离预览子域)
     site_domain: str = "seedai.huzhen.net.cn"
     preview_domain: str = "seedhtml.huzhen.net.cn"

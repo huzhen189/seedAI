@@ -31,8 +31,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .db import get_db
-from .metrics import record_model_usage
-from .models import Conversation, Message
+from .metrics import consume_daily_quota, record_model_usage
+from .models import Conversation, Message, User
 from .security import ACCESS_COOKIE, CurrentUser, decode_token
 
 
@@ -180,6 +180,17 @@ async def chat(
         if m.get("role") == "user":
             user_text = m.get("content", "") or ""
             break
+
+    # 每日配额检查(①-b):基于 user_id,free 默认 50 次/天,超额返回 RATE_LIMITED 帧
+    plan = (
+        await db.execute(select(User.plan).where(User.id == user.id))
+    ).scalar_one_or_none() or "free"
+    allowed, _ = await consume_daily_quota(user.id, plan)
+    if not allowed:
+        return _sse_error_frame(
+            "RATE_LIMITED",
+            f"今日生成次数已用尽（{settings.free_daily_quota} 次/天），请明日再来或升级套餐",
+        )
 
     # 已登录用户按真实 user_id 计量
     await record_model_usage(user.id, model)

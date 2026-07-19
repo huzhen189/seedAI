@@ -8,14 +8,48 @@ MVP 不引 Prometheus;后期可平滑替换为 /metrics 暴露文本格式。
 
 import logging
 import time
+from datetime import datetime, timedelta
 
 from .cache import get_redis
+from .config import settings
 
 
 logger = logging.getLogger("business.metrics")
 
 # 进程启动时间(用于 uptime)
 START_TIME = time.time()
+
+
+def _seconds_to_midnight() -> int:
+    """距离当天结束(次日 00:00)的秒数;用于每日配额的 Redis key 过期。"""
+    now = datetime.now()
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int((midnight - now).total_seconds()) + 1
+
+
+async def consume_daily_quota(user_id: int, plan: str) -> tuple[bool, int]:
+    """消费一次每日生成配额(①-b)。
+
+    返回 (是否允许, 剩余次数):
+      - 未超额: (True, 剩余次数)
+      - 已超额: (False, 0)
+      - Redis 不可用: fail-open (True, -1),不阻断正常生成
+    key = quota:daily:{user_id},首次自增时设置当天过期,跨日自动清零。
+    """
+    limit = settings.plan_daily_quota.get(str(plan), settings.free_daily_quota)
+    try:
+        r = await get_redis()
+        key = f"quota:daily:{user_id}"
+        used = await r.incr(key)
+        if used == 1:
+            # 首次计数,过期时间设到当天结束(避免跨日累加)
+            await r.expire(key, _seconds_to_midnight())
+        if used > limit:
+            return False, 0
+        return True, limit - used
+    except Exception as e:
+        logger.warning("consume_daily_quota failed (fail-open): %s", e)
+        return True, -1
 
 
 async def record_model_usage(user_id: int, model_id: str) -> None:
