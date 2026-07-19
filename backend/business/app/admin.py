@@ -17,14 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_db
 from .metrics import snapshot
-from .models import User
+from .models import Feedback, Trace, TraceEvent, UsageLog, User
 from .orchestrator import run_scale, run_start, run_stop
 from .schemas import AdminUserResp, SetPlanReq, SetRoleReq
 from .security import (
-    CurrentUser,
     ROLE_ADMIN,
     ROLE_SUPER_ADMIN,
     ROLE_USER,
+    CurrentUser,
     require_admin,
     require_super_admin,
 )
@@ -129,6 +129,133 @@ async def start_service(name: str, _=Depends(require_super_admin)):
     """手动启动(⑥-b 补充):真实调用 `docker compose start`,返回执行日志。"""
     result = await run_start(name)
     return {"ack": True, "service": name, **result}
+
+
+# ---------- 对话追踪 / 回放 / 质量(③-a · 文档 §3.13) ----------
+@router.get("/traces")
+async def list_traces(
+    _=Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """Trace 列表(倒序),供管理后台回放入口。"""
+    rows = (
+        (await db.execute(select(Trace).order_by(Trace.id.desc()).limit(limit)))
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": t.id,
+            "trace_id": t.trace_id,
+            "user_id": t.user_id,
+            "model_id": t.model_id,
+            "status": t.status,
+            "total_tokens": t.total_tokens,
+            "started_at": t.started_at.isoformat() if t.started_at else None,
+            "finished_at": t.finished_at.isoformat() if t.finished_at else None,
+        }
+        for t in rows
+    ]
+
+
+@router.get("/traces/{trace_id}")
+async def get_trace(
+    trace_id: str,
+    _=Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """单条 Trace + 事件序列(供前端回放重建时间线)。"""
+    t = (
+        await db.execute(select(Trace).where(Trace.trace_id == trace_id))
+    ).scalar_one_or_none()
+    if t is None:
+        raise HTTPException(status_code=404, detail="trace not found")
+    events = (
+        (
+            await db.execute(
+                select(TraceEvent)
+                .where(TraceEvent.trace_id == trace_id)
+                .order_by(TraceEvent.seq.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "trace": {
+            "id": t.id,
+            "trace_id": t.trace_id,
+            "user_id": t.user_id,
+            "model_id": t.model_id,
+            "status": t.status,
+            "total_tokens": t.total_tokens,
+            "started_at": t.started_at.isoformat() if t.started_at else None,
+            "finished_at": t.finished_at.isoformat() if t.finished_at else None,
+        },
+        "events": [
+            {
+                "seq": e.seq,
+                "event_type": e.event_type,
+                "stage": e.stage,
+                "payload": json.loads(e.payload) if e.payload else None,
+                "created_at": e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in events
+        ],
+    }
+
+
+@router.get("/quality")
+async def quality(_=Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    """AI 质量聚合指标(③-a / 文档 §3.12 6+1 维度精简版)。"""
+    fbs = (await db.execute(select(Feedback))).scalars().all()
+    ratings = [f.rating for f in fbs]
+    avg = round(sum(ratings) / len(ratings), 2) if ratings else None
+    dist: dict[int, int] = {}
+    for r in ratings:
+        dist[r] = dist.get(r, 0) + 1
+
+    usages = (await db.execute(select(UsageLog))).scalars().all()
+    model_usage: dict[str, int] = {}
+    for u in usages:
+        key = u.model or "unknown"
+        model_usage[key] = model_usage.get(key, 0) + 1
+
+    rev_events = (
+        (
+            await db.execute(
+                select(TraceEvent).where(
+                    TraceEvent.event_type == "think", TraceEvent.stage == "reviewer"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    passed = 0
+    for e in rev_events:
+        try:
+            p = json.loads(e.payload) if e.payload else {}
+            if p.get("passed") is True:
+                passed += 1
+        except Exception:
+            pass
+
+    traces = (await db.execute(select(Trace))).scalars().all()
+    total = len(traces)
+    done = sum(1 for t in traces if t.status == "done")
+
+    return {
+        "feedback_count": len(ratings),
+        "avg_rating": avg,
+        "rating_distribution": dist,
+        "model_usage": model_usage,
+        "reviewer_pass_rate": round(passed / max(len(rev_events), 1), 3),
+        "reviewer_total": len(rev_events),
+        "generation_total": total,
+        "generation_success_rate": round(done / max(total, 1), 3),
+    }
 
 
 # 保留角色常量导出(供其他模块引用,避免散落字符串)

@@ -33,7 +33,17 @@ from .config import settings
 from .db import get_db
 from .metrics import consume_daily_quota, record_model_usage
 from .models import Conversation, Message, Project, User
-from .security import ACCESS_COOKIE, CurrentUser, decode_token
+from .schemas import FeedbackReq
+from .security import ACCESS_COOKIE, CurrentUser, decode_token, get_current_user
+from .tracing import append_trace_event, create_trace, finish_trace, log_usage
+
+
+# 模型 id -> 供应商(用于用量账本成本归集;与 providers.py 的适配器命名保持一致)
+_PROVIDER_BY_MODEL = {
+    "hy3": "tokenhub",
+    "qwen": "aliyun",
+    "deepseek": "deepseek",
+}
 
 
 router = APIRouter(prefix="/api", tags=["generate"])
@@ -195,6 +205,9 @@ async def chat(
     # 已登录用户按真实 user_id 计量
     await record_model_usage(user.id, model)
 
+    # 新建 Trace(③-a:对话追踪 / 回放 / 质量统计)
+    await create_trace(db, user.id, conversation_id, tid, model)
+
     payload = {"model_id": model, "messages": messages, "trace_id": tid}
     # 续传:把 after 作为查询参数转发给 AI /generate(断点续接同一进度流)
     gen_url = f"{settings.ai_service_url}/generate"
@@ -208,6 +221,8 @@ async def chat(
         timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
         assistant_parts: list[str] = []
         preview_url: str | None = None  # 捕获预览直链(供分享「复制预览链接」使用)
+        event_seq: int = 0  # 结构化事件序号(供回放重建时间线)
+        terminal_status: str = "done"  # 终态:done|error|aborted
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 try:
@@ -221,6 +236,7 @@ async def chat(
                             # 浏览器 EventSource 才能识别并提示明确文案。
                             err_text = await resp.aread()
                             code, message = _map_upstream_error(resp.status_code, err_text)
+                            terminal_status = "error"
                             yield _error_frame(code, message)
                             return
                         event = None
@@ -231,14 +247,31 @@ async def chat(
                                     data = "\n".join(data_parts)
                                     if event == "token":
                                         assistant_parts.append(data)
-                                    elif event == "node":
-                                        # 捕获预览直链(供分享「复制预览链接」使用)
+                                    elif event in ("node", "think", "plan", "error", "aborted", "degraded"):
+                                        # 结构化事件落库(③-a:回放 / 质量统计)
                                         try:
-                                            nd = json.loads(data)
-                                            if nd.get("stage") == "preview" and nd.get("url"):
-                                                preview_url = nd["url"]
+                                            payload_obj = json.loads(data) if data else None
                                         except Exception:
-                                            pass
+                                            payload_obj = None
+                                        stage = None
+                                        if isinstance(payload_obj, dict) and event in ("node", "think"):
+                                            stage = payload_obj.get("stage")
+                                        # 捕获预览直链(⑤-b:复制预览链接)
+                                        if (
+                                            event == "node"
+                                            and isinstance(payload_obj, dict)
+                                            and payload_obj.get("stage") == "preview"
+                                            and payload_obj.get("url")
+                                        ):
+                                            preview_url = payload_obj["url"]
+                                        event_seq += 1
+                                        await append_trace_event(
+                                            db, tid, event_seq, event, stage=stage, payload=payload_obj
+                                        )
+                                        if event == "aborted":
+                                            terminal_status = "aborted"
+                                        elif event == "error":
+                                            terminal_status = "error"
                                     # 重建标准 SSE 帧透传(兼容前端 EventSource)
                                     frame = ""
                                     if event:
@@ -257,11 +290,24 @@ async def chat(
                     # /generate 入队失败而 5xx 等):下发 SSE error 帧,
                     # 避免连接裸断让前端只能笼统报“连接中断”。
                     logger.warning("upstream request failed: %s", e)
+                    terminal_status = "error"
                     yield _error_frame("UPSTREAM_ERROR", "AI 服务暂时不可用，请稍后重试")
                     return
         finally:
             # 流结束(正常/中断)均尝试落库;失败仅记录,不阻塞已返回的流
             try:
+                # 结束 Trace + 写用量账本(③-a)
+                approx_tokens = max(0, len("".join(assistant_parts)) // 4)
+                await finish_trace(db, tid, terminal_status, approx_tokens)
+                await log_usage(
+                    db,
+                    user.id,
+                    tid,
+                    _PROVIDER_BY_MODEL.get(model),
+                    model,
+                    completion_tokens=approx_tokens,
+                )
+                # 落库对话(含预览直链回填)
                 await _persist_conversation(
                     db,
                     user,
@@ -365,6 +411,26 @@ async def _persist_conversation(
         conv.title = user_text[:20]
     conv.updated_at = datetime.utcnow()
     await db.commit()
+
+
+@router.post("/feedback")
+async def post_feedback(
+    req: FeedbackReq,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """提交一次生成评价(③-a:1-10 分 + 评论);用于统计与回归数据集。
+
+    同 trace_id 重复提交会覆盖原评分。
+    """
+    from .tracing import save_feedback
+
+    fb = await save_feedback(
+        db, user.id, req.trace_id, req.conversation_id, req.rating, req.comment
+    )
+    if fb is None:
+        raise HTTPException(status_code=500, detail="save feedback failed")
+    return {"ok": True, "rating": fb.rating}
 
 
 @router.post("/cancel")

@@ -124,3 +124,13 @@ class SetPlanReq(BaseModel):
     """变更用户套餐(预留收费接入)。"""
 
     plan: str = Field(min_length=1, max_length=16)
+
+
+# ---------- 对话反馈(③-a:1-10 评分 + 评论) ----------
+class FeedbackReq(BaseModel):
+    """提交一次生成的评价;trace_id 关联 Trace/Message,供统计与回归数据集。"""
+
+    trace_id: str = Field(min_length=1, max_length=64)
+    conversation_id: int | None = None
+    rating: int = Field(ge=1, le=10)  # 1-10 分
+    comment: str | None = None

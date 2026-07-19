@@ -77,3 +77,68 @@ class Message(Base):
     # assistant 消息按 trace_id upsert,避免刷新/重连导致重复行(§15.3 / 重连机制)。
     trace_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+# ---------- 对话追踪 / 反馈 / 用量(③-a · 文档 §3.13) ----------
+class Trace(Base):
+    """一次 SSE 生成会话 = 一个 Trace(可回放 / 质量统计)。"""
+
+    __tablename__ = "traces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    conversation_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    model_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="running")  # running|done|error|aborted
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class TraceEvent(Base):
+    """Trace 的结构化事件序列(按 seq 追加),用于前端回放与质量指标。
+
+    token 事件量大,不逐条落库,仅记录聚合 token 数(见 Trace.total_tokens);
+    其余结构化事件(node/think/plan/error/done/aborted/degraded)逐条落库。
+    """
+
+    __tablename__ = "trace_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    event_type: Mapped[str] = mapped_column(String(16))  # node|think|plan|token|error|done|aborted|degraded
+    stage: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON 字符串
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Feedback(Base):
+    """用户对一次生成的评价(1—10 分 + 评论);统计 + 回归数据集(文档 §3.11/#36)。"""
+
+    __tablename__ = "feedbacks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    conversation_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    rating: Mapped[int] = mapped_column(Integer)  # 1-10
+    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class UsageLog(Base):
+    """每次生成的用量账本(成本归集 / 运营统计,文档 §3.12 / D1)。"""
+
+    __tablename__ = "usage_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    provider: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost: Mapped[float] = mapped_column(default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
