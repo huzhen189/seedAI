@@ -15,6 +15,8 @@ import inspect
 import logging
 import os
 from collections.abc import AsyncGenerator
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from contextlib import suppress
 from pathlib import Path
 from typing import Dict, Optional
@@ -176,13 +178,21 @@ async def generate_stream(
     trace_id: Optional[str] = None,
     is_cancelled=None,
 ) -> AsyncGenerator[Dict, None]:
-    # ②-a RAG 增强:取首条用户需求,检索 components + memory 注入 Planner 上下文
+    # ②-a RAG 增强:带超时保护,Chroma 不可达时 5s 后跳过,不阻塞生成
     first_user_msg = ""
     for m in messages:
         if m.get("role") == "user":
             first_user_msg = m.get("content", "") or ""
             break
-    rag_ctx = build_rag_context(first_user_msg)
+    rag_ctx = ""
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future: Future[str] = pool.submit(build_rag_context, first_user_msg)
+            rag_ctx = future.result(timeout=5.0)
+    except FutureTimeout:
+        GEN_LOG.warning("[gen] RAG 检索超时(>5s), 跳过增强 trace=%s", trace_id)
+    except Exception as e:
+        GEN_LOG.warning("[gen] RAG 检索失败, 跳过增强 trace=%s: %s", trace_id, e)
 
     try:
         # 1) Planner
