@@ -51,6 +51,36 @@ const degraded = ref(false)
 const generatedHtml = ref('')
 const previewUrl = ref<string | null>(null)
 const errorMsg = ref('')
+
+// 生成产物文件列表(供右侧文件面板)
+const generatedFiles = computed(() => {
+  const files: { name: string; size: number; url?: string }[] = []
+  if (generatedHtml.value) {
+    files.push({
+      name: 'index.html',
+      size: new Blob([generatedHtml.value]).size,
+      url: previewUrl.value || undefined,
+    })
+  }
+  return files
+})
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / 1048576).toFixed(1) + ' MB'
+}
+
+function downloadHtml() {
+  if (!generatedHtml.value) return
+  const blob = new Blob([generatedHtml.value], { type: 'text/html' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'index.html'
+  a.click()
+  URL.revokeObjectURL(url)
+}
 const traceId = ref('')
 const esRef = ref<EventSource | null>(null)
 const rating = ref(0)
@@ -547,6 +577,17 @@ watch(pendingRetry, (r) => {
     </div>
 
     <div class="right-pane">
+      <!-- 生成产物文件面板 -->
+      <div v-if="generatedFiles.length || generating" class="artifact-panel">
+        <div class="artifact-head">📁 生成产物</div>
+        <div v-if="generating" class="artifact-empty">AI 正在生成…</div>
+        <div v-for="f in generatedFiles" :key="f.name" class="artifact-file">
+          <span class="af-name">📄 {{ f.name }}</span>
+          <span class="af-size">{{ formatFileSize(f.size) }}</span>
+          <a v-if="f.url" :href="f.url" target="_blank" class="af-open" title="线上预览">🔗</a>
+          <button v-if="!f.url && generatedHtml" class="af-dl" title="下载" @click="downloadHtml">⬇</button>
+        </div>
+      </div>
       <PreviewPane :html="generatedHtml" :url="previewUrl" :loading="generating" />
     </div>
 
@@ -573,6 +614,39 @@ watch(pendingRetry, (r) => {
   flex-direction: column;
   min-height: 0;
 }
+.artifact-panel {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  min-height: 0;
+  overflow-y: auto;
+  max-height: 30%;
+}
+.artifact-head {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.artifact-empty {
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+.artifact-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+.af-name { color: #334155; }
+.af-size { color: var(--muted); font-size: 11px; margin-left: auto; }
+.af-open { text-decoration: none; font-size: 13px; }
+.af-dl { border: none; background: none; cursor: pointer; font-size: 13px; padding: 0 2px; }
 .conv-bar {
   display: flex;
   align-items: center;
