@@ -12,7 +12,7 @@
 //   6. 取消:stop() 级联 cancelChat -> 业务 -> AI 中断生成(C1);
 //   7. 评价:生成完成后可对本次 trace 投 👍/👎。
 // 左栏是对话区 + 思考轨迹,右栏是实时预览(PreviewPane)。
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch, nextTick } from 'vue'
 import ThoughtTrail from '../components/ThoughtTrail.vue'
 import PreviewPane from '../components/PreviewPane.vue'
 import ChatInput from '../components/ChatInput.vue'
@@ -59,6 +59,34 @@ const currentIntent = ref<{ level1: string; level2: string }>({ level1: '', leve
 const isGenerateIntent = computed(() =>
   currentIntent.value.level1 === 'build',
 )
+
+// ---- 上翻加载更早会话 ----
+const convRef = ref<HTMLElement | null>(null)
+const sentinel = ref<HTMLElement | null>(null)
+let scrollObserver: IntersectionObserver | null = null
+
+function setupScrollLoading() {
+  if (!sentinel.value) return
+  scrollObserver = new IntersectionObserver(
+    async (entries) => {
+      if (entries[0].isIntersecting && !convStore.loadingMore) {
+        const scroller = convRef.value
+        const prevHeight = scroller?.scrollHeight || 0
+        const hasMore = await convStore.loadMoreHistory()
+        if (hasMore && scroller) {
+          await nextTick()
+          scroller.scrollTop = scroller.scrollHeight - prevHeight
+        }
+      }
+    },
+    { threshold: 0.1 },
+  )
+  scrollObserver.observe(sentinel.value)
+}
+function teardownScrollLoading() {
+  scrollObserver?.disconnect()
+  scrollObserver = null
+}
 
 async function downloadArtifactZip(artifact: Artifact) {
   if (!artifact.files) return
@@ -288,11 +316,6 @@ async function loadCurrentProject() {
   const pid = projectStore.currentProjectId
   if (pid == null) return
   await convStore.loadConversations(pid)
-  if (convStore.conversations.length) {
-    await convStore.loadMessages(convStore.conversations[0].id)
-  } else {
-    convStore.messages = []
-  }
 }
 
 async function newConversation() {
@@ -301,19 +324,9 @@ async function newConversation() {
     alert('请先在左侧新建项目')
     return
   }
-  await convStore.create(pid)
+  convStore.create(pid)
   generatedHtml.value = ''
   previewUrl.value = null
-}
-
-async function onConvChange(e: Event) {
-  const id = Number((e.target as HTMLSelectElement).value)
-  if (id) {
-    await convStore.loadMessages(id)
-    generatedHtml.value = ''
-    previewUrl.value = null
-    await maybeResume()
-  }
 }
 
 async function send() {
@@ -401,7 +414,7 @@ async function maybeResume() {
   const ag = getActiveGen()
   if (!ag || generating.value) return
   if (convStore.currentConvId !== ag.convId) {
-    await convStore.loadMessages(ag.convId)
+    await convStore.loadMessagesInto(ag.convId, 'replace')
   }
   resume(ag.convId, ag.traceId)
 }
@@ -459,18 +472,19 @@ onMounted(async () => {
     await projectStore.load()
     await loadCurrentProject()
     await loadArtifacts()
+    await nextTick(() => setupScrollLoading())
     await maybeResume()
   }
 })
+onUnmounted(() => { teardownScrollLoading() })
 
 watch(
   () => projectStore.currentProjectId,
   async (id) => {
     if (id != null) {
       await convStore.loadConversations(id)
-      if (convStore.conversations.length) await convStore.loadMessages(convStore.conversations[0].id)
-      else convStore.messages = []
       await loadArtifacts()
+      await nextTick(() => setupScrollLoading())
       await maybeResume()
     }
   },
@@ -480,7 +494,7 @@ watch(
   () => convStore.pendingConvId,
   async (id) => {
     if (id != null) {
-      await convStore.loadMessages(id)
+      await convStore.loadMessagesInto(id, 'replace')
       convStore.pendingConvId = null
       await maybeResume()
     }
@@ -535,16 +549,15 @@ watch(pendingRetry, (r) => {
     <div class="left-col" :class="{ full: !isGenerateIntent }">
       <div class="conv-bar">
         <span class="proj">📁 {{ currentProjectName }}</span>
-        <select :value="convStore.currentConvId ?? ''" @change="onConvChange">
-          <option value="" disabled>选择会话</option>
-          <option v-for="c in convStore.conversations" :key="c.id" :value="c.id">
-            {{ c.title || '会话' }}
-          </option>
-        </select>
-        <button class="newconv" @click="newConversation">＋ 新建会话</button>
+        <span v-if="convStore.currentConvId" class="conv-title">
+          {{ convStore.conversations[0]?.title || '新对话' }}
+        </span>
+        <button class="newconv" @click="newConversation">＋</button>
       </div>
 
-      <div class="conv">
+      <div ref="convRef" class="conv">
+        <div v-if="convStore.loadingMore" class="loading-more">加载更早的会话…</div>
+        <div ref="sentinel" class="sentinel"></div>
         <div v-if="messages.length === 0" class="empty">
           在下方描述你想生成的网站，AI 会先规划需求，再流式产出并实时预览。
         </div>
@@ -709,6 +722,14 @@ watch(pendingRetry, (r) => {
   padding: 4px 8px;
   font-size: 13px;
 }
+.conv-title {
+  font-size: 13px;
+  color: var(--muted);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .newconv {
   margin-left: auto;
   border: 1px solid var(--brand);
@@ -729,6 +750,8 @@ watch(pendingRetry, (r) => {
   flex-direction: column;
   gap: 10px;
 }
+.sentinel { height: 1px; }
+.loading-more { text-align: center; color: var(--muted); font-size: 12px; padding: 8px; }
 .empty {
   color: var(--muted);
   font-size: 13px;
