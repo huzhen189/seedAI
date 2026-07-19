@@ -18,6 +18,7 @@ import PreviewPane from '../components/PreviewPane.vue'
 import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
 import { useRouter } from 'vue-router'
+import JSZip from 'jszip'
 import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
 import { listArtifacts } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
@@ -53,19 +54,29 @@ const generatedHtml = ref('')
 const previewUrl = ref<string | null>(null)
 const errorMsg = ref('')
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return bytes + ' B'
-  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB'
-  return (bytes / 1048576).toFixed(1) + ' MB'
-}
-
-function downloadHtml() {
-  if (!generatedHtml.value) return
-  const blob = new Blob([generatedHtml.value], { type: 'text/html' })
+async function downloadArtifactZip(artifact: Artifact) {
+  if (!artifact.files) return
+  const zip = new JSZip()
+  const entries = Object.entries(artifact.files)
+  for (const [, f] of entries) {
+    if (f.url) {
+      try {
+        const r = await fetch(f.url)
+        if (r.ok) {
+          const blob = await r.blob()
+          zip.file(f.name, blob)
+        }
+      } catch {
+        // 下载失败跳过该文件
+      }
+    }
+  }
+  if (Object.keys(zip.files).length === 0) return
+  const blob = await zip.generateAsync({ type: 'blob' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = 'index.html'
+  a.download = (artifact.title || 'site') + '.zip'
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -587,19 +598,18 @@ watch(pendingRetry, (r) => {
         <div class="artifact-head">📁 生成产物</div>
         <div v-if="generating && !projectArtifacts.length" class="artifact-empty">AI 正在生成…</div>
         <template v-for="a in projectArtifacts" :key="a.id">
-          <template v-if="a.files">
-            <div v-for="(f, _k) in a.files" :key="_k" class="artifact-file">
-              <span class="af-name">📄 {{ f.name }}</span>
-              <span class="af-size">{{ formatFileSize(f.size) }}</span>
-              <a v-if="f.url" :href="f.url" target="_blank" class="af-open" title="线上预览">🔗</a>
-              <button
-                v-else-if="generatedHtml && a.trace_id === traceId"
-                class="af-dl"
-                title="下载"
-                @click="downloadHtml"
-              >⬇</button>
-            </div>
-          </template>
+          <div class="artifact-file">
+            <span class="af-name">📄 {{ a.title || '生成产物' }}</span>
+            <span v-if="a.created_at" class="af-time">{{ a.created_at.slice(0, 16) }}</span>
+            <a
+              v-if="a.files && Object.values(a.files).some((f: any) => f.url)"
+              :href="(Object.values(a.files).find((f: any) => f.url) as any)?.url"
+              target="_blank"
+              class="af-open"
+              title="线上预览"
+            >🔗</a>
+            <button class="af-dl" title="下载 ZIP" @click="downloadArtifactZip(a)">⬇ ZIP</button>
+          </div>
         </template>
         <div v-if="!generating && !projectArtifacts.length" class="artifact-empty">暂无生成产物</div>
       </div>
@@ -658,10 +668,11 @@ watch(pendingRetry, (r) => {
   border-radius: 6px;
   background: #f8fafc;
 }
-.af-name { color: #334155; }
+.af-name { color: #334155; flex: 1; }
+.af-time { color: var(--muted); font-size: 11px; }
 .af-size { color: var(--muted); font-size: 11px; margin-left: auto; }
 .af-open { text-decoration: none; font-size: 13px; }
-.af-dl { border: none; background: none; cursor: pointer; font-size: 13px; padding: 0 2px; }
+.af-dl { border: 1px solid var(--brand2); background: transparent; color: var(--brand); border-radius: 6px; cursor: pointer; font-size: 11px; padding: 2px 8px; font-weight: 600; }
 .conv-bar {
   display: flex;
   align-items: center;

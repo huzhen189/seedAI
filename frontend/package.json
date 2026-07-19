@@ -16,6 +16,7 @@
   "dependencies": {
     "dompurify": "^3.4.12",
     "highlight.js": "^11.11.1",
+    "jszip": "^3.10.1",
     "marked": "^18.0.6",
     "pinia": "^4.0.2",
     "vue": "^3.4.21",

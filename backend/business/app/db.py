@@ -119,9 +119,11 @@ async def init_db():
     # 首次启动(或任何时候)把 SEED_SUPER_ADMIN 指定的用户名角色置为 super_admin,
     # 解决"角色自举"问题 —— 普通注册只能得到 user,初始超管只能由该环境变量赋予。
     await _seed_super_admin()
+    # 第四步:默认超管用户自动创建(清库重建表后无需手动注册)。
+    await _seed_default_user()
 
 
-async def _seed_super_admin() -> None:
+async def _seed_default_user() -> None:
     """把 settings.seed_super_admin 指定的用户提升为 super_admin(若不存在则跳过)。"""
     username = (settings.seed_super_admin or "").strip()
     if not username:
@@ -147,6 +149,35 @@ async def _seed_super_admin() -> None:
                 logger.debug("用户 '%s' 已是 super_admin,无需变更", username)
     except Exception as e:  # 种子失败不应阻断启动
         logger.warning("super_admin 种子注入失败(已跳过): %s", e)
+
+
+async def _seed_default_user() -> None:
+    """自动创建默认超管用户(账号:huzhen, 每次 init_db 若不存在则创建)。"""
+    from .models import User
+    from .security import hash_password
+
+    username = "huzhen"
+    try:
+        async with SessionLocal() as session:
+            existing = (
+                await session.execute(select(User).where(User.username == username))
+            ).scalar_one_or_none()
+            if existing is not None:
+                logger.debug("默认用户 '%s' 已存在,跳过", username)
+                return
+            user = User(
+                username=username,
+                nickname="小胡",
+                email="785297147@qq.com",
+                password_hash=hash_password("huzhen189"),
+                role="super_admin",
+                plan="enterprise",
+            )
+            session.add(user)
+            await session.commit()
+            logger.info("已创建默认超管用户: %s (super_admin)", username)
+    except Exception as e:
+        logger.warning("默认用户创建失败(已跳过): %s", e)
 
 
 async def get_db():
