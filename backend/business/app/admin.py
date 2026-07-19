@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_db
-from .db import reset_db as do_reset_db
+from .db import reset_db as do_reset_db, schedule_biz_restart
 from .metrics import snapshot
 from .models import Feedback, Trace, TraceEvent, UsageLog, User
 from .orchestrator import run_scale, run_start, run_stop
@@ -163,6 +163,8 @@ async def reset_system(confirm: str = Query(""), _=Depends(require_super_admin))
         raise HTTPException(400, detail="请在 query 中传 confirm=yes 以确认")
     try:
         result = await do_reset_db()
+        # 数据已清理, 调度业务服务自动重启(7102 由用户手动重启)
+        schedule_biz_restart()
         return result
     except Exception as e:
         logger.exception("reset_db 失败")

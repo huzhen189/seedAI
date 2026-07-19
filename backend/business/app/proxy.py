@@ -29,7 +29,8 @@ from fastapi.security import HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .analytics import record_intent_result, record_skill_outcome
+from .analytics import record_error, record_intent_result, record_model_detail, record_skill_outcome, record_user_active
+from .config import settings
 from .db import get_db
 from .metrics import consume_daily_quota, record_model_usage, record_unsupported
 from .models import Artifact, Conversation, Message, Project, User
@@ -233,6 +234,7 @@ async def chat(
     allowed, remaining = await consume_daily_quota(user.id, plan)
     if not allowed:
         logger.warning("[chat] 配额用尽 user=%s plan=%s", user.id, plan)
+        await record_error("rate_limited")
         return _sse_error_frame(
             "RATE_LIMITED",
             f"今日生成次数已用尽（{settings.free_daily_quota} 次/天），请明日再来或升级套餐",
@@ -256,7 +258,8 @@ async def chat(
         assistant_parts: list[str] = []
         preview_url: str | None = None  # 捕获预览直链(供分享「复制预览链接」使用)
         event_seq: int = 0  # 结构化事件序号(供回放重建时间线)
-        terminal_status: str = "done"  # 终态:done|error|aborted
+        terminal_status: str = "done"
+        captured_level1: str = "unknown"  # 从 intent 事件捕获, 供统计
         event_counts: dict[str, int] = {}  # 各类 SSE 事件计数(供日志)
         logger.info("[chat] 开始连接 AI 服务 %s", gen_url)
         try:
@@ -314,6 +317,7 @@ async def chat(
                                             # 两级意图记录(供管理后台系统分析)
                                             l1 = payload_obj.get("level1") or payload_obj.get("intent") or "unknown"
                                             l2 = payload_obj.get("level2") or "unknown"
+                                            captured_level1 = l1
                                             await record_intent_result(l1, l2, True)
                                             logger.info(
                                                 "[chat] 意图 %s/%s label=%s industry=%s confidence=%s",
@@ -340,6 +344,7 @@ async def chat(
                 except httpx.HTTPError as e:
                     logger.warning("[chat] AI 连接异常: %s", e)
                     terminal_status = "error"
+                    await record_error("upstream_error")
                     yield _error_frame("UPSTREAM_ERROR", "AI 服务暂时不可用，请稍后重试")
                     return
         finally:
@@ -403,6 +408,9 @@ async def chat(
                 status = "ok" if terminal_status == "done" else ("abort" if terminal_status == "aborted" else "fail")
                 elapsed_ms = sum(event_counts.values()) * 50  # 粗略估算
                 await record_skill_outcome(skill, status, float(elapsed_ms))
+                await record_model_detail(model, terminal_status == "done", captured_level1)
+                if user.id:
+                    await record_user_active(user.id)
             except Exception as e:
                 logger.warning("[chat] 落库失败 trace=%s: %s", tid, e)
 
