@@ -40,7 +40,7 @@ SYS_REQUIREMENT = (
 @register_skill(
     name="requirement_agent",
     intent_tags=["需求", "建站", "规划"],
-    handler="requirement_agent_handler",
+    handler=requirement_agent_handler,
     is_graph=False,
     description="需求分析: 深度对话收集需求, 出文档或方案选项",
 )

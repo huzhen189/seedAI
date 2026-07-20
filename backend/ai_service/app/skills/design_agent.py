@@ -21,7 +21,7 @@ SYS_DESIGN = (
 @register_skill(
     name="design_agent",
     intent_tags=["设计", "配色", "布局", "字体", "动效", "颜色", "样式", "主题", "排版"],
-    handler="design_agent_handler",
+    handler=design_agent_handler,
     is_graph=False,
     description="设计顾问: 配色/布局/字体/动效建议",
 )

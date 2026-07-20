@@ -43,7 +43,7 @@ def _extract_html(text: str) -> str:
 @register_skill(
     name="builder_agent",
     intent_tags=["建站", "生成", "网站", "网页", "页面", "做", "开发"],
-    handler="builder_agent_handler",
+    handler=builder_agent_handler,
     is_graph=False,
     description="代码生成: 基于需求文档生成/修改HTML",
 )
