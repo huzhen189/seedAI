@@ -22,7 +22,7 @@ import { listArtifacts, renameProject, patch } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { Artifact, Message, ModelInfo, PlanEvent, RetryEvent, ThoughtStep } from '../types'
+import type { Artifact, Message, ModelInfo, OptionEvent, PlanEvent, RetryEvent, ThoughtStep } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
   enter_router: '意图路由 — 识别你的需求类型，匹配最合适的处理流程',
@@ -124,6 +124,40 @@ const currentIntent = ref<{ level1: string; level2: string }>({ level1: '', leve
 const rightCollapsed = ref(false)
 // 方案确认: Planner 产出后暂停等待用户确认
 const confirmPlan = ref<{ title: string; goal: string; steps: string[] } | null>(null)
+
+// 方案选择(options 事件): 前端弹出单选框, 选中后记录, 下次 send 时一起发送
+const showOptionsModal = ref(false)
+const optionsData = ref<OptionEvent | null>(null)
+const selectedOption = ref('')  // radio 单选绑定
+const pendingOptionsText = ref('')  // 已确认但未发送的选项文本
+
+function onOptionsConfirm() {
+  if (!optionsData.value || !selectedOption.value) return
+  const choices = optionsData.value.choices || []
+  const selected = choices.find(c => c.id === selectedOption.value)
+  if (!selected) return
+  pendingOptionsText.value = `方案确认: 选择了 ${selected.id}: ${selected.title}`
+  showOptionsModal.value = false
+  upsertStep('option_selected', 'done', `已选择: ${selected.id}. ${selected.title}`)
+  // 用户没在打字 → 自动发送选项
+  if (!input.value.trim()) {
+    sendOptionsNow()
+  }
+}
+
+async function sendOptionsNow() {
+  if (!pendingOptionsText.value) return
+  const text = pendingOptionsText.value
+  pendingOptionsText.value = ''
+  input.value = text
+  await send()
+}
+
+function cancelOptions() {
+  showOptionsModal.value = false
+  selectedOption.value = ''
+  optionsData.value = null
+}
 
 function doConfirmPlan() {
   if (!confirmPlan.value) return
@@ -463,6 +497,11 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       const lbl = d.level2_label ? `${d.level1_label || ''} → ${d.level2_label}` : (d.label || '')
       if (lbl) upsertStep('intent_recognized', 'done', lbl)
     },
+    onOptions: (d: OptionEvent) => {
+      optionsData.value = d
+      selectedOption.value = ''
+      showOptionsModal.value = true
+    },
     onUnsupported: () => {
       generating.value = false
       finished.value = true
@@ -495,7 +534,12 @@ async function loadCurrentProject() {
 }
 
 async function send() {
-  const text = input.value.trim()
+  let text = input.value.trim()
+  // 如果有待发送的选项, 拼接到消息前面
+  if (pendingOptionsText.value) {
+    text = pendingOptionsText.value + '\n' + text
+    pendingOptionsText.value = ''
+  }
   if (!text) return
   // 生成中: 加入队列
   if (generating.value) { enqueue(text); return }
@@ -858,6 +902,37 @@ watch(pendingRetry, (r) => {
             <button class="cp-btn cp-cancel" @click="cancelConfirmPlan">取消</button>
           </div>
         </div>
+        <!-- 方案选择弹窗(单选, 确认后记录, 下次 send 一起发送) -->
+        <div v-if="showOptionsModal && optionsData" class="options-modal-backdrop" @click.self="cancelOptions">
+          <div class="options-modal">
+            <div class="om-title">{{ optionsData.question || '请选择方案' }}</div>
+            <div class="om-choices">
+              <label
+                v-for="c in optionsData.choices"
+                :key="c.id"
+                class="om-choice"
+                :class="{ on: selectedOption === c.id }"
+              >
+                <input
+                  type="radio"
+                  :value="c.id"
+                  v-model="selectedOption"
+                  class="om-radio"
+                />
+                <div class="om-info">
+                  <div class="om-name">{{ c.id }}. {{ c.title }}</div>
+                  <div class="om-desc" v-if="c.desc">{{ c.desc }}</div>
+                  <div class="om-pros" v-if="c.pros">✅ {{ c.pros }}</div>
+                  <div class="om-cons" v-if="c.cons">⚠️ {{ c.cons }}</div>
+                </div>
+              </label>
+            </div>
+            <div class="om-actions">
+              <button class="om-btn om-confirm" @click="onOptionsConfirm" :disabled="!selectedOption">确认选择</button>
+              <button class="om-btn om-cancel" @click="cancelOptions">取消</button>
+            </div>
+          </div>
+        </div>
         <div v-if="finished && !errorMsg" class="feedback">
           <span class="rate-label">评分 (1-10):</span>
           <template v-for="n in 10" :key="n">
@@ -1075,6 +1150,41 @@ watch(pendingRetry, (r) => {
 .cp-confirm:hover { background: #0369a1; }
 .cp-cancel { background: #f1f5f9; color: #64748b; }
 .cp-cancel:hover { background: #e2e8f0; }
+
+/* ── 方案选择弹窗 ── */
+.options-modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200;
+}
+.options-modal {
+  background: var(--bg); border-radius: 12px;
+  padding: 24px; max-width: 440px; width: 90vw;
+  box-shadow: 0 8px 32px rgba(0,0,0,.18);
+}
+.om-title { font-size: 16px; font-weight: 700; margin-bottom: 16px; color: var(--text); }
+.om-choices { display: flex; flex-direction: column; gap: 10px; }
+.om-choice {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 12px; border-radius: 8px; border: 1px solid var(--border);
+  cursor: pointer; transition: border-color .2s, background .2s;
+}
+.om-choice.on { border-color: #3b82f6; background: #eff6ff; }
+.om-choice:hover { border-color: #93c5fd; }
+.om-radio { margin-top: 3px; accent-color: #3b82f6; }
+.om-info { flex: 1; min-width: 0; }
+.om-name { font-weight: 600; font-size: 14px; color: var(--text); }
+.om-desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.om-pros { font-size: 12px; color: #16a34a; margin-top: 4px; }
+.om-cons { font-size: 12px; color: #dc2626; margin-top: 2px; }
+.om-actions { display: flex; gap: 8px; margin-top: 18px; justify-content: flex-end; }
+.om-btn { border: none; border-radius: 6px; padding: 8px 18px; cursor: pointer; font-size: 13px; font-weight: 600; }
+.om-confirm { background: #3b82f6; color: #fff; }
+.om-confirm:disabled { opacity: .5; cursor: not-allowed; }
+.om-confirm:not(:disabled):hover { background: #2563eb; }
+.om-cancel { background: #f1f5f9; color: #64748b; }
+.om-cancel:hover { background: #e2e8f0; }
+
 .feedback {
   display: flex;
   align-items: center;

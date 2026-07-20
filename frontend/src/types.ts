@@ -140,6 +140,12 @@ export interface TrailContent {
   events: { event: string; data: Record<string, any> }[]
 }
 
+/** 多方案选择(options 事件,前端弹出单选框) */
+export interface OptionEvent {
+  question?: string
+  choices?: { id: string; title: string; desc?: string; pros?: string; cons?: string }[]
+}
+
 export interface Conversation {
   id: number
   project_id: number
