@@ -911,7 +911,7 @@ watch(pendingRetry, (r) => {
       </div>
     </div>
 
-    <div v-if="isGenerateIntent" class="right-pane">
+    <div class="right-pane">
       <RightPanel
         :artifacts="projectArtifacts"
         :generating="generating"
