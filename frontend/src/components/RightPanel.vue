@@ -146,12 +146,11 @@ const mode = computed(() => {
 
     <!-- 右侧预览区 -->
     <div class="preview-area">
-      <!-- HTML 预览: COS 直链 > srcdoc 本地渲染 -->
+      <!-- HTML 预览 -->
       <iframe
-        v-if="mode === 'html' && currentFile"
+        v-if="(mode === 'html' && currentFile) || generatedHtml"
         class="pv-frame"
-        :src="currentFile.url || undefined"
-        :srcdoc="currentFile.url ? undefined : (currentFile.content || generatedHtml)"
+        :srcdoc="(currentFile?.url ? undefined : (currentFile?.content || (currentFile?.artifact?.files?.[currentFile?.name || ''] as any)?.content)) || generatedHtml"
         sandbox="allow-scripts allow-same-origin allow-forms"
         title="preview"
       ></iframe>
