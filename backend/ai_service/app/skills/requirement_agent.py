@@ -37,13 +37,7 @@ SYS_REQUIREMENT = (
 )
 
 
-@register_skill(
-    name="requirement_agent",
-    intent_tags=["需求", "建站", "规划"],
-    handler=requirement_agent_handler,
-    is_graph=False,
-    description="需求分析: 深度对话收集需求, 出文档或方案选项",
-)
+
 async def requirement_agent_handler(
     model_id: str, messages: list, trace_id: str | None = None,
     is_cancelled=None, project_status: str = "draft", **kwargs,
@@ -112,3 +106,12 @@ async def requirement_agent_handler(
     # 信息不全 → 追问
     AGENT_LOG.info("[req] 信息不全, 继续追问")
     yield ev("token", data=raw, agent_id="requirement_agent")
+
+register_skill(
+    name="requirement_agent",
+    intent_tags=["需求", "建站", "规划"],
+    handler=requirement_agent_handler,
+    is_graph=False,
+    description="需求分析: 深度对话收集需求, 出文档或方案选项",
+)
+register_skill(name="requirement_agent",intent_tags=["需求","建站","规划"],handler=requirement_agent_handler,is_graph=False,description="需求分析: 深度对话收集需求, 出文档或方案选项")

@@ -40,13 +40,7 @@ def _extract_html(text: str) -> str:
     return text
 
 
-@register_skill(
-    name="builder_agent",
-    intent_tags=["建站", "生成", "网站", "网页", "页面", "做", "开发"],
-    handler=builder_agent_handler,
-    is_graph=False,
-    description="代码生成: 基于需求文档生成/修改HTML",
-)
+
 async def builder_agent_handler(
     model_id: str, messages: list, trace_id: str | None = None,
     is_cancelled=None, requirement_doc: dict | None = None, **kwargs,
@@ -107,3 +101,12 @@ async def builder_agent_handler(
     AGENT_LOG.info("[builder] 预览 url=%s", url)
     yield ev("node", stage="preview", url=url, fallback="srcdoc" if not url else None, agent_id="builder_agent")
     yield ev("node", stage="done", agent_id="builder_agent")
+
+
+register_skill(
+    name="builder_agent",
+    intent_tags=["建站", "生成", "网站", "网页", "页面", "做", "开发"],
+    handler=builder_agent_handler,
+    is_graph=False,
+    description="代码生成: 基于需求文档生成/修改HTML",
+)

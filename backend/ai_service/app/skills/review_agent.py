@@ -19,13 +19,7 @@ SYS_REVIEW = (
 )
 
 
-@register_skill(
-    name="review_agent",
-    intent_tags=["优化", "评审", "review", "建议", "检查", "看看", "帮忙看", "能不能更好"],
-    handler=review_agent_handler,
-    is_graph=False,
-    description="代码评审: 性能/SEO/可访问性/代码质量",
-)
+
 async def review_agent_handler(
     model_id: str, messages: list, trace_id: str | None = None,
     is_cancelled=None, **kwargs,
@@ -38,3 +32,12 @@ async def review_agent_handler(
             full.append(text)
             yield {"type": "token", "data": text}
     AGENT_LOG.info("[review] 完成 chars=%d", len("".join(full)))
+
+register_skill(
+    name="review_agent",
+    intent_tags=["优化", "评审", "review", "建议", "检查", "看看", "帮忙看", "能不能更好"],
+    handler=review_agent_handler,
+    is_graph=False,
+    description="代码评审: 性能/SEO/可访问性/代码质量",
+)
+register_skill(name="review_agent",intent_tags=["优化","评审","review","建议","检查","看看","帮忙看","能不能更好"],handler=review_agent_handler,is_graph=False,description="代码评审: 性能/SEO/可访问性/代码质量")
