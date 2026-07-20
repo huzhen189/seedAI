@@ -82,37 +82,44 @@ def detect_context(messages: list[dict], conversation_id: int | None = None,
             last = m.get("content", "") or ""
             break
     if not last:
+        logger.info("[上下文检测] 输入为空, 跳过")
         return ""
 
     # 1. 前端 context_hint 优先
     if frontend_hint:
-        logger.info("[上下文] 来源=frontend hint=%.60s", frontend_hint)
+        logger.info("[上下文检测] 来源=前端WebLLM | 内容=%.60s", frontend_hint)
         return frontend_hint
 
     # 2. Chroma 向量检索
     if conversation_id:
         try:
             from .rag import find_relevant_messages
+            logger.info("[上下文检测] 尝试Chroma向量检索 conv=%s", conversation_id)
             relevant_ids = find_relevant_messages(last, conversation_id)
             if relevant_ids:
                 relevant = [m for m in messages if m.get("_msg_id") in relevant_ids]
                 ctx_text = " ".join(m.get("content", "")[:200] for m in relevant[-6:])
                 hint = _summarize_context(ctx_text)
                 if hint:
-                    logger.info("[上下文] 来源=chroma hint=%.60s", hint)
+                    logger.info("[上下文检测] 来源=Chroma向量 | 相关消息=%d条 | 摘要=%.60s",
+                               len(relevant_ids), hint)
                     return hint
-        except Exception:
+            else:
+                logger.info("[上下文检测] Chroma未找到相关消息 conv=%s", conversation_id)
+        except Exception as e:
+            logger.debug("[上下文检测] Chroma检索异常: %s", e)
             pass
 
     # 3. 零依赖兜底
+    logger.info("[上下文检测] 使用零依赖兜底(关键词匹配)")
     for m in reversed(messages):
         if m.get("role") == "assistant":
             hint = _summarize_context(m.get("content", ""))
             if hint:
-                logger.info("[上下文] 来源=fallback hint=%.60s", hint)
+                logger.info("[上下文检测] 来源=关键词兜底 | 摘要=%.60s", hint)
                 return hint
             break
-    return ""
+    logger.info("[上下文检测] 所有来源均未检测到上下文")
 
 
 def classify(messages: list[dict], model_id: str = "deepseek", checkpoint_info: dict | None = None,

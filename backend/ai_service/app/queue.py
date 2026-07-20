@@ -342,6 +342,11 @@ async def worker_loop(concurrency: int = 1):
                 )
                 intent = detect_intent(messages, model_id, conversation_id=conversation_id, context_hint=job.get("context_hint", ""))
                 skill_name = skill or skill_for(intent["level1"], intent["level2"]) or "explain"
+                # 状态路由: draft/planning → requirement_agent (跳过直接生成)
+                proj_status = job.get("project_status", "draft")
+                if skill_name == "builder_agent" and proj_status in ("draft", "planning"):
+                    logger.info("[路由] 项目状态=%s → 切换 requirement_agent", proj_status)
+                    skill_name = "requirement_agent"
                 logger.info(
                     "意图识别结果 trace=%s -> %s/%s(conf=%.2f) industry=%s -> skill=%s",
                     trace_id, intent["level1"], intent["level2"],
