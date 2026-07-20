@@ -121,9 +121,7 @@ async function abortPaused() {
 
 // 意图识别(由 AI intent 事件设置; 控制右侧面板显示)
 const currentIntent = ref<{ level1: string; level2: string }>({ level1: '', level2: '' })
-const isGenerateIntent = computed(() =>
-  currentIntent.value.level1 === 'build',
-)
+const rightCollapsed = ref(false)
 // 方案确认: Planner 产出后暂停等待用户确认
 const confirmPlan = ref<{ title: string; goal: string; steps: string[] } | null>(null)
 
@@ -763,7 +761,7 @@ watch(pendingRetry, (r) => {
 
 <template>
   <div class="chat">
-    <div class="left-col" :class="{ full: !isGenerateIntent }">
+    <div class="left-col" :class="{ full: rightCollapsed }">
       <div class="conv-bar">
         <span class="proj">📁</span>
         <span v-if="!editingProject" class="proj-name">{{ currentProjectName }}</span>
@@ -911,7 +909,14 @@ watch(pendingRetry, (r) => {
       </div>
     </div>
 
-    <div class="right-pane">
+    <div class="right-pane" :class="{ collapsed: rightCollapsed }">
+      <div class="right-toggle">
+        <button class="toggle-btn" @click="rightCollapsed = !rightCollapsed">
+          {{ rightCollapsed ? '◀' : '▶' }}
+        </button>
+        <span v-if="rightCollapsed" class="toggle-label">预览</span>
+      </div>
+      <div v-if="!rightCollapsed" class="right-body">
       <RightPanel
         :artifacts="projectArtifacts"
         :generating="generating"
@@ -921,6 +926,7 @@ watch(pendingRetry, (r) => {
         :requirementDoc="requirementDoc"
         @refresh="loadArtifacts"
       />
+      </div>
     </div>
 
   </div>
@@ -945,6 +951,36 @@ watch(pendingRetry, (r) => {
 .right-pane {
   width: 46%;
   border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  transition: width 0.2s;
+}
+.right-pane.collapsed {
+  width: 36px;
+}
+.right-toggle {
+  display: flex;
+  align-items: center;
+  padding: 6px 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.toggle-btn {
+  background: none; border: none; cursor: pointer;
+  font-size: 14px; color: var(--text-muted);
+  padding: 0; line-height: 1;
+}
+.toggle-label {
+  writing-mode: vertical-rl;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+.right-body {
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;

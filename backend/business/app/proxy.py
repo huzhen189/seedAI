@@ -742,7 +742,7 @@ async def _persist_conversation(
             files=[{"name": "index.html", "size": len(assistant_text.encode("utf-8")), "content": assistant_text}],
             preview_url=preview_url or "",
             download_url=preview_url or "",
-            status="done" if preview_url else "uploading",
+            status="done",  # HTML 已可用(srcdoc 兜底, COS 链接可有可无)
         )
         db.add(art)
         await db.flush()

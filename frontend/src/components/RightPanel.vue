@@ -107,15 +107,7 @@ const mode = computed(() => {
 </script>
 
 <template>
-  <!-- 收起/展开切换栏 -->
-  <div class="right-toggle">
-    <button class="toggle-btn" @click="collapsed = !collapsed">
-      {{ collapsed ? '◀' : '▶' }}
-    </button>
-    <span v-if="collapsed" class="toggle-label">{{ allFiles.length }} 文件</span>
-  </div>
-
-  <div v-if="!collapsed" class="right-body">
+  <div class="right-body">
     <!-- 需求文档(伪目录) -->
     <div v-if="requirementDoc" class="req-tree">
       <div class="tree-head">📋 需求文档</div>
