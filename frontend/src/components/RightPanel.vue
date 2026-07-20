@@ -148,9 +148,10 @@ const mode = computed(() => {
     <div class="preview-area">
       <!-- HTML 预览 -->
       <iframe
-        v-if="(mode === 'html' && currentFile) || generatedHtml"
+        v-if="mode === 'html' && currentFile"
         class="pv-frame"
-        :srcdoc="(currentFile?.url ? undefined : (currentFile?.content || (currentFile?.artifact?.files?.[currentFile?.name || ''] as any)?.content)) || generatedHtml"
+        :src="currentFile.url || undefined"
+        :srcdoc="currentFile.url ? undefined : ((currentFile.artifact?.files?.[currentFile.name || ''] as any)?.content || '')"
         sandbox="allow-scripts allow-same-origin allow-forms"
         title="preview"
       ></iframe>
