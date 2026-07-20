@@ -80,6 +80,10 @@ class GenerateReq(BaseModel):
     skill: str | None = None
     trace_id: str | None = None
     conversation_id: int | None = None
+    context_hint: str = ""            # 前端WebLLM上下文检测
+    conversation_summary: str = ""    # Redis对话摘要
+    project_status: str = "draft"     # 项目状态
+    requirement_doc: dict | None = None  # 需求文档
 
 
 @app.get("/health")
@@ -144,6 +148,10 @@ async def generate(req: GenerateReq, after: str | None = None):
             "messages": req.messages,
             "skill": req.skill,
             "conversation_id": req.conversation_id,
+            "context_hint": req.context_hint,
+            "conversation_summary": req.conversation_summary,
+            "project_status": req.project_status,
+            "requirement_doc": req.requirement_doc,
         }
         await q.enqueue(job)
         logger.info(
