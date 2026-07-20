@@ -1,9 +1,9 @@
-"""Requirement Agent: 多轮深度需求对话 + 可选多方案(无代码)。
+"""Requirement Agent: 行业特化需求对话 + 可选多方案(无代码)。
 
 流程:
-  1. 收集信息(行业/风格/功能) — 信息不全反复追问
-  2. 出 multiple 方案 → options 事件(给用户选)
-  3. 用户选定 → 输出需求文档 JSON → 持久化
+  1. 根据行业只问 2~3 个关键问题(不问无关项)
+  2. 出 multiple 方案 → options 事件
+  3. 用户选定 → 输出需求文档 JSON
   4. 通知前端: requirement_doc 就绪 → 等"开始生成"
 """
 
@@ -20,44 +20,67 @@ from ..registry import register_skill
 
 AGENT_LOG = logging.getLogger("ai_service.requirement")
 
-SYS_REQUIREMENT = (
-    "你叫小胡，是智能建站助手的「需求分析师」。职责：通过对话深度挖掘用户建站需求。\n\n"
-    "必须收集到以下信息才输出文档(缺任一项继续追问)：\n"
-    "1. 行业/品牌名称\n2. 目标用户\n3. 至少 3 个页面结构\n4. 至少 2 个功能需求\n5. 设计风格偏好\n\n"
-    "当信息完整时，输出需求文档 JSON:\n"
-    '{"brand":{"name":"品牌名","slogan":"口号","intro":"品牌介绍(200字)"},'
-    '"target_user":"目标用户描述","pages":[{"title":"首页","sections":[{"name":"hero","content":"文案"}]}],'
-    '"features":["功能1","功能2"],"design_style":"简约/科技/复古","color_scheme":{"primary":"#xxx","bg":"#xxx"},'
-    '"reference_sites":[],"status":"confirmed"}\n\n'
-    "如果用户给了多个想法但自己不确定，可以出 3 个方案让用户选:\n"
-    '输出: {"options":{"question":"方向选择","choices":['
-    '{"id":"A","title":"方案名","desc":"简短描述","pros":"优点","cons":"缺点"},'
-    '{"id":"B","title":"方案名","desc":"简短描述","pros":"优点","cons":"缺点"}]}}\n\n'
-    "用户输入: "
-)
+# ── 行业特化收集维度(只问该行业关键项,其余留给 AI 自由发挥) ──
+# key 与 intent_classifier 的 industry 输出对齐(英文)
+INDUSTRY_FOCUS: dict[str, str] = {
+    "ecommerce": "需要了解: ①卖什么品类 ②是否需要购物车/支付/商品展示 ③品牌名和风格偏好。",
+    "restaurant": "需要了解: ①餐厅类型/菜系 ②是否需要菜单/预约/地址 ③品牌名和风格偏好。",
+    "personal": "需要了解: ①网站主题(博客/作品集/个人品牌) ②需要哪些页面板块 ③风格偏好。",
+    "corp": "需要了解: ①公司业务简介 ②需要哪些页面(关于/服务/案例/联系) ③品牌名和风格偏好。",
+    "edu": "需要了解: ①课程类型和受众 ②是否需要课程列表/师资/报名 ③品牌名和风格偏好。",
+    "health": "需要了解: ①诊所/科室类型 ②是否需要预约/医生介绍/地址 ③品牌名和风格偏好。",
+    "game": "需要了解: ①游戏类型和玩法 ②是否需要下载页/社区/排行榜 ③风格偏好。",
+    "travel": "需要了解: ①目的地/线路类型 ②是否需要行程展示/预订/攻略 ③品牌名和风格偏好。",
+    # 以下归为通用
+    "tech": "需要了解: ①产品/服务简介 ②需要哪些页面和功能 ③品牌名和风格偏好。",
+    "media": "需要了解: ①内容类型(视频/文章/图片) ②需要哪些板块 ③风格偏好。",
+    "gov": "需要了解: ①部门/服务类型 ②需要哪些栏目(公告/办事/机构) ③风格偏好。",
+    "finance": "需要了解: ①业务类型 ②需要哪些页面和功能 ③品牌名和风格偏好。",
+    "other": "需要了解: ①做什么类型的网站 ②需要哪些页面和功能 ③品牌名和风格偏好。",
+}
 
+SYS_REQUIREMENT = (
+    "你叫小胡，是智能建站助手的「需求分析师」。职责：简洁高效地收集建站需求。\n\n"
+    "原则:\n"
+    "- 只问与行业相关的关键问题(2-3个),不问无关项\n"
+    "- 品牌名/口号/200字介绍都不是必须的,用户不给就留空\n"
+    "- 至少1个页面、1个功能即可输出文档\n"
+    "- 用户回答模糊时,不要反复追问,直接按常识合理补充\n"
+    "- 尽量一次性收集完毕,不要拖多轮\n\n"
+    "当信息足够时输出需求文档 JSON:\n"
+    '{{"brand":{{"name":"品牌名或留空","slogan":"口号或留空","intro":"一句话介绍或留空"}},'
+    '"target_user":"目标用户(一句话)","pages":[{{"title":"页面名","sections":[{{"name":"区块","content":"占位文案"}}]}}],'
+    '"features":["功能1"],"design_style":"风格(1-2词)","color_scheme":{{"primary":"#xxx","bg":"#xxx"}},'
+    '"status":"confirmed"}}\n\n'
+    "如果用户想法多且不确定方向,可出 2-3 个方案:\n"
+    '{{"options":{{"question":"方向选择","choices":['
+    '{{"id":"A","title":"方案","desc":"一句话","pros":"优点","cons":"缺点"}}]}}}}\n'
+)
 
 
 async def requirement_agent_handler(
     model_id: str, messages: list, trace_id: str | None = None,
-    is_cancelled=None, project_status: str = "draft", **kwargs,
+    is_cancelled=None, project_status: str = "draft",
+    industry: str = "other", **kwargs,
 ) -> AsyncGenerator[Dict, None]:
-    AGENT_LOG.info("[req] 需求分析 trace=%s status=%s msgs=%d", trace_id, project_status, len(messages))
+    AGENT_LOG.info("[req] 需求分析 trace=%s status=%s industry=%s msgs=%d",
+                   trace_id, project_status, industry, len(messages))
 
     yield ev("node", stage="analyzing", agent_id="requirement_agent")
-    yield ev("think", stage="analyst", content="正在分析您的需求，收集关键信息…",
+    yield ev("think", stage="analyst", content="正在分析您的需求…",
              agent_id="requirement_agent")
 
-    # 构造提示: 当前状态 + 历史消息
-    status_hint = ""
-    if project_status in ("draft", "planning"):
-        status_hint = "当前阶段: 需求收集。请先追问用户关键信息。"
+    # 行业特化指令(注入 system prompt)
+    focus = INDUSTRY_FOCUS.get(industry, INDUSTRY_FOCUS["other"])
+    AGENT_LOG.info("[req] 行业=%s focus=%.80s", industry, focus)
 
-    req_msgs = [{"role": "user", "content": f"{status_hint}\n用户消息:\n" + m.get("content", "")}
+    full_sys = f"{SYS_REQUIREMENT}\n当前行业: {industry}\n{focus}\n用户输入: "
+
+    req_msgs = [{"role": "user", "content": m.get("content", "")}
                 for m in messages if m.get("role") == "user"]
 
     chat = get_chat_model(model_id, streaming=False)
-    resp = chat.invoke([{"role": "system", "content": SYS_REQUIREMENT}, *req_msgs])
+    resp = chat.invoke([{"role": "system", "content": full_sys}, *req_msgs])
     raw = (resp.content or "").strip()
     AGENT_LOG.info("[req] LLM完成 chars=%d", len(raw))
 
@@ -112,6 +135,5 @@ register_skill(
     intent_tags=["需求", "建站", "规划"],
     handler=requirement_agent_handler,
     is_graph=False,
-    description="需求分析: 深度对话收集需求, 出文档或方案选项",
+    description="需求分析: 行业特化收集需求,出文档或方案选项",
 )
-register_skill(name="requirement_agent",intent_tags=["需求","建站","规划"],handler=requirement_agent_handler,is_graph=False,description="需求分析: 深度对话收集需求, 出文档或方案选项")
