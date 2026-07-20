@@ -30,15 +30,30 @@ def _client():
 def _ef():
     from chromadb.utils import embedding_functions
 
-    return embedding_functions.OpenAIEmbeddingFunction(
-        api_key=settings.qwen_embedding_key,
-        api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        model_name=settings.qwen_embedding_model,
+    # 优先 Qwen, 其次 DeepSeek, 最后本地 sentence-transformers
+    if settings.qwen_embedding_key:
+        return embedding_functions.OpenAIEmbeddingFunction(
+            api_key=settings.qwen_embedding_key,
+            api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            model_name=settings.qwen_embedding_model,
+        )
+    if settings.deepseek_api_key:
+        return embedding_functions.OpenAIEmbeddingFunction(
+            api_key=settings.deepseek_api_key,
+            api_base="https://api.deepseek.com/v1",
+            model_name="deepseek-chat",
+        )
+    # 本地模型兜底(无需 API key)
+    return embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name="all-MiniLM-L6-v2"
     )
 
 
 def _available() -> bool:
-    return bool(settings.qwen_embedding_key)
+    try:
+        return _ef() is not None
+    except Exception:
+        return False
 
 
 def retrieve(query: str, collection: str, top_k: int | None = None) -> list[dict]:
@@ -112,3 +127,59 @@ def seed_components(items: list[dict]) -> int:
     metas = [it.get("metadata", {}) for it in items]
     col.upsert(ids=ids, documents=docs, metadatas=metas)
     return len(ids)
+
+
+# ---- 对话上下文关联(向量相似度边界检测) ----
+CTX_COLLECTION = "conversation_context"
+CTX_SIMILARITY_THRESHOLD = 0.55  # 余弦相似度 < 0.55 视为无关
+
+
+def index_message(msg_id: int, conversation_id: int, role: str, content: str) -> None:
+    """将消息写入 Chroma 上下文集合(供相似度检测)。"""
+    if not _available() or not content.strip():
+        return
+    try:
+        col = _client().get_or_create_collection(name=CTX_COLLECTION, embedding_function=_ef())
+        col.upsert(
+            ids=[f"msg_{msg_id}"],
+            documents=[content[:2000]],
+            metadatas=[{"conversation_id": conversation_id, "role": role, "msg_id": msg_id}],
+        )
+        logger.info("[向量] 索引消息 msg=%s conv=%s role=%s content=%.80s", msg_id, conversation_id, role, content)
+    except Exception as e:
+        logger.warning("[向量] 索引消息失败 msg=%s: %s", msg_id, e)
+
+
+def find_relevant_messages(query: str, conversation_id: int, top_k: int = 10) -> list[int]:
+    """找与 query 相关的历史消息 id(按相似度排序)。只限同一会话。"""
+    if not _available():
+        return []
+    try:
+        col = _client().get_collection(name=CTX_COLLECTION, embedding_function=_ef())
+        res = col.query(
+            query_texts=[query],
+            n_results=min(top_k, 20),
+            where={"conversation_id": conversation_id},
+        )
+        ids_raw = (res.get("ids") or [[]])[0]
+        dists = (res.get("distances") or [[]])[0]
+        relevant = []
+        discarded = 0
+        for rid, d in zip(ids_raw, dists):
+            sim = 1 - d  # 余弦距离 → 相似度
+            if sim >= CTX_SIMILARITY_THRESHOLD:
+                msg_id = int(rid.replace("msg_", ""))
+                relevant.append((msg_id, sim))
+            else:
+                discarded += 1
+        relevant.sort(key=lambda x: x[0])
+        result = [r[0] for r in relevant]
+        logger.info(
+            "[向量] 上下文检索 query=%.60s conv=%s 匹配=%d/%d(阈值=%.2f) ids=%s",
+            query, conversation_id, len(result), len(result) + discarded,
+            CTX_SIMILARITY_THRESHOLD, result,
+        )
+        return result
+    except Exception as e:
+        logger.warning("[向量] 上下文检索失败: %s", e)
+        return []

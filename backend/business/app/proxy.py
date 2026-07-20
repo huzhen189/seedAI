@@ -91,6 +91,7 @@ async def _resolve_user(request: Request, response: Response | None = None) -> C
     若 response 传入且 token 剩余 <10min, 自动续期 Cookie(滑动过期)。
     """
     token = request.cookies.get(ACCESS_COOKIE)
+    logger.info("[auth] token from cookie: %s", "FOUND" if token else "NONE, cookies=%s", list(request.cookies.keys()))
     if not token:
         try:
             creds = await _bearer(request)
@@ -209,6 +210,24 @@ async def list_models():
     return data
 
 
+@router.get("/agents")
+async def list_agents():
+    """透传 AI 服务的 Agent 注册表(匿名可读, 供前端头像/名称展示)。Redis 缓存 600s。"""
+    cache_key = "cache:agents"
+    cached = await cache_get(cache_key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(f"{settings.ai_service_url}/agents")
+        r.raise_for_status()
+        data = r.json()
+    await cache_set(cache_key, json.dumps(data, ensure_ascii=False), ttl=600)
+    return data
+
+
 async def _sync_checkpoint_to_mysql(conversation_id: int, stage: str,
                                         ck_data: dict, progress_pct: int) -> None:
     """后台异步: 将 Redis checkpoint 同步到 MySQL(不阻塞 SSE)"""
@@ -227,16 +246,17 @@ async def _sync_checkpoint_to_mysql(conversation_id: int, stage: str,
 
 async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
                       terminal_status: str, user_text: str, assistant_text: str,
-                      preview_url: str | None = None) -> None:
+                      preview_url: str | None = None,
+                      trail_parts: list | None = None) -> None:
     """后台异步落库(独立 session, 3 次重试, 全失败入 Redis 错误队列兜底)"""
     from .db import SessionLocal as _S
     last_err: Exception | None = None
     for attempt in range(3):
         try:
-            logger.info("[chat] 后台落库开始 trace=%s attempt=%d", tid, attempt + 1)
+            logger.info("[chat] [8/8] 后台落库 trace=%s attempt=%d", tid, attempt + 1)
             async with _S() as s:
                 await finish_trace(s, tid, terminal_status, max(0, len(assistant_text) // 4))
-                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url)
+                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url, trail_parts)
                 # 流结束(done/aborted/error)清理 Redis checkpoint; paused 保留供恢复
                 if terminal_status != "paused":
                     await ck_delete(conversation_id)
@@ -271,7 +291,7 @@ async def chat(
     request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
-    model: str = Query("hy3", description="模型 id,默认主模型 hy3"),
+    model: str = Query("deepseek", description="模型 id"),
     conversation_id: int = Query(..., description="会话 id,必填(前端先建会话)"),
     trace_id: str | None = Query(None, description="前端生成的链路 id,用于取消/续传"),
     after: str | None = Query(None, description="断点续传:仅回放该 stream id 之后的增量(留空=全量回放)"),
@@ -287,29 +307,46 @@ async def chat(
     以便前端 EventSource 识别并主动弹出登录框。
     """
     # --- 1) 鉴权 ---
-    user = await _resolve_user(request, response)
+    # Cookie → URL token(SSE 兜底) → Bearer
+    token = request.cookies.get(ACCESS_COOKIE)
+    if not token:
+        token = request.query_params.get("token")
+    if not token:
+        try:
+            creds = await _bearer(request)
+            if creds is not None:
+                token = creds.credentials
+        except Exception:
+            token = None
+    user: CurrentUser | None = None
+    if token:
+        try:
+            payload = decode_token(token)
+            if payload.get("type") == "access":
+                user = CurrentUser(int(payload["sub"]), payload.get("role", "user"))
+        except Exception:
+            pass
     if user is None:
         logger.info("[chat] 鉴权失败 — 未登录或 token 无效")
         return _sse_auth_error()
-    logger.info("[chat] 鉴权通过 user_id=%s role=%s", user.id, user.role)
+    logger.info("[chat] [1/8] 鉴权通过 user=%s role=%s", user.id, user.role)
 
     # --- 2) 解析消息(含内容安全) ---
     messages = _parse_messages(request)
-    # 清洗用户输入(防 XSS/注入)
-    for m in messages:
+    # 清洗用户输入(防 XSS/注入) + 打 _msg_id 给 AI 侧向量索引
+    for i, m in enumerate(messages):
+        m["_msg_id"] = conversation_id * 1000 + i + 1
         if m.get("role") == "user" and isinstance(m.get("content"), str):
             m["content"] = _sanitize_input(m["content"])
     tid = trace_id or uuid.uuid4().hex
-    # 取最后一条用户消息(前端发送的是完整消息历史, 首条不是当前)
-    user_text = ""
-    for m in reversed(messages):
-        if m.get("role") == "user":
-            user_text = m.get("content", "") or ""
-            break
-    logger.info(
-        "[chat] ▶ 请求 trace=%s conv=%s model=%s 消息数=%s",
-        tid, conversation_id, model, len(messages),
-    )
+    # 取当前用户消息: 优先 q 参数, 其次遍历取最后一条 user
+    user_text = request.query_params.get("q") or ""
+    if not user_text:
+        for m in messages:
+            if m.get("role") == "user":
+                user_text = m.get("content", "") or ""  # 遍历到尾, 最后一条覆盖
+    logger.info("[chat] [2/8] 解析消息 trace=%s conv=%s model=%s msgs=%d input=%.80s",
+                tid, conversation_id, model, len(messages), user_text)
     for i, m in enumerate(messages):
         role = m.get("role", "?")
         content = m.get("content", "")
@@ -327,15 +364,39 @@ async def chat(
             "RATE_LIMITED",
             f"今日生成次数已用尽（{settings.free_daily_quota} 次/天），请明日再来或升级套餐",
         )
-    logger.info("[chat] 配额检查通过 plan=%s 剩余=%s", plan, remaining)
+    logger.info("[chat] [3/8] 配额检查通过 plan=%s 剩余=%s", plan, remaining)
 
     # --- 4) 计量 + Trace ---
     await record_model_usage(user.id, model)
     await create_trace(db, user.id, conversation_id, tid, model)
-    logger.info("[chat] trace 已创建 + 模型用量已记录")
+    logger.info("[chat] [4/8] 计量已记录 + trace=%s 已创建", tid)
 
-    payload = {"model_id": model, "messages": messages, "trace_id": tid}
+    payload = {"model_id": model, "messages": messages, "trace_id": tid, "conversation_id": conversation_id}
+    # 前端上下文检测(context_hint)
+    ctx = request.query_params.get("context_hint")
+    if ctx:
+        payload["context_hint"] = ctx
     gen_url = f"{settings.ai_service_url}/generate"
+    # 项目上下文: 状态+需求文档
+    try:
+        from .models import Project
+        proj = await db.get(Project, conv.project_id)
+        if proj:
+            payload["project_status"] = proj.status or "draft"
+            if proj.requirement_doc:
+                try:
+                    payload["requirement_doc"] = json.loads(proj.requirement_doc)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    # 断点续跑: 方案确认后→锁死 build_agent_coder, 防止重新进需求分析
+    use_skill_override = False
+    if resume:
+        ck_redis = await ck_get(conversation_id)
+        if ck_redis and ck_redis.get("stage") == "await_confirm":
+            payload["skill"] = "build_agent_coder"
+            use_skill_override = True
     if after:
         from urllib.parse import urlencode
         gen_url += "?" + urlencode({"after": after})
@@ -371,12 +432,13 @@ async def chat(
         # read 不超时(生成可能持续数分钟),connect 给 10s
         timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
         assistant_parts: list[str] = []
+        trail_parts: list[dict] = []  # 收集 think/plan/node/intent 事件, 结束时落库
         preview_url: str | None = None  # 捕获预览直链(供分享「复制预览链接」使用)
         event_seq: int = 0  # 结构化事件序号(供回放重建时间线)
         terminal_status: str = "done"
         captured_level1: str = "unknown"  # 从 intent 事件捕获, 供统计
         event_counts: dict[str, int] = {}  # 各类 SSE 事件计数(供日志)
-        logger.info("[chat] 开始连接 AI 服务 %s", gen_url)
+        logger.info("[chat] [5/8] 连接 AI 服务 %s", gen_url)
         logger.info("[chat] ▸ 请求体 model=%s resume=%s after=%s msgs=%d checkpoint=%s",
                      model, resume, after or "-",
                      len(payload.get("messages", [])),
@@ -398,7 +460,7 @@ async def chat(
                             )
                             yield _error_frame(code, message)
                             return
-                        logger.info("[chat] AI 服务已连接, 开始接收事件流")
+                        logger.info("[chat] [6/8] AI 服务已连接, 开始接收事件流")
                         event = None
                         data_parts: list[str] = []
                         async for raw_line in resp.aiter_lines():
@@ -421,6 +483,9 @@ async def chat(
                                             payload_obj = json.loads(data) if data else None
                                         except Exception:
                                             payload_obj = None
+                                        # 收集 trail (think/plan/node 事件)
+                                        if isinstance(payload_obj, dict) and event in ("think", "plan", "node"):
+                                            trail_parts.append({"event": event, "data": payload_obj})
                                         stage = None
                                         if isinstance(payload_obj, dict) and event in ("node", "think"):
                                             stage = payload_obj.get("stage")
@@ -452,7 +517,16 @@ async def chat(
                                             conversation_id, stage, ck_data, progress_pct))
                                     elif event == "paused":
                                         terminal_status = "paused"
+                                        # 方案确认暂停: 保存阶段信息到 checkpoint, 恢复时锁死 build_agent_coder
+                                        if isinstance(payload_obj, dict) and payload_obj.get("stage") == "await_confirm":
+                                            await ck_set(conversation_id, "await_confirm",
+                                                        {"title": payload_obj.get("plan_title", ""),
+                                                         "goal": payload_obj.get("plan_goal", ""),
+                                                         "steps": payload_obj.get("plan_steps", [])},
+                                                        30)
                                     elif event == "intent" and isinstance(payload_obj, dict):
+                                        # 收集 trail
+                                        trail_parts.append({"event": "intent", "data": payload_obj})
                                         # 两级意图记录(供管理后台系统分析)
                                         l1 = payload_obj.get("level1") or payload_obj.get("intent") or "unknown"
                                         l2 = payload_obj.get("level2") or "unknown"
@@ -491,7 +565,7 @@ async def chat(
             assistant_full_text = "".join(assistant_parts)
             approx_tokens = max(0, len(assistant_full_text) // 4)
             logger.info(
-                "[chat] ◼ 流结束 trace=%s 状态=%s events=%d tokens≈%d preview=%s output_len=%d",
+                "[chat] [7/8] 流结束 trace=%s 状态=%s events=%d tokens≈%d preview=%s output=%d字符",
                 tid, terminal_status, sum(event_counts.values()),
                 approx_tokens, bool(preview_url), len(assistant_full_text),
             )
@@ -502,6 +576,7 @@ async def chat(
                 evt_detail = " ".join(f"{k}={v}" for k, v in sorted(event_counts.items()))
                 logger.info("[chat]   事件分布: %s", evt_detail)
             # 后台落库任务(独立 session + 重试, 不在 generator finally 中同步等待)
+            logger.info("[chat] [8/8] 启动后台落库 trace=%s user_text=%.50s", tid, user_text)
             asyncio.create_task(_do_persist(
                 user_id=user.id,
                 conversation_id=conversation_id,
@@ -511,6 +586,7 @@ async def chat(
                 user_text=user_text,
                 assistant_text=assistant_full_text,
                 preview_url=preview_url,
+                trail_parts=trail_parts,
             ))
 
     return StreamingResponse(
@@ -568,12 +644,13 @@ async def _persist_conversation(
     assistant_text: str,
     trace_id: str,
     preview_url: str | None = None,
+    trail_parts: list | None = None,
 ) -> None:
     """SSE 结束后落库。build 类消息走 Artifact+结构化 JSON, chat 类存纯文本。"""
     # 归一化: 拆解 {"data":"x"}{"data":"y"}... → "xy..." (兜底防 AI 服务旧格式)
     assistant_text = _normalize_assistant_text(assistant_text)
-    logger.info("[chat] _persist 调用 trace=%s conv=%s uid=%s alen=%s preview=%s",
-                trace_id, conversation_id, user_id, len(assistant_text), bool(preview_url))
+    logger.info("[chat] _persist 调用 trace=%s conv=%s uid=%s user_text=%.50s alen=%s preview=%s",
+                trace_id, conversation_id, user_id, user_text, len(assistant_text), bool(preview_url))
     conv = await conv_repo.get_by(db, id=conversation_id, user_id=user_id)
     if conv is None:
         logger.warning("[chat] 落库失败: 会话不存在 conv=%s user=%s", conversation_id, user_id)
@@ -628,8 +705,15 @@ async def _persist_conversation(
         conv.title = user_text[:20]
         logger.info("[chat] 自动设置会话标题 conv=%s title=%.20s", conv.id, user_text)
     conv.updated_at = datetime.utcnow()
+    # trail 持久化: 将 think/plan/node/intent 事件序列化为一条消息
+    if trail_parts:
+        db.add(Message(
+            conversation_id=conv.id, role="assistant",
+            content=json.dumps({"type": "trail", "events": trail_parts}, ensure_ascii=False),
+            model_id=model, trace_id=trace_id + "_trail",
+        ))
     await db.commit()
-    logger.info("[chat] 消息落库成功 conv=%s", conv.id)
+    logger.info("[chat] 消息落库成功 conv=%s trail=%d", conv.id, len(trail_parts or []))
 
 
 @router.post("/feedback")
@@ -657,3 +741,7 @@ async def cancel(request: Request):
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.post(f"{settings.ai_service_url}/cancel", json={"trace_id": trace_id})
         return r.json()
+
+# reload v99
+
+

@@ -353,3 +353,69 @@ async def pending_uploads(
         raise HTTPException(status_code=404, detail="project not found")
     rows = await artifact_repo.list_by(db, project_id=project_id, status="uploading")
     return {"count": len(rows), "ids": [a.id for a in rows]}
+
+
+# ---- 消息游标分页(前端 localStorage 缓存 + 上拉加载) ----
+@router.get("/projects/{project_id}/messages")
+async def list_messages(
+    project_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    before_id: int | None = Query(None, description="游标: 加载此 id 之前的消息"),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """游标分页获取项目消息(跨所有会话)。"""
+    proj = await project_repo.get_by(db, id=project_id, user_id=user.id)
+    if proj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    conv_ids = (await db.execute(
+        select(Conversation.id).where(Conversation.project_id == project_id)
+    )).scalars().all()
+    if not conv_ids:
+        return []
+    q = select(Message).where(Message.conversation_id.in_(conv_ids))
+    if before_id is not None:
+        q = q.where(Message.id < before_id)
+    q = q.order_by(Message.id.desc()).limit(limit)
+    rows = (await db.execute(q)).scalars().all()
+    result = [{"id": r.id, "conversation_id": r.conversation_id,
+               "role": r.role, "content": r.content,
+               "trace_id": r.trace_id, "created_at": str(r.created_at) if r.created_at else None}
+              for r in reversed(rows)]
+    return result
+
+
+# ---- Project System Prompt ----
+@router.get("/projects/{project_id}/prompt")
+async def get_project_prompt(
+    project_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取项目级 System Prompt。"""
+    proj = await project_repo.get_by(db, id=project_id, user_id=user.id)
+    if proj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return {"project_id": project_id, "system_prompt": proj.system_prompt or ""}
+
+
+@router.put("/projects/{project_id}/prompt")
+async def update_project_prompt(
+    project_id: int,
+    body: dict,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """追加或替换项目级 System Prompt。"""
+    proj = await project_repo.get_by(db, id=project_id, user_id=user.id)
+    if proj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    mode = body.get("mode", "append")  # append | replace
+    content = body.get("content", "")
+    if mode == "replace":
+        proj.system_prompt = content[:4000]
+    else:
+        existing = proj.system_prompt or ""
+        proj.system_prompt = (existing + "\n" + content)[:4000]
+    await db.commit()
+    return {"ok": True, "len": len(proj.system_prompt or "")}

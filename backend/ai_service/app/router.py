@@ -27,12 +27,16 @@ INTENT_SKILL_MAP: dict[tuple[str, str], str] = {
     ("learn", "casual"): "explain",
     ("code", "snippet"): "write_code",
     ("code", "component"): "write_code",
-    ("code", "fix"): "write_code",
-    ("code", "refactor"): "write_code",
-    ("build", "page"): "generate_site",
-    ("build", "site"): "generate_site",
-    ("build", "modify"): "generate_site",
-    ("build", "game"): "generate_site",
+    ("code", "fix"): "fix_agent",
+    ("code", "refactor"): "review_agent",
+    ("build", "page"): "builder_agent",
+    ("build", "site"): "builder_agent",
+    ("build", "modify"): "builder_agent",
+    ("build", "game"): "builder_agent",
+    ("build", "building"): "builder_agent",
+    ("build", "requirement"): "requirement_agent",
+    ("learn", "design"): "design_agent",
+    ("learn", "search"): "search_agent",
     ("doc", "readme"): "generate_doc",
     ("doc", "tutorial"): "generate_doc",
     ("doc", "plan"): "generate_doc",
@@ -54,7 +58,7 @@ LEVEL2_LABELS: dict[str, str] = {
     "explain": "概念解释",
     "debug": "排查报错",
     "compare": "技术对比",
-    "casual": "日常闲聊",
+    "casual": "需求沟通",  # 闲聊 → 需求沟通(引导用户说需求)
     "snippet": "函数片段",
     "component": "UI组件",
     "fix": "修复Bug",
@@ -68,13 +72,18 @@ LEVEL2_LABELS: dict[str, str] = {
     "plan": "方案设计",
     "text": "文本翻译",
     "code_lang": "代码翻译",
+    "design": "UI设计",
+    "search": "联网搜索",
 }
 
 
-def detect_intent(messages: list[dict], model_id: str = "hy3", checkpoint_info: dict | None = None) -> dict:
+def detect_intent(messages: list[dict], model_id: str = "deepseek",
+                  checkpoint_info: dict | None = None,
+                  conversation_id: int | None = None,
+                  context_hint: str = "") -> dict:
     """返回 {level1, level2, confidence, industry, checkpoint_relation, label}。"""
     t0 = time.time()
-    result = classify(messages, model_id, checkpoint_info=checkpoint_info)
+    result = classify(messages, model_id, checkpoint_info=checkpoint_info, conversation_id=conversation_id, context_hint=context_hint)
     l1 = result["level1"]
     l2 = result["level2"]
     elapsed = time.time() - t0

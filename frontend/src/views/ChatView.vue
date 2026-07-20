@@ -37,7 +37,7 @@ const STAGE_LABELS: Record<string, string> = {
 
 // ---- 本地 UI 状态 ----
 const models = ref<ModelInfo[]>([])
-const model = ref('hy3')
+const model = ref('deepseek')
 const input = ref('')
 const generating = ref(false)
 const finished = ref(false)
@@ -48,6 +48,7 @@ const planNodes = ref<PlanEvent[]>([])
 const currentStage = ref('')
 const degraded = ref(false)
 const generatedHtml = ref('')
+const requirementDoc = ref<Record<string, any> | null>(null)
 const previewUrl = ref<string | null>(null)
 const errorMsg = ref('')
 
@@ -123,6 +124,31 @@ const currentIntent = ref<{ level1: string; level2: string }>({ level1: '', leve
 const isGenerateIntent = computed(() =>
   currentIntent.value.level1 === 'build',
 )
+// 方案确认: Planner 产出后暂停等待用户确认
+const confirmPlan = ref<{ title: string; goal: string; steps: string[] } | null>(null)
+
+function doConfirmPlan() {
+  if (!confirmPlan.value) return
+  confirmPlan.value = null
+  resetGenState()
+  generating.value = true
+  esRef.value = startChat({
+    model: model.value,
+    messages: convStore.messages.filter(m => !m.content.includes('"type":"trail"')).map((m) => ({
+      role: m.role as 'user' | 'assistant', content: m.content,
+    })),
+    traceId: traceId.value,
+    conversationId: convStore.currentConvId!,
+    resume: true,
+    cb: makeCallbacks(convStore.messages.length),
+  })
+}
+
+function cancelConfirmPlan() {
+  confirmPlan.value = null
+  generating.value = false
+  finished.value = true
+}
 
 // ---- 上翻加载更早会话 ----
 const convRef = ref<HTMLElement | null>(null)
@@ -401,6 +427,10 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     onDegraded: () => {
       degraded.value = true
     },
+    onRequirement: (d) => {
+      console.log('[SSE] 收到需求文档:', (d.data as any)?.brand?.name)
+      requirementDoc.value = (d.data as Record<string, any>) || null
+    },
     onDone: () => {
       generating.value = false
       finished.value = true
@@ -443,6 +473,16 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       errorMsg.value = '暂不支持此功能，请尝试其他类型请求'
       clearActiveGen()
+    },
+    onPaused: (d: any) => {
+      if (d.stage === 'await_confirm') {
+        generating.value = false
+        confirmPlan.value = {
+          title: d.plan_title || '',
+          goal: d.plan_goal || '',
+          steps: d.plan_steps || [],
+        }
+      }
     },
     onError: (m) => {
       generating.value = false
@@ -487,6 +527,41 @@ async function doSend(text: string) {
   const cid = convStore.currentConvId!
   setActiveGen(cid, traceId.value)
 
+  // ---- WebLLM 上下文检测 ----
+  let contextHint: string | undefined
+  try {
+    const { contextCheck } = await import('../webllm/context')
+    contextHint = await contextCheck(text, convStore.messages.slice(-20).map(m => ({ role: m.role, content: m.content }))) || undefined
+  } catch { /* 降级 */ }
+
+  // ---- WebLLM 本地分类 ----
+  let intent: { level1: string; level2: string } | null = null
+  try {
+    const { localClassify } = await import('../webllm/classifier')
+    intent = await localClassify(text)
+  } catch { /* 降级: 走服务端 */ }
+
+  // ---- 本地闲聊(casual/explain) ----
+  if (intent && intent.level1 === 'learn' && intent.level2 === 'casual') {
+    try {
+      const { localChat } = await import('../webllm/chat')
+      const chatMsgs = convStore.messages.slice(-6).map(m => ({ role: m.role, content: m.content }))
+      const reply = await localChat([...chatMsgs, { role: 'user', content: text }])
+      if (reply) {
+        console.log(`[WebLLM] 本地闲聊完成 → 不走服务端`)
+        convStore.messages.push({ role: 'user', content: text, conversation_id: cid, id: 0, created_at: '' } as any)
+        convStore.messages.push({ role: 'assistant', content: reply, conversation_id: cid, id: 0, created_at: '' } as any)
+        nextTick(scrollToBottom)
+        return
+      }
+    } catch { /* 降级: 走服务端 */ }
+  }
+  if (intent) {
+    console.log(`[WebLLM] 分类结果: ${intent.level1}/${intent.level2} → 路由服务端`)
+  } else {
+    console.log('[WebLLM] 本地分类不可用 → 走服务端')
+  }
+
   // 乐观更新:先把用户消息 + 一个空 assistant 占位塞进消息列表,
   // 后续 token 事件直接累加到 assistant 占位上,实现"打字机"效果。
   convStore.messages.push({
@@ -512,12 +587,14 @@ async function doSend(text: string) {
 
   esRef.value = startChat({
     model: model.value,
-    messages: convStore.messages.map((m) => ({
+    messages: convStore.messages.slice(-20).map((m) => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
     })),
     traceId: traceId.value,
     conversationId: cid,
+    q: text,
+    contextHint,
     cb: makeCallbacks(assistantIdx),
   })
 }
@@ -533,7 +610,7 @@ async function resume(convId: number, tid: string) {
   setActiveGen(convId, tid)
   esRef.value = startChat({
     model: model.value,
-    messages: convStore.messages.map((m) => ({
+    messages: convStore.messages.slice(-20).map((m) => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
     })),
@@ -597,6 +674,13 @@ onMounted(async () => {
   await auth.init()
   const m = await fetchModels()
   if (m.length) models.value = m
+  // WebLLM 后台预热(不阻塞页面)
+  import('../webllm/engine').then(({ initEngine }) => {
+    initEngine((pct) => {
+      if (pct === 100) console.log('[WebLLM] 就绪')
+      else if (pct % 10 === 0) console.log(`[WebLLM] 下载 ${pct}%`)
+    })
+  }).catch(() => {})
   if (auth.user.value) {
     await projectStore.load()
     await loadCurrentProject()
@@ -773,6 +857,20 @@ watch(pendingRetry, (r) => {
           @stop="stop"
         />
         <div v-if="errorMsg" class="error">⚠ {{ errorMsg }}</div>
+        <!-- 方案确认对话框 -->
+        <div v-if="confirmPlan" class="confirm-plan">
+          <div class="cp-title">📋 AI 已生成方案，请确认后开始编写代码</div>
+          <div class="cp-body">
+            <div class="cp-goal">{{ confirmPlan.goal }}</div>
+            <ul class="cp-steps">
+              <li v-for="(s, i) in confirmPlan.steps" :key="i">{{ s }}</li>
+            </ul>
+          </div>
+          <div class="cp-actions">
+            <button class="cp-btn cp-confirm" @click="doConfirmPlan">✅ 确认生成</button>
+            <button class="cp-btn cp-cancel" @click="cancelConfirmPlan">取消</button>
+          </div>
+        </div>
         <div v-if="finished && !errorMsg" class="feedback">
           <span class="rate-label">评分 (1-10):</span>
           <template v-for="n in 10" :key="n">
@@ -820,6 +918,7 @@ watch(pendingRetry, (r) => {
         :generatedHtml="generatedHtml"
         :previewUrl="previewUrl"
         :projectId="projectStore.currentProjectId"
+        :requirementDoc="requirementDoc"
         @refresh="loadArtifacts"
       />
     </div>
@@ -933,6 +1032,24 @@ watch(pendingRetry, (r) => {
   padding: 8px 12px;
   margin-top: 8px;
 }
+.confirm-plan {
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 10px;
+  padding: 14px;
+  margin: 8px 0;
+}
+.cp-title { font-weight: 600; font-size: 14px; margin-bottom: 10px; color: #0369a1; }
+.cp-body { margin-bottom: 12px; }
+.cp-goal { font-size: 13px; color: #475569; margin-bottom: 8px; }
+.cp-steps { margin: 0; padding-left: 18px; }
+.cp-steps li { font-size: 12px; color: #64748b; line-height: 1.8; }
+.cp-actions { display: flex; gap: 8px; }
+.cp-btn { border: none; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; font-weight: 600; }
+.cp-confirm { background: #0284c7; color: #fff; }
+.cp-confirm:hover { background: #0369a1; }
+.cp-cancel { background: #f1f5f9; color: #64748b; }
+.cp-cancel:hover { background: #e2e8f0; }
 .feedback {
   display: flex;
   align-items: center;

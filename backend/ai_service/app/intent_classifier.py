@@ -18,16 +18,17 @@ from .providers import get_chat_model, resolve_fallback_order
 
 # ---- 两级分类 prompt ----
 INTENT_SYSTEM = (
-    "你是小白编码助手的意图分类器。根据用户输入, 只返回 JSON, 不要额外文字。\n"
+    "你是智能建站助手小胡的意图分类器。根据用户输入, 只返回 JSON, 不要额外文字。\n"
     '{"level1": "...", "level2": "...", "confidence": 0.0~1.0, "industry": "..."}\n\n'
     "level1(6选1): learn|code|build|doc|translate|unsupported\n\n"
     "level2(只选对应 level1 下的):\n"
-    "learn→explain(解释概念)|debug(排查报错,含代码)|compare(技术对比)|casual(闲聊)\n"
-    "code→snippet(写函数片段)|component(写UI组件)|fix(修Bug)|refactor(重构)\n"
-    "build→page(单页/落地页)|site(完整多页站)|modify(修改已有)|game(互动游戏)\n"
-    "doc→readme(README)|tutorial(教程)|plan(方案/设计)\n"
-    "translate→text(翻译文本)|code_lang(跨语言代码翻译)\n"
-    "unsupported→无子类\n\n"
+    "learn→explain(解释概念)|debug(排查报错)|compare(技术对比)|casual(闲聊)|design(UI设计配色)|search(搜索查资料)\n"
+    "code→snippet(写函数片段)|component(写UI组件)|fix(修Bug)|refactor(重构/评审)\n"
+    "build→page(单页)|site(完整站)|modify(修改已有)|game(互动游戏)\n"
+    "doc→readme(README)|tutorial(教程)|plan(方案设计)\n"
+    "translate→text(翻译)|code_lang(跨语言翻译)\n"
+    "unsupported→无子类\n"
+    "(注意: 后端开发/数据库/App/游戏引擎/运维部署等非网页前端需求 → unsupported)\n\n"
     "industry(12选1, build/doc 时必填, 其他填 none):\n"
     "restaurant(餐饮)|ecommerce(电商)|gov(政务)|edu(教育)|health(医疗)\n"
     "|finance(金融)|game(游戏)|personal(个人)|corp(企业)|tech(科技)|media(媒体)|other\n\n"
@@ -70,7 +71,8 @@ OLD_TO_LEVELS: dict[str, tuple[str, str]] = {
 }
 
 
-def classify(messages: list[dict], model_id: str = "hy3", checkpoint_info: dict | None = None) -> dict:
+def classify(messages: list[dict], model_id: str = "deepseek", checkpoint_info: dict | None = None,
+             conversation_id: int | None = None, context_hint: str = "") -> dict:
     """分类, 返回 {level1, level2, confidence, industry, checkpoint_relation}。"""
     last = ""
     for m in reversed(messages):
@@ -80,15 +82,23 @@ def classify(messages: list[dict], model_id: str = "hy3", checkpoint_info: dict 
     if not last.strip():
         return _default()
 
-    # 上下文捷径: 已有 HTML → modify
-    has_html = any(
-        m.get("role") == "assistant" and ("<html" in (m.get("content") or "").lower())
-        for m in messages
-    )
-    if has_html:
-        return _default(l1="build", l2="modify", conf=0.99, ind="other")
+    # 上下文关联: 前端的 context_hint 优先, 否则走 Chroma 向量检索
+    ctx_hint = context_hint
+    if not ctx_hint and conversation_id:
+        try:
+            from .rag import find_relevant_messages
+            relevant_ids = find_relevant_messages(last, conversation_id)
+            if relevant_ids:
+                # 取最近一条关联消息的 assistant 回复做摘要
+                relevant = [m for m in messages if m.get("_msg_id") in relevant_ids]
+                ctx_text = " ".join(m.get("content", "")[:200] for m in relevant[-6:])
+                context_hint = _summarize_context(ctx_text)
+        except Exception:
+            pass
+    if context_hint:
+        logger.info("意图分类 [上下文] hint=%.80s", context_hint)
+        last = f"用户输入: {last}\n上下文: {context_hint}"
 
-    # 构建 prompt(含断点上下文)
     sys_prompt = INTENT_SYSTEM
     if checkpoint_info:
         ck = checkpoint_info
@@ -195,6 +205,20 @@ def _keyword_fallback(text: str) -> dict:
         return dr("doc", "readme", industry)
     if any(w in t for w in ("教程", "指南", "tutorial", "步骤")):
         return dr("doc", "tutorial", industry)
+    # NEW: 设计/搜索/修复
+    if any(w in t for w in ("配色", "色调", "主色", "UI", "样式风格", "设计风格", "布局风格", "排版建议")):
+        return dr("learn", "design", industry)
+    if any(w in t for w in ("搜索", "查一下", "搜一下", "帮我搜", "search", "找一下")):
+        return dr("learn", "search", industry)
+    if any(w in t for w in ("修复", "修一下", "帮我修", "debug", "fix", "改bug", "不生效", "修bug")):
+        return dr("code", "fix")
+    if any(w in t for w in ("评审", "review", "检查代码", "看下代码", "优化建议", "能不能更好")):
+        return dr("code", "refactor")
+
+    # 非网页前端 → unsupported
+    if any(w in t for w in ("后端", "API", "数据库", "爬虫", "App", "iOS", "安卓", "Unity", "游戏引擎")):
+        return dr("unsupported", "", i="other")
+
     if any(w in t for w in ("方案", "计划", "设计", "架构")):
         return dr("doc", "plan", industry)
 
@@ -215,3 +239,24 @@ def _keyword_fallback(text: str) -> dict:
         return dr("learn", "casual")
 
     return dr("learn", "explain")
+
+
+def _summarize_context(text: str) -> str:
+    """从 assistant 回复中提取简短主题摘要。
+    取前 500 字做关键词匹配, 不调 LLM(零延迟)。
+    """
+    t = text[:500].lower()
+    keywords = [
+        ("天气", "天气"), ("温度", "天气"), ("下雨", "天气"), ("城市", "天气查询"),
+        ("网站", "网站制作"), ("网页", "网页制作"),
+        ("编程", "编程学习"), ("代码", "代码"), ("翻译", "翻译"),
+        ("教程", "教程"), ("文档", "文档"), ("游戏", "游戏开发"),
+        ("商城", "电商"), ("个人站", "个人网站"), ("博客", "博客"),
+        ("简历", "简历"), ("模板", "模板"), ("前端", "前端开发"),
+        ("颜色", "设计搭配"), ("配色", "设计搭配"), ("字体", "设计"),
+        ("布局", "页面布局"), ("部署", "部署上线"),
+    ]
+    for keyword, label in keywords:
+        if keyword in t:
+            return label
+    return ""

@@ -316,6 +316,16 @@ async def worker_loop(concurrency: int = 1):
             messages = job.get("messages", [])
             skill = job.get("skill")
 
+            conversation_id = job.get("conversation_id")
+
+            # 索引消息到 Chroma(向量上下文检测)
+            if conversation_id:
+                from .rag import index_message
+                logger.info("[Work] 索引 %d 条消息到向量库 conv=%s", len(messages), conversation_id)
+                for i, msg in enumerate(messages):
+                    idx = msg.get("_msg_id") or (conversation_id * 1000 + i)
+                    index_message(idx, conversation_id, msg.get("role", "user"), msg.get("content", ""))
+
             async def _cancelled(trace_id=trace_id):
                 return await q.is_cancelled(trace_id) if trace_id else False
 
@@ -327,10 +337,10 @@ async def worker_loop(concurrency: int = 1):
                         user_text = msg.get("content", "")[:200]
                         break
                 logger.info(
-                    "Worker 收到任务 trace=%s model=%s skill=%s msgs=%d input=%.100s",
-                    trace_id, model_id, skill or "auto", len(messages), user_text,
+                    "Worker 收到任务 trace=%s model=%s conv=%s skill=%s msgs=%d input=%.100s",
+                    trace_id, model_id, conversation_id, skill or "auto", len(messages), user_text,
                 )
-                intent = detect_intent(messages, model_id)
+                intent = detect_intent(messages, model_id, conversation_id=conversation_id, context_hint=job.get("context_hint", ""))
                 skill_name = skill or skill_for(intent["level1"], intent["level2"]) or "explain"
                 logger.info(
                     "意图识别结果 trace=%s -> %s/%s(conf=%.2f) industry=%s -> skill=%s",

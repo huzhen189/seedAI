@@ -6,18 +6,20 @@ import vue from '@vitejs/plugin-vue'
 export default defineConfig({
   plugins: [vue()],
   server: {
-    // host:true 允许通过域名(如 seedai.huzhen.net.cn)/局域网 IP 访问 dev server,
-    // 否则 vite 默认只绑 localhost,域名访问会被拒。
     host: true,
     port: 7100,
+    // WebLLM 需要 SharedArrayBuffer → 跨域隔离头
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    },
     // Vite 5.4+ 默认拦截非 localhost 的 Host 头(防 DNS 重绑定),
     // 本地 dev 用自定义域名访问需关闭该检查(仅本地开发,生产走 nginx 不受影响)。
     allowedHosts: true,
     proxy: {
       '/api': {
-        // 默认指向业务服务(7101);如需覆盖可用
-        // VITE_API_TARGET=http://localhost:xxxx npm run dev
-        target: process.env.VITE_API_TARGET || 'http://seedapi.huzhen.net.cn:7101',
+        // 默认指向业务服务(7101);如需覆盖可用 VITE_API_TARGET 环境变量
+        target: process.env.VITE_API_TARGET || 'http://localhost:7101',
         changeOrigin: true,
       },
       // 管理后台(§10):/admin/* 同样代理到业务服务(同源,Cookie 随请求自动携带)

@@ -22,7 +22,7 @@ logger = logging.getLogger("ai_service.provider")
 
 
 # 默认降级序(用户指定可覆盖,见 §13.2 / #31)
-FALLBACK_ORDER: List[str] = ["hy3", "qwen", "deepseek"]
+FALLBACK_ORDER: List[str] = ["deepseek", "hy3", "qwen"]
 
 
 class ModelUnavailableError(Exception):

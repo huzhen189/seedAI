@@ -100,7 +100,7 @@ export interface Message {
 }
 
 // ---- 消息 content 解析后的类型（content 为 JSON 字符串时） ----
-export type ContentData = PlainContent | SiteContent | CodeContent | ImageContent | ErrorContent
+export type ContentData = PlainContent | SiteContent | CodeContent | ImageContent | ErrorContent | TrailContent
 
 export interface PlainContent {
   type: 'plain'
@@ -133,6 +133,11 @@ export interface ImageContent {
 export interface ErrorContent {
   type: 'error'
   message: string
+}
+
+export interface TrailContent {
+  type: 'trail'
+  events: { event: string; data: Record<string, any> }[]
 }
 
 export interface Conversation {

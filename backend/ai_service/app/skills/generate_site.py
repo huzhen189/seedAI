@@ -336,6 +336,15 @@ async def generate_stream(
             goal=plan.get("goal", ""),
             steps=plan.get("steps", []),
         )
+        # 方案确认: 暂停等待用户确认后才开始生成代码
+        yield ev(
+            "paused",
+            stage="await_confirm",
+            plan_title=plan.get("title", ""),
+            plan_goal=plan.get("goal", ""),
+            plan_steps=plan.get("steps", []),
+        )
+        return  # 暂停, 等待前端发起 resume/confirm 续接
         # 检查取消(断点保存点 1: planner_done)
         if await _cancelled_now(is_cancelled):
             yield ev("checkpoint", stage="planner_done", data={

@@ -47,6 +47,12 @@ class Project(Base):
     )
     is_public: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     preview_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 项目级 System Prompt(动态积累: 每次对话后 LLM 提取关键信息追加)
+    system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 建站状态: draft → planning → planned → building → built
+    status: Mapped[str] = mapped_column(String(20), default="draft", server_default="draft")
+    # 需求文档 JSON(requirement_agent 产出)
+    requirement_doc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class Conversation(Base):

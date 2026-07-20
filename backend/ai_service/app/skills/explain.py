@@ -10,16 +10,54 @@ from ..registry import register_skill
 
 
 # 按 level2 子意图切换 System Prompt
+# 统一 System Prompt（小胡：纯HTML前端建站助手）
+SYS_BASE = (
+    "你叫小胡，是一个智能建站助手。你**只做网页HTML前端开发**，不涉及后端、数据库、服务器、App、游戏引擎、数据分析、运维部署等。\n"
+    "核心能力：从零搭建单文件HTML网站、改造已有页面、生成HTML/CSS/JS代码组件。\n"
+    "工作流程：先深度理解需求（行业/风格/功能），再出内容方案等用户确认，最后生成代码。\n"
+    "始终用中文交流，自称「小胡」，主动引导用户说出具体需求。\n"
+    "生成的代码要求：单文件HTML、响应式设计、现代UI风格、内联CSS/JS、语义化标签、可直接在浏览器打开运行。\n"
+    "如果用户提出后端/数据库/App/游戏等不属于网页前端的需求，礼貌告知这是纯建站助手，引导用户回到网页制作方向。"
+)
+
 SYS_PROMPTS: dict[str, str] = {
-    "explain": "你是编程入门导师，用通俗易懂的中文解释概念和知识点，多举实际例子。",
-    "debug": "你是资深 Debug 专家。根据用户贴的错误信息给出根因分析、修复方案和预防建议。用中文。",
-    "compare": "你是技术选型顾问。对比用户提到的技术方案，列出各自优劣、适用场景和推荐。用中文。",
-    "casual": "你叫小胡，是一个友好的AI编程助手。你对用户自称「小胡」，用轻松自然的语气回答。如果有人问你是谁，你说你是小胡，一个智能编程助手。",
+    "explain": SYS_BASE + "当前场景：用户想了解技术概念或方法。用通俗易懂的中文解释，多举建站相关的实际例子，引导用户说出具体需求。",
+    "debug": SYS_BASE + "当前场景：用户遇到了报错或bug。根据错误信息给出根因分析、修复方案和预防建议。如果是前端代码问题，直接给出修复后的完整代码。",
+    "compare": SYS_BASE + "当前场景：用户想对比技术方案。对比用户提到的选项（框架/模板/部署方式等），列出各自优劣、适用场景和具体推荐。",
+    "casual": SYS_BASE + "当前场景：用户在打招呼或闲聊。用轻松友好的语气回答。如果有人问你是谁，你说你是小胡，一个智能建站助手，可以帮用户从零搭建网站、修改页面、生成代码。介绍完能力后主动引导用户说出需求。",
     "text": "你是翻译专家。把用户提供的文本准确翻译到目标语言，只输出翻译结果。",
 }
 SYS_DEFAULT = SYS_PROMPTS["explain"]
 
 SKILL_LOG = logging.getLogger("ai_service.explain")
+
+
+def _sanitize_search(results: list, max_total: int = 1500) -> str:
+    """校验并格式化搜索结果: 去HTML标签/去空/截断/限总长。"""
+    import re
+    lines = []
+    total = 0
+    for r in results:
+        title = (r.get("title") or "").strip()
+        snippet = (r.get("snippet") or "").strip()
+        # 去 HTML 标签
+        snippet = re.sub(r"<[^>]+>", "", snippet)
+        # 去连续空白
+        snippet = re.sub(r"\s+", " ", snippet).strip()
+        if not title and not snippet:
+            continue
+        line = f"- {title}: {snippet}"[:300]
+        if total + len(line) > max_total:
+            break
+        lines.append(line)
+        total += len(line)
+    if not lines:
+        return ""
+    return (
+        "\n\n【联网搜索结果】\n"
+        + "\n".join(lines)
+        + "\n请结合以上实时信息回答。如果搜索结果不相关，请用自己的知识回答。"
+    )
 
 
 async def explain_skill(
@@ -43,19 +81,10 @@ async def explain_skill(
             from ..tools.web_search import web_search
             search_res = await web_search(user_query, top_k=3)
             if search_res.get("ok") and search_res.get("results"):
-                snippets = []
-                for r in search_res["results"][:3]:
-                    sn = f"- {r['title']}: {r['snippet']}"[:300]
-                    if r.get("url"):
-                        sn += f" ({r['url']})"
-                    snippets.append(sn)
-                if snippets:
-                    sys_prompt += (
-                        f"\n\n【联网搜索结果（{search_res.get('provider','?')}）】\n"
-                        + "\n".join(snippets)
-                        + "\n请结合以上实时信息回答用户的问题。如果搜索结果不相关，请用自己的知识回答。"
-                    )
-                    SKILL_LOG.info("[chat] 搜索增强 trace=%s provider=%s hits=%d", trace_id, search_res.get("provider"), len(snippets))
+                safe = _sanitize_search(search_res["results"])
+                if safe:
+                    sys_prompt += safe
+                    SKILL_LOG.info("[chat] 搜索增强 trace=%s provider=%s chars=%d", trace_id, search_res.get("provider"), len(safe))
         except Exception as e:
             SKILL_LOG.debug("[chat] 搜索增强跳过 trace=%s: %s", trace_id, e)
 

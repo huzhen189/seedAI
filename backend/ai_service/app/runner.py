@@ -31,7 +31,7 @@ async def run_skill(
         intent_info.get("level2") if intent_info else "?",
         len(messages),
     )
-    yield ev("node", stage="enter_router")
+    yield ev("node", stage="enter_router", agent_id=skill_name)
 
     # 意图信息透传给前端(两级 + 行业)
     if intent_info:
@@ -44,6 +44,7 @@ async def run_skill(
             level2_label=intent_info.get("level2_label"),
             confidence=intent_info.get("confidence"),
             industry=intent_info.get("industry"),
+            agent_id=skill_name,
         )
 
     # unsupported: 直接返回提示
@@ -64,7 +65,7 @@ async def run_skill(
         "▸ trace=%s 分发到 Skill: %s(is_graph=%s)",
         trace_id, entry.name, entry.is_graph,
     )
-    yield ev("node", stage="dispatch", skill=entry.name)
+    yield ev("node", stage="dispatch", skill=entry.name, agent_id=skill_name)
 
     # 参数透传(供 handler 按 level2/industry 调整行为)
     level2 = intent_info.get("level2") if intent_info else None

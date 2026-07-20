@@ -8,6 +8,7 @@ const props = defineProps<{
   generatedHtml: string
   previewUrl: string | null
   projectId: number | null
+  requirementDoc: Record<string, any> | null
 }>()
 
 const emit = defineEmits<{ refresh: [] }>()
@@ -63,7 +64,8 @@ function iconFor(name: string) {
   return map[e] || '📄'
 }
 
-function previewMode(name: string) {
+function previewMode(name: string): 'html' | 'image' | 'code' | 'requirement' {
+  if (name === '__requirement_doc__') return 'requirement'
   const e = ext(name)
   if (['html', 'htm'].includes(e)) return 'html'
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(e)) return 'image'
@@ -98,7 +100,10 @@ const currentFile = computed(() =>
     : allFiles.value.find(f => ext(f.name) === 'html') || allFiles.value[0]
 )
 
-const mode = computed(() => currentFile.value ? previewMode(currentFile.value.name) : 'none')
+const mode = computed(() => {
+  if (selectedFile.value === '__requirement_doc__') return 'requirement'
+  return currentFile.value ? previewMode(currentFile.value.name) : 'none'
+})
 </script>
 
 <template>
@@ -111,6 +116,20 @@ const mode = computed(() => currentFile.value ? previewMode(currentFile.value.na
   </div>
 
   <div v-if="!collapsed" class="right-body">
+    <!-- 需求文档(伪目录) -->
+    <div v-if="requirementDoc" class="req-tree">
+      <div class="tree-head">📋 需求文档</div>
+      <div
+        class="tree-item"
+        :class="{ active: selectedFile === '__requirement_doc__' }"
+        @click="selectFile('__requirement_doc__')"
+      >
+        <span class="tree-icon">📄</span>
+        <span class="tree-name">{{ requirementDoc.brand?.name || '需求文档' }}.txt</span>
+        <span class="tree-size">需求</span>
+      </div>
+    </div>
+
     <!-- 左侧文件树 -->
     <div class="file-tree">
       <div class="tree-head">📁 文件</div>
@@ -150,10 +169,48 @@ const mode = computed(() => currentFile.value ? previewMode(currentFile.value.na
         <img :src="currentFile.url" :alt="currentFile.name" />
       </div>
 
-      <!-- 代码/文本预览 — 从 artifact 的 file content 展示 -->
+      <!-- 代码/文本预览 -->
       <div v-else-if="mode === 'code'" class="pv-code">
         <div class="pv-code-head">{{ currentFile?.name }}</div>
         <pre><code>{{ (currentFile?.artifact.files?.[currentFile?.name || ''] as any)?.content || '(二进制文件，无法预览)' }}</code></pre>
+      </div>
+
+      <!-- 需求文档预览 -->
+      <div v-else-if="mode === 'requirement'" class="pv-requirement">
+        <div class="pv-code-head">📋 {{ requirementDoc?.brand?.name || '需求文档' }}</div>
+        <div class="req-body">
+          <div v-if="requirementDoc?.brand" class="req-section">
+            <h4>🏷 品牌</h4>
+            <p><strong>{{ requirementDoc.brand.name }}</strong> — {{ requirementDoc.brand.slogan }}</p>
+            <p class="req-intro">{{ requirementDoc.brand.intro }}</p>
+          </div>
+          <div v-if="requirementDoc?.target_user" class="req-section">
+            <h4>👥 目标用户</h4>
+            <p>{{ requirementDoc.target_user }}</p>
+          </div>
+          <div v-if="requirementDoc?.pages?.length" class="req-section">
+            <h4>📑 页面结构</h4>
+            <div v-for="p in requirementDoc.pages" :key="p.title" class="req-page">
+              <p><strong>{{ p.title }}</strong></p>
+              <ul v-if="p.sections?.length">
+                <li v-for="s in p.sections" :key="s.name">{{ s.name }}: {{ s.content?.substring(0, 60) }}</li>
+              </ul>
+            </div>
+          </div>
+          <div v-if="requirementDoc?.features?.length" class="req-section">
+            <h4>⚙ 功能清单</h4>
+            <div class="req-tags">
+              <span v-for="f in requirementDoc.features" :key="f" class="req-tag">{{ f }}</span>
+            </div>
+          </div>
+          <div v-if="requirementDoc?.design_style" class="req-section">
+            <h4>🎨 设计风格</h4>
+            <p>{{ requirementDoc.design_style }}
+              <span v-if="requirementDoc.color_scheme"
+                class="req-color" :style="{background: requirementDoc.color_scheme.primary}"></span>
+            </p>
+          </div>
+        </div>
       </div>
 
       <!-- 生成中占位 -->
@@ -324,4 +381,44 @@ const mode = computed(() => currentFile.value ? previewMode(currentFile.value.na
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- 需求文档 ---- */
+.req-tree {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+.req-tree .tree-head {
+  color: var(--accent, #6366f1);
+}
+.pv-requirement {
+  padding: 16px;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.pv-requirement h4 {
+  margin: 12px 0 4px;
+  font-size: 14px;
+  color: var(--text);
+}
+.req-intro {
+  color: var(--text-muted, #888);
+  font-size: 12px;
+}
+.req-page p { margin: 2px 0; }
+.req-page ul { margin: 0 0 8px 16px; }
+.req-page li { font-size: 12px; color: var(--text-muted, #666); }
+.req-tags {
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
+.req-tag {
+  background: var(--accent-light, #eef2ff);
+  color: var(--accent, #6366f1);
+  padding: 2px 8px; border-radius: 10px; font-size: 12px;
+}
+.req-color {
+  display: inline-block; width: 14px; height: 14px;
+  border-radius: 3px; vertical-align: middle; margin-left: 6px;
+  border: 1px solid var(--border);
+}
 </style>

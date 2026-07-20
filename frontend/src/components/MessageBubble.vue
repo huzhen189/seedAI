@@ -22,6 +22,17 @@ const isExpandable = computed(() =>
   data.value.type === 'plain' && data.value.text.length > 2000
 )
 
+const STAGE_LABELS: Record<string, string> = {
+  enter_router: '识别需求类型',
+  dispatch: '加载AI能力',
+  enter_planner: '制定方案',
+  enter_coder: '生成代码',
+  enter_reviewer: '评审校验',
+  previewing: '上传预览',
+  preview: '预览完成',
+  done: '完成',
+}
+
 function fmtTime(t: string): string {
   if (!t) return ''
   const d = new Date(t)
@@ -55,6 +66,16 @@ function fmtTime(t: string): string {
       </div>
       <!-- 错误消息 -->
       <div v-else-if="data.type === 'error'" class="error-card">⚠️ {{ data.message }}</div>
+      <!-- trail 思考过程 -->
+      <div v-else-if="data.type === 'trail'" class="trail-card">
+        <div v-for="(evt, i) in data.events" :key="i" class="trail-event">
+          <span class="trail-badge">{{ evt.event === 'node' ? '●' : evt.event === 'think' ? '💭' : evt.event === 'plan' ? '📋' : '🔍' }}</span>
+          <span v-if="evt.event === 'node'">{{ STAGE_LABELS[evt.data?.stage] || evt.data?.stage }}</span>
+          <span v-else-if="evt.event === 'think'">{{ evt.data?.content?.slice(0, 200) }}</span>
+          <span v-else-if="evt.event === 'plan'">{{ evt.data?.title }}</span>
+          <span v-else-if="evt.event === 'intent'">{{ evt.data?.level1 }}/{{ evt.data?.level2 }}</span>
+        </div>
+      </div>
       <!-- 兜底 -->
       <span v-else>{{ content }}</span>
     </div>
@@ -120,5 +141,24 @@ function fmtTime(t: string): string {
 .error-card {
   background: #fef2f2; border: 1px solid #fecaca;
   border-radius: 8px; padding: 8px 12px; color: #b91c1c; font-size: 13px;
+}
+
+/* ---- Trail Card ---- */
+.trail-card {
+  padding: 4px 0;
+}
+.trail-event {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 12px;
+  color: #64748b;
+}
+.trail-badge {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  font-size: 10px;
 }
 </style>

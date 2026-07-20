@@ -75,10 +75,11 @@ app.add_middleware(
 
 
 class GenerateReq(BaseModel):
-    model_id: str = "hy3"
+    model_id: str = "deepseek"
     messages: list
-    skill: str | None = None  # 可显式指定 Skill,否则由 Router 意图判定
+    skill: str | None = None
     trace_id: str | None = None
+    conversation_id: int | None = None
 
 
 @app.get("/health")
@@ -89,6 +90,12 @@ async def health():
 @app.get("/models")
 async def models():
     return list_providers()
+
+
+@app.get("/agents")
+async def list_agents():
+    from .agents import AGENTS
+    return AGENTS
 
 
 @app.get("/skills")
@@ -136,6 +143,7 @@ async def generate(req: GenerateReq, after: str | None = None):
             "model_id": req.model_id,
             "messages": req.messages,
             "skill": req.skill,
+            "conversation_id": req.conversation_id,
         }
         await q.enqueue(job)
         logger.info(

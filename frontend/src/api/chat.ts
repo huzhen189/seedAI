@@ -16,7 +16,8 @@ export interface ChatCallbacks {
   onRetry?: (data: RetryEvent) => void
   /** 用户断开连接, 已保存断点(data 含 stage/progress) */
   onPaused?: (data: Record<string, unknown>) => void
-  /** 意图识别结果(7 类: chat/doc/generate/modify/translate/code/unsupported) */
+  onRequirement?: (data: Record<string, unknown>) => void
+  /** 多选项(requirement_agent 出方案) */
   onIntent?: (data: IntentEvent) => void
   /** 不支持的功能提示(意图不属于已知范围) */
   onUnsupported?: (data: UnsupportedEvent) => void
@@ -28,11 +29,10 @@ export interface StartChatOptions {
   traceId: string
   conversationId: number
   cb: ChatCallbacks
-  /** 断点续传:指定后仅回放该 stream id 之后的增量(留空=全量回放)。 */
+  q?: string
+  contextHint?: string
   after?: string
-  /** 断点续跑: 设为 true 则注入 checkpoint_data */
   resume?: boolean
-  /** 更正模式: 基于上次结果微调 */
   correct?: boolean
 }
 
@@ -43,6 +43,8 @@ export function startChat(opts: StartChatOptions): EventSource {
   params.set('messages', JSON.stringify(opts.messages))
   params.set('trace_id', opts.traceId)
   params.set('conversation_id', String(opts.conversationId))
+  if (opts.q) params.set('q', opts.q)
+  if (opts.contextHint) params.set('context_hint', opts.contextHint)
   if (opts.after) params.set('after', opts.after)
   if (opts.resume) params.set('resume', 'true')
   if (opts.correct) params.set('correct', 'true')
@@ -65,6 +67,7 @@ export function startChat(opts: StartChatOptions): EventSource {
   es.addEventListener('intent', (e) => opts.cb.onIntent?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('unsupported', (e) => opts.cb.onUnsupported?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('paused', (e) => opts.cb.onPaused?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('requirement_doc', (e) => opts.cb.onRequirement?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('token', (e) => {
     const d = safeParse((e as MessageEvent).data)
     const text = typeof d.data === 'string' ? d.data : (e as MessageEvent).data
