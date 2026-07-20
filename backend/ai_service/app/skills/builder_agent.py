@@ -86,19 +86,26 @@ async def builder_agent_handler(
     html = _extract_html("".join(html_parts))
     AGENT_LOG.info("[builder] 代码生成完成 html_len=%d", len(html))
 
-    # Preview
+    # Preview (COS 上传 + 日志 + 统计)
     yield ev("node", stage="previewing", agent_id="builder_agent")
+    url = None
     try:
         from ..tools.cos_upload import cos_upload
+        AGENT_LOG.info("[builder] 开始COS上传 trace=%s size=%d", trace_id, len(html))
         art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
         site_dir = art_dir / "sites" / (trace_id or "site")
         site_dir.mkdir(parents=True, exist_ok=True)
         (site_dir / "index.html").write_text(html, encoding="utf-8")
-        res = cos_upload(str(site_dir / "index.html"), f"previews/{trace_id or 'site'}/index.html")
-        url = res.get("url") if res.get("ok") else None
-    except Exception:
-        url = None
-    AGENT_LOG.info("[builder] 预览 url=%s", url)
+        cos_key = f"previews/{trace_id or 'site'}/index.html"
+        res = cos_upload(str(site_dir / "index.html"), cos_key)
+        if res.get("ok"):
+            url = res.get("url")
+            AGENT_LOG.info("[builder] COS上传成功 url=%s", url)
+        else:
+            AGENT_LOG.warning("[builder] COS上传失败 res=%s", res)
+    except Exception as e:
+        AGENT_LOG.warning("[builder] COS上传异常: %s", e)
+    AGENT_LOG.info("[builder] 预览投递 url=%s", url or "(无)")
     yield ev("node", stage="preview", url=url, fallback="srcdoc" if not url else None, agent_id="builder_agent")
     yield ev("node", stage="done", agent_id="builder_agent")
 

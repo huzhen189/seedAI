@@ -325,6 +325,23 @@ P_PROJECT_STATUS = "an:project:status"  # 项目状态流转
 P_REQUIREMENT = "an:requirement"  # 需求文档生成
 P_CONTEXT = "an:context"          # 上下文检测方式
 P_WEBLLM = "an:webllm"           # WebLLM 本地推理
+P_COS = "an:cos"                  # COS 上传统计
+
+
+async def record_cos_upload(ok: bool, size_bytes: int = 0, elapsed_ms: float = 0) -> None:
+    """COS 上传统计: 成功/失败 + 文件大小 + 延迟"""
+    try:
+        r = await get_redis()
+        await r.hincrby(P_COS, "ok" if ok else "fail", 1)
+        if ok and size_bytes > 0:
+            await r.hincrby(f"{P_COS}:total_bytes", "sum", size_bytes)
+            await r.hincrby(f"{P_COS}:total_bytes", "count", 1)
+        if elapsed_ms > 0:
+            zkey = f"{P_COS}:latency"
+            await r.zadd(zkey, {uuid.uuid4().hex: elapsed_ms})
+            await r.zremrangebyrank(zkey, 0, -(LATENCY_MAX_SAMPLES + 1))
+    except Exception as e:
+        logger.warning("analytics record_cos_upload failed: %s", e)
 
 
 async def record_agent_usage(agent_id: str, status: str, elapsed_ms: float = 0) -> None:
