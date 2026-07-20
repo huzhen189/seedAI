@@ -31,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .analytics import record_error, record_intent_result, record_model_detail, record_skill_outcome, record_user_active
+from .analytics import record_agent_usage, record_context_detection, record_requirement_doc, record_project_status_transition
 from .cache import cache_get, cache_set, ck_delete, ck_get, ck_set, enqueue_write_error
 from .config import settings
 from .db import get_db
@@ -376,6 +377,10 @@ async def chat(
     ctx = request.query_params.get("context_hint")
     if ctx:
         payload["context_hint"] = ctx
+        logger.info("[chat] 上下文检测 frontend_context=%.80s", ctx)
+        await record_context_detection("webllm")
+    else:
+        await record_context_detection("chroma")
     gen_url = f"{settings.ai_service_url}/generate"
     # 项目上下文: 状态+需求文档
     try:
