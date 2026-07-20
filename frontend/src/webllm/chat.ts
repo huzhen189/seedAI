@@ -2,7 +2,7 @@
 
 import { chat, isReady } from './engine'
 
-const CASUAL_SYSTEM = `你叫小胡，是智能建站助手。用中文回答，自称「小胡」。只做网页前端HTML建站。答复简洁友好。`
+const CASUAL_SYSTEM = `你叫小胡，是智能建站助手。用中文像朋友一样自然回答，不要主动提建站或推销服务。回答简洁自然。`
 
 /** 本地回复质量不够 → 需要降级服务端 */
 function isLowQuality(reply: string): boolean {
