@@ -27,7 +27,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .analytics import record_error, record_intent_result, record_model_detail, record_skill_outcome, record_user_active
@@ -168,59 +168,84 @@ def _map_upstream_error(status: int, body: bytes) -> tuple[str, str]:
 
 
 async def _build_messages_from_db(db: AsyncSession, conversation_id: int, request: Request) -> list:
-    """从 DB 取最近 20 条消息 + 当前 q，替代前端传 messages（避开 URL 64KB 限制）。"""
+    """从 Redis → MySQL 取最近 5 条消息 + 当前 q。
+
+    - Redis 优先(10 min TTL)，命中后刷新 TTL(滑动过期)
+    - Redis miss → MySQL 按 id 降序取 5 条，回填 Redis
+    - 支持 cursor_id 分页(message_id 作为排序/分页起始位置)
+    - user_id 作用域: conversation 已绑定 project→user，无需额外过滤
+    """
+    cursor_id = request.query_params.get("cursor_id")
+    try:
+        cursor_id = int(cursor_id) if cursor_id else None
+    except (ValueError, TypeError):
+        cursor_id = None
+
+    redis_key = f"chat:msgs:{conversation_id}:{cursor_id or 'latest'}"
+    r = await get_redis()
+
+    # ── 1) Redis ──
+    try:
+        cached = await r.get(redis_key)
+        if cached:
+            messages = json.loads(cached)
+            await r.expire(redis_key, 600)
+            logger.info("[chat] Redis命中 conv=%d cursor=%s cnt=%d TTL已刷新",
+                       conversation_id, cursor_id or 'latest', len(messages))
+            return _append_q(messages, request, from_cache=True)
+    except Exception as e:
+        logger.warning("[chat] Redis读失败 conv=%d err=%s", conversation_id, e)
+
+    # ── 2) MySQL ──
     messages: list = []
     if conversation_id:
         try:
-            db_msgs = await message_repo.list_by_conversation(db, conversation_id)
-            if db_msgs:
-                for m in db_msgs[-20:]:
-                    content = m.content or ""
-                    if len(content) > 2000:
-                        content = content[:2000] + "...(已截断)"
-                    messages.append({"role": m.role, "content": content})
-                logger.info("[chat] DB取消息 conv=%d total=%d 取最近%d", conversation_id, len(db_msgs), len(messages))
+            stmt = select(Message).where(Message.conversation_id == conversation_id)
+            if cursor_id:
+                stmt = stmt.where(Message.id < cursor_id)
+            stmt = stmt.order_by(desc(Message.id)).limit(5)
+            result = await db.execute(stmt)
+            db_msgs = list(result.scalars().all())
+            db_msgs.reverse()  # 恢复时间线升序
+            for m in db_msgs:
+                content = m.content or ""
+                if len(content) > 2000:
+                    content = content[:2000] + "...(已截断)"
+                messages.append({"role": m.role, "content": content})
+            logger.info("[chat] MySQL回源 conv=%d cursor=%s db_total_fetched=%d",
+                       conversation_id, cursor_id or 'latest', len(messages))
         except Exception as e:
-            logger.warning("[chat] DB取消息失败 conv=%d err=%s", conversation_id, e)
+            logger.warning("[chat] MySQL查询失败 conv=%d err=%s", conversation_id, e)
 
-    # 追加当前用户输入(首条消息或新消息)
+    # ── 3) 回填 Redis ──
+    if messages:
+        try:
+            await r.set(redis_key, json.dumps(messages, ensure_ascii=False), ex=600)
+            logger.info("[chat] Redis回填 conv=%d cursor=%s cnt=%d TTL=600s",
+                       conversation_id, cursor_id or 'latest', len(messages))
+        except Exception as e:
+            logger.warning("[chat] Redis回填失败 conv=%d err=%s", conversation_id, e)
+
+    # ── 4) 追加当前输入 ──
+    return _append_q(messages, request)
+
+
+def _append_q(messages: list, request: Request, *, from_cache: bool = False) -> list:
+    """追加当前用户输入(非 cache 路径才需要, cache 已含历史)。"""
+    if from_cache:
+        return messages
     q = request.query_params.get("q")
     if q:
-        # 避免重复: 如果最后一条消息恰好是同样的 user 内容则不追加
         if not messages or messages[-1].get("role") != "user" or messages[-1].get("content") != q:
             messages.append({"role": "user", "content": q})
             logger.info("[chat] 追加当前用户输入 q=%.60s", q)
-
     if not messages:
         raise HTTPException(status_code=400, detail="missing 'q' query param and no history")
-
     logger.info("[chat] 最终消息数=%d", len(messages))
     return messages
 
 
-def _parse_messages(request: Request) -> list:
-    """从 query 解析消息列表。
-
-    支持三种来源(优先级从高到低):
-      1. messages=urlencode(JSON 数组)   —— 多轮对话标准格式
-      2. q=单条用户消息                    —— 单轮便捷入口
-      3. message=单条用户消息              —— 兼容别名
-    都不存在则 400。
-    """
-    raw = request.query_params.get("messages")
-    if raw:
-        try:
-            msgs = json.loads(raw)
-            if isinstance(msgs, list) and len(msgs) > 0:
-                return msgs
-        except Exception:
-            pass  # 解析失败回退到单条
-
-    single = request.query_params.get("q") or request.query_params.get("message")
-    if single:
-        return [{"role": "user", "content": single}]
-
-    raise HTTPException(status_code=400, detail="missing 'messages' or 'q' query param")
+# ── 路由定义 ──
 
 
 @router.get("/models")
