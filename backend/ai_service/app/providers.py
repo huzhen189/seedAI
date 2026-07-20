@@ -130,6 +130,8 @@ def get_chat_model(model_id: str, streaming: bool = True) -> ChatOpenAI:
         streaming=streaming,
         temperature=0.7,
         max_tokens=4096,
+        request_timeout=30,    # 30秒超时,防止 API 卡死
+        max_retries=1,         # 失败重试 1 次
     )
 
 
