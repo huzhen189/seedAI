@@ -587,7 +587,7 @@ async function doSend(text: string) {
     model: model.value,
     messages: convStore.messages.slice(-20).map((m) => ({
       role: m.role as 'user' | 'assistant',
-      content: m.content,
+      content: (m.content || '').length > 2000 ? (m.content || '').substring(0, 2000) + '...(已截断)' : (m.content || ''),
     })),
     traceId: traceId.value,
     conversationId: cid,
@@ -610,7 +610,7 @@ async function resume(convId: number, tid: string) {
     model: model.value,
     messages: convStore.messages.slice(-20).map((m) => ({
       role: m.role as 'user' | 'assistant',
-      content: m.content,
+      content: (m.content || '').length > 2000 ? (m.content || '').substring(0, 2000) + '...(已截断)' : (m.content || ''),
     })),
     traceId: tid,
     conversationId: convId,
