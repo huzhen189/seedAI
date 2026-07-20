@@ -970,8 +970,8 @@ watch(pendingRetry, (r) => {
 }
 .toggle-btn {
   background: none; border: none; cursor: pointer;
-  font-size: 14px; color: var(--text-muted);
-  padding: 0; line-height: 1;
+  font-size: 18px; color: var(--text-muted); font-weight: bold;
+  padding: 8px 12px; line-height: 1;
 }
 .toggle-label {
   writing-mode: vertical-rl;

@@ -32,9 +32,13 @@ function pickSearch(item: any) {
 <template>
   <aside class="sidebar" :class="{ collapsed }">
     <div class="actions">
-      <button class="act" title="新建项目" @click="newProject">＋</button>
-      <button class="act" title="搜索" @click="showSearch = !showSearch">🔍</button>
-      <button class="act" title="收起/展开" @click="emit('toggle')">«</button>
+      <template v-if="!collapsed">
+        <button class="act" title="新建项目" @click="newProject">＋</button>
+        <button class="act" title="搜索" @click="showSearch = !showSearch">🔍</button>
+      </template>
+      <button class="act toggle-btn" :title="collapsed ? '展开' : '收起'" @click="emit('toggle')">
+        {{ collapsed ? '▶' : '◀' }}
+      </button>
     </div>
 
     <div v-if="showSearch && !collapsed" class="searchbox">
@@ -104,6 +108,16 @@ function pickSearch(item: any) {
   padding: 6px 0;
   cursor: pointer;
   font-size: 14px;
+}
+.act.toggle-btn {
+  flex: 0;
+  font-size: 18px;
+  font-weight: bold;
+  padding: 8px 12px;
+}
+.sidebar.collapsed .actions {
+  flex-direction: column;
+  gap: 4px;
 }
 .searchbox {
   padding: 8px;

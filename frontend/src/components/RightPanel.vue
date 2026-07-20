@@ -42,7 +42,7 @@ function stopRetry() {
 onMounted(() => { if (uploading.value) startRetry() })
 onUnmounted(() => stopRetry())
 
-const collapsed = ref(false)
+
 const selectedFile = ref<string | null>(null)
 
 function ext(name: string) {
