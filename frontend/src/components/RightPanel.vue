@@ -107,9 +107,9 @@ const mode = computed(() => {
 </script>
 
 <template>
-  <div class="right-body">
-    <!-- 需求文档(伪目录) -->
-    <div v-if="requirementDoc" class="req-tree">
+  <div class="rp-body">
+  <!-- 需求文档(伪目录) -->
+  <div v-if="requirementDoc" class="req-tree">
       <div class="tree-head">📋 需求文档</div>
       <div
         class="tree-item"
@@ -239,7 +239,7 @@ const mode = computed(() => {
 }
 .toggle-label { font-size: 12px; color: var(--muted); margin-left: 6px; }
 
-.right-body {
+.rp-body {
   flex: 1;
   display: flex;
   min-height: 0;
