@@ -227,10 +227,14 @@ interface AnalyticsSnapshot {
   api_latency: Record<string, LatencyBucket>
   frontend_perf: Record<string, LatencyBucket>
   generation_rate: { total: number; done: number; rate: number }
+  error_stats?: Record<string, number>
+  model_stats?: Record<string, { total: number; ok: number; fail: number; rate: number }>
+  user_stats?: { dau_today: number; active_users: number; total_generations: number; avg_per_user: number }
   error?: string
 }
 const al = ref<AnalyticsSnapshot | null>(null)
 const alLoading = ref(false)
+let alTimer: ReturnType<typeof setInterval> | null = null
 
 async function fetchAnalytics() {
   alLoading.value = true
@@ -238,6 +242,10 @@ async function fetchAnalytics() {
     al.value = await get('/admin/analytics')
   } catch { /* ignore */ }
   finally { alLoading.value = false }
+}
+
+const ERROR_LABELS: Record<string, string> = {
+  rate_limited: '配额限流', model_unavailable: '模型不可用', upstream_error: '上游故障', timeout: '超时', unknown: '未分类',
 }
 
 const PERF_LABELS: Record<string, string> = {
@@ -264,7 +272,14 @@ onMounted(() => {
   fetchQuality()
   fetchTraces()
 })
-watch(activeTab, (t) => { if (t === 'analytics' && !al.value) fetchAnalytics() })
+watch(activeTab, (t) => {
+  if (t === 'analytics') {
+    if (!al.value) fetchAnalytics()
+    if (!alTimer) alTimer = setInterval(fetchAnalytics, 15000)
+  } else {
+    if (alTimer) { clearInterval(alTimer); alTimer = null }
+  }
+})
 onUnmounted(() => {
   es?.close()
 })
@@ -515,6 +530,27 @@ onUnmounted(() => {
             <span class="rate-sub">({{ al.generation_rate.done }}/{{ al.generation_rate.total }})</span>
           </div>
         </div>
+        <div v-if="al.error_stats && Object.keys(al.error_stats).length" class="block">
+          <h4>错误分布</h4>
+          <table class="atable"><thead><tr><th>类型</th><th>次数</th></tr></thead>
+            <tbody><tr v-for="(v, k) in al.error_stats" :key="k"><td>{{ ERROR_LABELS[k] || k }}</td><td>{{ v }}</td></tr></tbody>
+          </table>
+        </div>
+        <div v-if="al.model_stats && Object.keys(al.model_stats).length" class="block">
+          <h4>模型分布</h4>
+          <table class="atable"><thead><tr><th>模型</th><th>成功</th><th>失败</th><th>成功率</th></tr></thead>
+            <tbody><tr v-for="(v, k) in al.model_stats" :key="k"><td>{{ k }}</td><td>{{ v.ok }}</td><td>{{ v.fail }}</td><td>{{ (v.rate * 100).toFixed(0) }}%</td></tr></tbody>
+          </table>
+        </div>
+        <div v-if="al.user_stats" class="block">
+          <h4>用户活跃</h4>
+          <div class="card-row">
+            <div class="card"><div class="k">今日DAU</div><div class="v">{{ al.user_stats.dau_today }}</div></div>
+            <div class="card"><div class="k">活跃用户</div><div class="v">{{ al.user_stats.active_users }}</div></div>
+            <div class="card"><div class="k">总生成</div><div class="v">{{ al.user_stats.total_generations }}</div></div>
+            <div class="card"><div class="k">人均生成</div><div class="v">{{ al.user_stats.avg_per_user }}</div></div>
+          </div>
+        </div>
       </template>
       <p v-if="!al && !alLoading" class="muted">点击刷新加载分析数据</p>
     </section>
@@ -675,6 +711,9 @@ onUnmounted(() => {
   margin-top: 6px;
   color: #1e293b;
 }
+.card-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.card-row .card { min-width: 120px; flex: 1; }
+.card-row .v { font-size: 18px; }
 .card .v.err {
   color: var(--err);
 }

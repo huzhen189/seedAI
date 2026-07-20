@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import Boolean, DateTime, Integer, String, Text, JSON
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -81,8 +82,8 @@ class Message(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     conversation_id: Mapped[int] = mapped_column(Integer, index=True)
-    role: Mapped[str] = mapped_column(String(16))  # user | assistant
-    content: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(String(16), default="user")  # user | assistant
+    content: Mapped[str] = mapped_column(MEDIUMTEXT)  # 16MB, 建站产物可能很大
     model_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     # 链路 id:同一 trace_id 的多次(重连/续传)SSE 落库据此幂等 —— 用户消息只插一次,
     # assistant 消息按 trace_id upsert,避免刷新/重连导致重复行(§15.3 / 重连机制)。
@@ -168,6 +169,10 @@ class Artifact(Base):
     conversation_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     trace_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    repo: Mapped[Optional[str]] = mapped_column(String(32), default="site")  # site | code | image | doc
     # files: JSON 数组 [{name, size, url}], 后续多文件生成可扩展
     files: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    preview_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    download_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="uploading")  # uploading | done | failed
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

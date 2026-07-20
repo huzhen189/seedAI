@@ -22,20 +22,24 @@ import logging
 import uuid
 from datetime import datetime
 
+import asyncio
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .analytics import record_error, record_intent_result, record_model_detail, record_skill_outcome, record_user_active
+from .cache import cache_get, cache_set, ck_delete, ck_get, ck_set, enqueue_write_error
 from .config import settings
 from .db import get_db
 from .metrics import consume_daily_quota, record_model_usage, record_unsupported
 from .models import Artifact, Conversation, Message, Project, User
+from .repos.business_repos import conv_repo, message_repo
+from .repos.trace_repos import feedback_repo, trace_repo
 from .schemas import FeedbackReq
-from .security import ACCESS_COOKIE, CurrentUser, decode_token, get_current_user
+from .security import ACCESS_COOKIE, CurrentUser, _set_access_cookie, create_access_token, decode_token, get_current_user
 from .tracing import append_trace_event, create_trace, finish_trace, log_usage
 
 import html as _html
@@ -80,10 +84,11 @@ logger = logging.getLogger("proxy")
 _bearer = HTTPBearer(auto_error=False)
 
 
-async def _resolve_user(request: Request) -> CurrentUser | None:
+async def _resolve_user(request: Request, response: Response | None = None) -> CurrentUser | None:
     """手动解析登录态(避免直接调用带 Depends 的 get_current_user)。
 
-    返回 None 表示未登录 / token 无效;前端据此收到 SSE auth error 事件。
+    返回 None 表示未登录 / token 无效;前端据此得到 SSE auth error 事件。
+    若 response 传入且 token 剩余 <10min, 自动续期 Cookie(滑动过期)。
     """
     token = request.cookies.get(ACCESS_COOKIE)
     if not token:
@@ -99,7 +104,15 @@ async def _resolve_user(request: Request) -> CurrentUser | None:
         payload = decode_token(token)
         if payload.get("type") != "access":
             return None
-        return CurrentUser(int(payload["sub"]), payload.get("role", "user"))
+        user = CurrentUser(int(payload["sub"]), payload.get("role", "user"))
+        # 滑动过期
+        if response is not None:
+            exp = payload.get("exp", 0)
+            now_ts = datetime.now(timezone.utc).timestamp()
+            if exp - now_ts < 600:
+                new_token = create_access_token(user.id, user.role)
+                _set_access_cookie(response, new_token)
+        return user
     except Exception:
         return None
 
@@ -179,16 +192,84 @@ def _parse_messages(request: Request) -> list:
 
 @router.get("/models")
 async def list_models():
-    """透传 AI 服务的模型列表(匿名可读,供前端模型选择器使用)。"""
+    """透传 AI 服务的模型列表(匿名可读, 供前端模型选择器使用)。Redis 缓存 300s。"""
+    cache_key = "cache:models"
+    cached = await cache_get(cache_key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.get(f"{settings.ai_service_url}/models")
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+    # 回填缓存(300s TTL, 模型列表极少变动)
+    await cache_set(cache_key, json.dumps(data, ensure_ascii=False), ttl=1500)
+    return data
+
+
+async def _sync_checkpoint_to_mysql(conversation_id: int, stage: str,
+                                        ck_data: dict, progress_pct: int) -> None:
+    """后台异步: 将 Redis checkpoint 同步到 MySQL(不阻塞 SSE)"""
+    try:
+        from .db import SessionLocal as _S
+        async with _S() as s:
+            conv = await conv_repo.get_by_id(s, conversation_id)
+            if conv:
+                await conv_repo.update(s, conv,
+                    status="paused", checkpoint_stage=stage,
+                    checkpoint_data=json.dumps(ck_data, ensure_ascii=False),
+                    progress_pct=progress_pct)
+    except Exception as e:
+        logger.warning("[chat] checkpoint MySQL 同步失败 conv=%s: %s", conversation_id, e)
+
+
+async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
+                      terminal_status: str, user_text: str, assistant_text: str,
+                      preview_url: str | None = None) -> None:
+    """后台异步落库(独立 session, 3 次重试, 全失败入 Redis 错误队列兜底)"""
+    from .db import SessionLocal as _S
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            logger.info("[chat] 后台落库开始 trace=%s attempt=%d", tid, attempt + 1)
+            async with _S() as s:
+                await finish_trace(s, tid, terminal_status, max(0, len(assistant_text) // 4))
+                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url)
+                # 流结束(done/aborted/error)清理 Redis checkpoint; paused 保留供恢复
+                if terminal_status != "paused":
+                    await ck_delete(conversation_id)
+                logger.info("[chat] 后台落库完成 trace=%s", tid)
+                return  # 成功, 直接返回
+        except Exception as e:
+            last_err = e
+            logger.warning("[chat] 后台落库失败 trace=%s attempt=%d: %s", tid, attempt + 1, e)
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)  # 1s, 2s 指数退避
+    # 3 次全部失败: 入 Redis 错误队列兜底
+    logger.error("[chat] 后台落库最终失败(3次) trace=%s: %s", tid, last_err)
+    try:
+        await enqueue_write_error({
+            "type": "persist_chat",
+            "trace_id": tid,
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "model": model,
+            "terminal_status": terminal_status,
+            "user_text": user_text,
+            "assistant_text": assistant_text,
+            "preview_url": preview_url,
+            "failed_at": datetime.utcnow().isoformat(),
+        })
+    except Exception:
+        logger.critical("[chat] 错误队列写入也失败 trace=%s — 数据丢失!", tid)
 
 
 @router.get("/chat")
 async def chat(
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     model: str = Query("hy3", description="模型 id,默认主模型 hy3"),
     conversation_id: int = Query(..., description="会话 id,必填(前端先建会话)"),
@@ -206,7 +287,7 @@ async def chat(
     以便前端 EventSource 识别并主动弹出登录框。
     """
     # --- 1) 鉴权 ---
-    user = await _resolve_user(request)
+    user = await _resolve_user(request, response)
     if user is None:
         logger.info("[chat] 鉴权失败 — 未登录或 token 无效")
         return _sse_auth_error()
@@ -219,15 +300,20 @@ async def chat(
         if m.get("role") == "user" and isinstance(m.get("content"), str):
             m["content"] = _sanitize_input(m["content"])
     tid = trace_id or uuid.uuid4().hex
+    # 取最后一条用户消息(前端发送的是完整消息历史, 首条不是当前)
     user_text = ""
-    for m in messages:
+    for m in reversed(messages):
         if m.get("role") == "user":
             user_text = m.get("content", "") or ""
             break
     logger.info(
-        "[chat] trace=%s conv=%s model=%s 消息数=%s 首条=%.60s",
-        tid, conversation_id, model, len(messages), user_text,
+        "[chat] ▶ 请求 trace=%s conv=%s model=%s 消息数=%s",
+        tid, conversation_id, model, len(messages),
     )
+    for i, m in enumerate(messages):
+        role = m.get("role", "?")
+        content = m.get("content", "")
+        logger.info("[chat]   消息[%d] role=%s len=%d content=%.500s", i, role, len(content), content)
 
     # --- 3) 配额检查 ---
     plan = (
@@ -254,23 +340,32 @@ async def chat(
         from urllib.parse import urlencode
         gen_url += "?" + urlencode({"after": after})
 
-    # 断点续跑(§7): 注入 checkpoint_data + resume_mode
+    # 断点续跑(§7): 注入 checkpoint_data + resume_mode。Redis 优先, MySQL 兜底。
     if resume:
-        conv = await db.get(Conversation, conversation_id)
-        if conv and conv.checkpoint_data and conv.status == "paused":
-            try:
-                ck = json.loads(conv.checkpoint_data)
-                payload["checkpoint"] = ck
-                payload["resume_mode"] = "correct" if correct else "resume"
-                # 将 checkpoint 中的 messages 合并到消息列表(messages 是用户新输入 + 断点的旧对话)
-                if ck.get("messages"):
-                    payload["messages"] = ck["messages"] + messages
-                logger.info(
-                    "[chat] 断点恢复 trace=%s stage=%s mode=%s",
-                    tid, conv.checkpoint_stage, payload.get("resume_mode"),
-                )
-            except json.JSONDecodeError:
-                logger.warning("[chat] checkpoint_data 解析失败, 降级为普通对话")
+        ck_data = None
+        ck_stage = "?"
+        # ① 先查 Redis(热路径, <1ms)
+        ck_redis = await ck_get(conversation_id)
+        if ck_redis and ck_redis.get("status") == "paused":
+            ck_data = ck_redis.get("data")
+            ck_stage = ck_redis.get("stage", "?")
+            logger.info("[chat] 断点恢复(Redis) trace=%s stage=%s", tid, ck_stage)
+        else:
+            # ② Redis 未命中, 回退 MySQL
+            conv = await db.get(Conversation, conversation_id)
+            if conv and conv.checkpoint_data and conv.status == "paused":
+                try:
+                    ck_data = json.loads(conv.checkpoint_data)
+                    ck_stage = conv.checkpoint_stage or "?"
+                    logger.info("[chat] 断点恢复(MySQL) trace=%s stage=%s", tid, ck_stage)
+                except json.JSONDecodeError:
+                    logger.warning("[chat] checkpoint_data 解析失败, 降级为普通对话")
+        if ck_data:
+            payload["checkpoint"] = ck_data
+            payload["resume_mode"] = "correct" if correct else "resume"
+            if isinstance(ck_data, dict) and ck_data.get("messages"):
+                payload["messages"] = ck_data["messages"] + messages
+            logger.info("[chat] 断点恢复 trace=%s stage=%s mode=%s", tid, ck_stage, payload.get("resume_mode"))
 
     async def publisher():
         # read 不超时(生成可能持续数分钟),connect 给 10s
@@ -282,6 +377,10 @@ async def chat(
         captured_level1: str = "unknown"  # 从 intent 事件捕获, 供统计
         event_counts: dict[str, int] = {}  # 各类 SSE 事件计数(供日志)
         logger.info("[chat] 开始连接 AI 服务 %s", gen_url)
+        logger.info("[chat] ▸ 请求体 model=%s resume=%s after=%s msgs=%d checkpoint=%s",
+                     model, resume, after or "-",
+                     len(payload.get("messages", [])),
+                     "有" if payload.get("checkpoint") else "无")
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 try:
@@ -310,7 +409,13 @@ async def chat(
                                         event_counts.get(event or "message", 0) + 1
                                     )
                                     if event == "token":
-                                        assistant_parts.append(data)
+                                        # AI 服务 token 数据格式为 JSON({"data": "text"}), 需提取纯文本
+                                        try:
+                                            tok = json.loads(data)
+                                            text = tok.get("data", data) if isinstance(tok, dict) else data
+                                        except (json.JSONDecodeError, TypeError):
+                                            text = data
+                                        assistant_parts.append(text)
                                     elif event in ("node", "think", "plan", "error", "aborted", "degraded", "unsupported", "intent"):
                                         try:
                                             payload_obj = json.loads(data) if data else None
@@ -332,23 +437,19 @@ async def chat(
                                         terminal_status = "unsupported"
                                         await record_unsupported(user.id, user_text)
                                     elif event == "checkpoint" and isinstance(payload_obj, dict):
-                                        # 断点续跑(§7): 保存 AI 断点到 conversations
+                                        # 断点续跑(§7): 写 Redis(不阻塞 SSE), MySQL 异步同步
                                         stage = payload_obj.get("stage", "?")
                                         ck_data = payload_obj.get("data", {})
-                                        try:
-                                            conv = await db.get(Conversation, conversation_id)
-                                            if conv:
-                                                conv.status = "paused"
-                                                conv.checkpoint_stage = stage
-                                                conv.checkpoint_data = json.dumps(ck_data, ensure_ascii=False)
-                                                conv.progress_pct = {
-                                                    "planner_done": 25, "coder_done": 65,
-                                                    "reviewer_r0": 75, "reviewer_r1": 85, "reviewer_r2": 95,
-                                                }.get(stage, 50)
-                                                await db.commit()
-                                                logger.info("[chat] 断点已保存 conv=%s stage=%s", conversation_id, stage)
-                                        except Exception as e:
-                                            logger.warning("[chat] 断点保存失败: %s", e)
+                                        progress_pct = {
+                                            "planner_done": 25, "coder_done": 65,
+                                            "reviewer_r0": 75, "reviewer_r1": 85, "reviewer_r2": 95,
+                                        }.get(stage, 50)
+                                        # 主路径: Redis( <1ms, 不阻塞 SSE 流)
+                                        await ck_set(conversation_id, stage, ck_data, progress_pct)
+                                        logger.info("[chat] 断点→Redis conv=%s stage=%s", conversation_id, stage)
+                                        # 异步同步到 MySQL(后台, 不阻塞)
+                                        asyncio.create_task(_sync_checkpoint_to_mysql(
+                                            conversation_id, stage, ck_data, progress_pct))
                                     elif event == "paused":
                                         terminal_status = "paused"
                                     elif event == "intent" and isinstance(payload_obj, dict):
@@ -365,8 +466,8 @@ async def chat(
                                             payload_obj.get("confidence", "-"),
                                         )
                                     logger.info(
-                                            "[chat] SSE 事件 seq=%s type=%s stage=%s",
-                                            event_seq, event, stage or "-",
+                                            "[chat] ◇ SSE #%d type=%s stage=%s data=%.200s",
+                                            event_seq, event, stage or "-", data,
                                         )
                                     frame = ""
                                     if event:
@@ -386,75 +487,31 @@ async def chat(
                     yield _error_frame("UPSTREAM_ERROR", "AI 服务暂时不可用，请稍后重试")
                     return
         finally:
-            approx_tokens = max(0, len("".join(assistant_parts)) // 4)
+            # 获取完整 assistant 文本并立即落库(不依赖 finally 内异步)
+            assistant_full_text = "".join(assistant_parts)
+            approx_tokens = max(0, len(assistant_full_text) // 4)
             logger.info(
-                "[chat] 流结束 trace=%s 状态=%s 事件数=%s tokens≈%s preview=%s assistant_text_len=%s",
-                tid,
-                terminal_status,
-                sum(event_counts.values()),
-                approx_tokens,
-                bool(preview_url),
-                len("".join(assistant_parts)),
+                "[chat] ◼ 流结束 trace=%s 状态=%s events=%d tokens≈%d preview=%s output_len=%d",
+                tid, terminal_status, sum(event_counts.values()),
+                approx_tokens, bool(preview_url), len(assistant_full_text),
             )
-            try:
-                logger.info("[chat] 落库开始 trace=%s assistant_len=%s", tid, len("".join(assistant_parts)))
-                # 用独立 session 落库, 避免 streaming 中的 trace_event flush 污染
-                from .db import SessionLocal as _PersistSL
-                async with _PersistSL() as persist_db:
-                    await finish_trace(persist_db, tid, terminal_status, approx_tokens)
-                    await log_usage(persist_db, user.id, tid,
-                                    _PROVIDER_BY_MODEL.get(model), model,
-                                    completion_tokens=approx_tokens)
-                    await _persist_conversation(
-                        persist_db,
-                    user,
-                    conversation_id,
-                    model,
-                    user_text,
-                    "".join(assistant_parts),
-                    tid,
-                    preview_url=preview_url,
-                )
-                # 保存生成产物(Artifact),关联到项目供右侧面板展示
-                if terminal_status == "done" and assistant_parts:
-                    try:
-                        html_size = len("".join(assistant_parts))
-                        conv = await db.get(Conversation, conversation_id)
-                        if conv is not None:
-                            db.add(
-                                Artifact(
-                                    project_id=conv.project_id,
-                                    conversation_id=conversation_id,
-                                    trace_id=tid,
-                                    title=user_text[:40] if user_text else None,
-                                    files={
-                                        "html": {
-                                            "name": "index.html",
-                                            "size": html_size,
-                                            "url": preview_url,
-                                        }
-                                    },
-                                )
-                            )
-                            await db.commit()
-                            logger.info("[chat] artifact 已保存 project=%s trace=%s", conv.project_id, tid)
-                    except Exception as e:
-                        logger.warning("[chat] artifact 保存失败: %s", e)
-                logger.info("[chat] 落库完成 trace=%s", tid)
-                # 记录分析统计(技能成效 + 意图命中率)
-                skill = "generate_site"
-                status = "ok" if terminal_status == "done" else (
-                    "abort" if terminal_status == "aborted" else (
-                        "fail" if terminal_status == "error" else "abort"
-                    )
-                )
-                elapsed_ms = sum(event_counts.values()) * 50  # 粗略估算
-                await record_skill_outcome(skill, status, float(elapsed_ms))
-                await record_model_detail(model, terminal_status == "done", captured_level1)
-                if user.id:
-                    await record_user_active(user.id)
-            except Exception as e:
-                logger.warning("[chat] 落库失败 trace=%s: %s", tid, e)
+            if assistant_full_text:
+                logger.info("[chat]   响应预览(首500字): %.500s", assistant_full_text)
+            # 事件分布
+            if event_counts:
+                evt_detail = " ".join(f"{k}={v}" for k, v in sorted(event_counts.items()))
+                logger.info("[chat]   事件分布: %s", evt_detail)
+            # 后台落库任务(独立 session + 重试, 不在 generator finally 中同步等待)
+            asyncio.create_task(_do_persist(
+                user_id=user.id,
+                conversation_id=conversation_id,
+                tid=tid,
+                model=model,
+                terminal_status=terminal_status,
+                user_text=user_text,
+                assistant_text=assistant_full_text,
+                preview_url=preview_url,
+            ))
 
     return StreamingResponse(
         publisher(),
@@ -467,9 +524,44 @@ async def chat(
     )
 
 
+def _normalize_assistant_text(text: str) -> str:
+    """拆解 JSON 碎片 {"data":"a"}{"data":"b"} → "ab"。
+    若 text 是纯文本或结构化 JSON 则原样返回。
+    """
+    if not text or not text.startswith('{"data":'):
+        return text
+    # 多段拼接
+    parts = []
+    pos = 0
+    while True:
+        start = text.find('{"data":', pos)
+        if start == -1:
+            break
+        end = text.find('}', start)
+        if end == -1:
+            break
+        try:
+            seg = json.loads(text[start:end + 1])
+            if isinstance(seg, dict) and "data" in seg:
+                parts.append(seg["data"])
+        except Exception:
+            pass
+        pos = end + 1
+    if parts:
+        return "".join(parts)
+    # 单层
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict) and "data" in obj:
+            return obj.get("data", text)
+    except Exception:
+        pass
+    return text
+
+
 async def _persist_conversation(
     db: AsyncSession,
-    user: CurrentUser,
+    user_id: int,
     conversation_id: int,
     model: str,
     user_text: str,
@@ -477,80 +569,67 @@ async def _persist_conversation(
     trace_id: str,
     preview_url: str | None = None,
 ) -> None:
-    """SSE 结束后落库:用户消息 + AI 回复;更新会话标题/updated_at。
-
-    幂等(重连 / 续传):同一 trace_id 只插一条 user 消息;assistant 消息按 trace_id
-    upsert(首落 insert、续传 update),避免刷新 / 重连导致重复行。
-    preview_url:本次生成的 COS 预览直链,回填到所属 Project(供分享「复制预览链接」)。
-    """
-    conv = (
-        await db.execute(
-            select(Conversation).where(
-                Conversation.id == conversation_id,
-                Conversation.user_id == user.id,
-            )
-        )
-    ).scalar_one_or_none()
+    """SSE 结束后落库。build 类消息走 Artifact+结构化 JSON, chat 类存纯文本。"""
+    # 归一化: 拆解 {"data":"x"}{"data":"y"}... → "xy..." (兜底防 AI 服务旧格式)
+    assistant_text = _normalize_assistant_text(assistant_text)
+    logger.info("[chat] _persist 调用 trace=%s conv=%s uid=%s alen=%s preview=%s",
+                trace_id, conversation_id, user_id, len(assistant_text), bool(preview_url))
+    conv = await conv_repo.get_by(db, id=conversation_id, user_id=user_id)
     if conv is None:
-        logger.warning("[chat] 落库失败: 会话不存在 conv=%s user=%s", conversation_id, user.id)
+        logger.warning("[chat] 落库失败: 会话不存在 conv=%s user=%s", conversation_id, user_id)
         return
 
-    # 回填最新预览直链到项目(⑤-b 分享用)
-    if preview_url:
-        proj = await db.get(Project, conv.project_id)
-        if proj is not None:
-            proj.preview_url = preview_url
-
-    # user 消息:同 trace_id 已存在则跳过(重连不会重复插入)
-    user_msg = (
-        await db.execute(
-            select(Message).where(
-                Message.trace_id == trace_id, Message.role == "user"
-            )
-        )
-    ).scalar_one_or_none()
+    # user 消息跳过重复(重连防重)
+    user_msg = await message_repo.get_by_trace(db, trace_id, "user")
     if user_msg is None:
-        db.add(
-            Message(
-                conversation_id=conv.id,
-                role="user",
-                content=user_text,
-                model_id=model,
-                trace_id=trace_id,
-            )
-        )
+        db.add(Message(
+            conversation_id=conv.id, role="user",
+            content=user_text, model_id=model, trace_id=trace_id,
+        ))
 
-    # assistant 消息:首落 insert,重连续传 update(覆盖为最新完整内容)
-    if assistant_text:
-        asst_msg = (
-            await db.execute(
-                select(Message).where(
-                    Message.trace_id == trace_id, Message.role == "assistant"
-                )
-            )
-        ).scalar_one_or_none()
-        if asst_msg is None:
-            db.add(
-                Message(
-                    conversation_id=conv.id,
-                    role="assistant",
-                    content=assistant_text,
-                    model_id=model,
-                    trace_id=trace_id,
-                )
-            )
-        else:
-            asst_msg.content = assistant_text
-            asst_msg.model_id = model
+    # assistant 消息: 按内容分两路
+    is_html = assistant_text and ("<html" in assistant_text[:500].lower() or "<!doctype" in assistant_text[:500].lower())
+    if is_html:
+        # ---- 建站/代码生成: 始终建 Artifact(COS 失败也用 srcdoc 兜底) ----
+        repo = "site"
+        art = Artifact(
+            project_id=conv.project_id or 0,
+            conversation_id=conv.id,
+            trace_id=trace_id,
+            title=conv.title or user_text[:20],
+            repo=repo,
+            files=[{"name": "index.html", "size": len(assistant_text.encode("utf-8")), "content": assistant_text}],
+            preview_url=preview_url or "",
+            download_url=preview_url or "",
+            status="done" if preview_url else "uploading",
+        )
+        db.add(art)
+        await db.flush()
+        content_obj = {
+            "type": repo,
+            "artifact_id": art.id,
+            "title": art.title or "",
+            "preview_url": preview_url or "",
+            "download_url": preview_url or "",
+            "files": art.files or [],
+        }
+        await message_repo.upsert_assistant(db, conv.id, trace_id, json.dumps(content_obj, ensure_ascii=False), model)
+        if preview_url:
+            proj = await db.get(Project, conv.project_id)
+            if proj is not None:
+                proj.preview_url = preview_url
+        logger.info("[chat] Artifact 已创建 id=%s repo=%s preview=%s fallback=srcdoc", art.id, repo, preview_url or "(无)")
+    else:
+        # ---- 闲聊/文档: 纯文本 ----
+        if assistant_text:
+            await message_repo.upsert_assistant(db, conv.id, trace_id, assistant_text, model)
 
     if not conv.title and user_text:
         conv.title = user_text[:20]
+        logger.info("[chat] 自动设置会话标题 conv=%s title=%.20s", conv.id, user_text)
     conv.updated_at = datetime.utcnow()
     await db.commit()
-    logger.info(
-        "[chat] 消息落库成功 conv=%s user_msg=%s assistant_len=%s",
-        conv.id, bool(user_text), len(assistant_text),
-    )
+    logger.info("[chat] 消息落库成功 conv=%s", conv.id)
 
 
 @router.post("/feedback")
@@ -559,17 +638,9 @@ async def post_feedback(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """提交一次生成评价(③-a:1-10 分 + 评论);用于统计与回归数据集。
-
-    同 trace_id 重复提交会覆盖原评分。
-    """
-    from .tracing import save_feedback
-
-    fb = await save_feedback(
-        db, user.id, req.trace_id, req.conversation_id, req.rating, req.comment
+    fb = await feedback_repo.upsert(
+        db, user.id, req.trace_id, req.conversation_id, req.rating, req.comment,
     )
-    if fb is None:
-        raise HTTPException(status_code=500, detail="save feedback failed")
     return {"ok": True, "rating": fb.rating}
 
 

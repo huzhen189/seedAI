@@ -7,7 +7,9 @@ publish → 本端点订阅该频道并转成 SSE 帧透传给业务服务(§3.7
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import sys
 import uuid
 from contextlib import asynccontextmanager
 
@@ -30,6 +32,17 @@ from .registry import SkillRegistry, ToolRegistry
 setup_logging("ai_service")
 
 logger = logging.getLogger("ai_service.main")
+
+# P0 崩溃恢复: 抑制 Windows ProactorEventLoop 上 ConnectionResetError traceback
+# (远程 LLM API 断连会在传输层清理时报这个错, 不影响服务运行, 降为 WARNING)
+def _exception_handler(loop, context):
+    exc = context.get("exception")
+    if isinstance(exc, ConnectionResetError):
+        logger.warning("连接被远程关闭(已忽略): %s", context.get("message", ""))
+    else:
+        loop.default_exception_handler(context)
+
+asyncio.get_event_loop().set_exception_handler(_exception_handler)
 
 # 引导注册(导入 skills + tools 包,完成全部注册)
 _REGISTRY = bootstrap()
@@ -117,7 +130,6 @@ async def generate(req: GenerateReq, after: str | None = None):
     trace_id = req.trace_id or uuid.uuid4().hex
     resuming = await q.stream_exists(trace_id)
     if not resuming:
-        # 新任务:建立通道(避免丢首帧)后入队,Worker 消费并 publish 到进度流
         await q.open_channel(trace_id)
         job = {
             "trace_id": trace_id,
@@ -127,13 +139,14 @@ async def generate(req: GenerateReq, after: str | None = None):
         }
         await q.enqueue(job)
         logger.info(
-            "[generate] 新任务 trace=%s model=%s 消息数=%s skill=%s queue=%s",
+            "[generate] 新任务入队 trace=%s model=%s msgs=%d skill=%s queue=%s",
             trace_id, req.model_id, len(req.messages), req.skill or "auto", queue_type,
         )
     else:
         after_info = f" after={after}" if after else " 全量回放"
         logger.info(
-            "[generate] 续接已有流 trace=%s%s queue=%s", trace_id, after_info, queue_type
+            "[generate] 续接已有流 trace=%s%s queue=%s — 从 Redis Stream 读取事件并透传",
+            trace_id, after_info, queue_type,
         )
 
     event_count = 0
@@ -156,6 +169,31 @@ async def cancel(req: Request):
         await get_queue().set_cancel(trace_id)
         return {"ok": True, "trace_id": trace_id}
     return {"ok": False, "error": "missing trace_id"}
+
+
+@app.post("/retry-upload")
+async def retry_upload(req: Request):
+    """业务端触发: 对本地暂存的产物重新上传 COS, 返回线上 URL。"""
+    import os
+    from pathlib import Path
+
+    body = await req.json()
+    trace_id = body.get("trace_id")
+    if not trace_id:
+        return {"ok": False, "error": "missing trace_id"}
+    art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
+    idx = art_dir / "anon" / trace_id / "index.html"
+    if not idx.exists():
+        return {"ok": False, "error": f"本地文件不存在: {idx}"}
+    try:
+        from .tools.cos_upload import cos_upload
+        cos_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/anon/{trace_id}/index.html"
+        res = cos_upload(str(idx), cos_key)
+        if res.get("ok"):
+            return {"ok": True, "url": res["url"]}
+        return {"ok": False, "error": res.get("error", "COS 上传失败")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # 本地直跑入口:python backend/ai_service/app/main.py

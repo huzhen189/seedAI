@@ -149,10 +149,8 @@ class RedisBackend(QueueBackend):
         except Exception as e:  # 含连接失败、HELLO/AUTH 不兼容等
             raise ConnectionError(f"Redis 不可用或不兼容: {e}") from e
 
-        # 异步客户端:强制 protocol=2 + 心跳保活 + 显式 socket_timeout。
-        # health_check_interval=30 每 30s 发 PING 维持连接;
-        # socket_keepalive 启用 TCP keepalive;retry_on_timeout 读超时自动重试;
-        # socket_timeout=10 给足 xread block 的缓冲(block=3000,超时后 1s 重连)。
+        # 异步客户端:强制 protocol=2 + 心跳保活。
+        # socket_timeout=15 > brpop timeout=5, 确保短轮询不会被 socket 超时误杀。
         self._r = aioredis.from_url(
             settings.redis_url,
             decode_responses=True,
@@ -160,7 +158,7 @@ class RedisBackend(QueueBackend):
             health_check_interval=30,
             socket_keepalive=True,
             retry_on_timeout=True,
-            socket_timeout=10,
+            socket_timeout=15,
         )
 
     def _key(self, trace_id: str) -> str:
@@ -212,7 +210,7 @@ class RedisBackend(QueueBackend):
                     health_check_interval=30,
                     socket_keepalive=True,
                     retry_on_timeout=True,
-                    socket_timeout=10,
+                    socket_timeout=15,
                 )
                 continue
             if not resp:
@@ -230,8 +228,34 @@ class RedisBackend(QueueBackend):
         await self._r.lpush(_JOB_QUEUE, json.dumps(job, ensure_ascii=False))
 
     async def dequeue(self) -> Dict[str, Any]:
-        _, raw = await self._r.brpop(_JOB_QUEUE, timeout=0)
-        return json.loads(raw)
+        """阻塞出队。短轮询(brpop timeout=5s)防公网 Redis 空闲断开:
+        - brpop 返回 None → 超时无任务, 正常空转
+        - ConnectionError → 等 1s 重建客户端
+        """
+        import redis.asyncio as aioredis
+        from contextlib import suppress
+
+        while True:
+            try:
+                result = await self._r.brpop(_JOB_QUEUE, timeout=5)
+                if result is None:
+                    continue  # 5s 无任务, 正常空转
+                _, raw = result
+                return json.loads(raw)
+            except (aioredis.ConnectionError, OSError) as e:
+                logger.warning("dequeue 断连, 1s 后重建: %s", e)
+                await asyncio.sleep(1)
+                with suppress(Exception):
+                    await self._r.aclose()
+                self._r = aioredis.from_url(
+                    settings.redis_url,
+                    decode_responses=True,
+                    protocol=2,
+                    health_check_interval=30,
+                    socket_keepalive=True,
+                    retry_on_timeout=True,
+                    socket_timeout=15,
+                )
 
     async def publish(self, trace_id: str, event: Dict[str, Any]) -> None:
         # 持久化进度到可回放 Stream;XTRIM 限长避免无限膨胀
@@ -282,6 +306,7 @@ async def worker_loop(concurrency: int = 1):
         while True:
             try:
                 job = await q.dequeue()
+                logger.info("Worker 从队列取出任务 trace=%s", job.get("trace_id"))
             except Exception as e:
                 logger.warning("Worker dequeue 失败, 1s 后重试: %s", e)
                 await asyncio.sleep(1)
@@ -295,8 +320,23 @@ async def worker_loop(concurrency: int = 1):
                 return await q.is_cancelled(trace_id) if trace_id else False
 
             try:
+                # 记录取到的任务详情
+                user_text = ""
+                for msg in messages:
+                    if msg.get("role") == "user":
+                        user_text = msg.get("content", "")[:200]
+                        break
+                logger.info(
+                    "Worker 收到任务 trace=%s model=%s skill=%s msgs=%d input=%.100s",
+                    trace_id, model_id, skill or "auto", len(messages), user_text,
+                )
                 intent = detect_intent(messages, model_id)
                 skill_name = skill or skill_for(intent["level1"], intent["level2"]) or "explain"
+                logger.info(
+                    "意图识别结果 trace=%s -> %s/%s(conf=%.2f) industry=%s -> skill=%s",
+                    trace_id, intent["level1"], intent["level2"],
+                    intent.get("confidence", 0), intent.get("industry", "?"), skill_name,
+                )
 
                 if intent["level1"] == "unsupported":
                     # 记录 unsupported 统计(给业务端 metrics 用)

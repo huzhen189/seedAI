@@ -46,6 +46,10 @@ class Settings(BaseSettings):
         elif u.startswith("mysql://"):
             u = "mysql+aiomysql://" + u[len("mysql://") :]
         self.database_url = u
+        # 强制 utf8mb4(支持 emoji), MySQL 默认 utf8=3 字节不够
+        if "mysql" in self.database_url and "charset=" not in self.database_url:
+            sep = "&" if "?" in self.database_url else "?"
+            self.database_url += f"{sep}charset=utf8mb4"
 
     # JWT
     # ⚠️ 默认 jwt_secret 仅用于本地开发,生产必须在 .env 覆盖为强随机值,
@@ -60,7 +64,7 @@ class Settings(BaseSettings):
     seed_super_admin: str = ""
 
     # 缓存默认 TTL
-    cache_user_ttl: int = 1800  # 30 min
+    cache_user_ttl: int = 9000  # 150 min（×5）
 
     # 配额限流(①-b):free 套餐默认 50 次/天;可扩展各套餐每日上限。
     # 全局令牌桶(方案 a)本期未做,仅做基于 user_id 的每日配额。

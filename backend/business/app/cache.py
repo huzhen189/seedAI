@@ -91,3 +91,93 @@ async def pop_write_errors(limit: int = 50) -> list[dict]:
     except Exception as e:
         logger.warning("pop_write_errors failed: %s", e)
     return out
+
+
+# ---------- 断点缓存(Checkpoint Cache/Write-Behind) ----------
+# 生成中的断点先写 Redis(不阻塞 SSE), 流结束后 flush 到 MySQL。
+# TTL 24h: 超过一天没恢复的断点自动过期, 由 MySQL 兜底。
+
+CK_TTL = 86400  # 24 小时
+
+
+async def ck_set(conv_id: int, stage: str, data: dict, progress_pct: int) -> None:
+    """写断点到 Redis Hash(生成中高频调用, <1ms)。"""
+    try:
+        r = await get_redis()
+        key = f"ck:conv:{conv_id}"
+        await r.hset(key, mapping={
+            "stage": stage,
+            "data": json.dumps(data, ensure_ascii=False),
+            "progress_pct": str(progress_pct),
+            "status": "paused",
+        })
+        await r.expire(key, CK_TTL)
+    except Exception as e:
+        logger.warning("ck_set failed conv=%s: %s", conv_id, e)
+
+
+async def ck_get(conv_id: int) -> dict | None:
+    """读断点(Redis 优先)。返回 {stage, data, progress_pct, status} 或 None。"""
+    try:
+        r = await get_redis()
+        key = f"ck:conv:{conv_id}"
+        raw = await r.hgetall(key)
+        if not raw:
+            return None
+        return {
+            "stage": raw.get("stage", "?"),
+            "data": json.loads(raw["data"]) if raw.get("data") else {},
+            "progress_pct": int(raw.get("progress_pct", 0)),
+            "status": raw.get("status", "paused"),
+        }
+    except Exception as e:
+        logger.warning("ck_get failed conv=%s: %s", conv_id, e)
+        return None
+
+
+async def ck_delete(conv_id: int) -> None:
+    """流结束(done/aborted)清理 Redis 断点缓存。"""
+    try:
+        r = await get_redis()
+        await r.delete(f"ck:conv:{conv_id}")
+    except Exception as e:
+        logger.warning("ck_delete failed conv=%s: %s", conv_id, e)
+
+
+# ---------- 通用请求级缓存(高频读路径) ----------
+async def cache_get(key: str) -> str | None:
+    """通用读缓存。"""
+    try:
+        r = await get_redis()
+        return await r.get(key)
+    except Exception:
+        return None
+
+
+async def cache_set(key: str, value: str, ttl: int = 300) -> None:
+    """通用写缓存。"""
+    try:
+        r = await get_redis()
+        await r.set(key, value, ex=ttl)
+    except Exception as e:
+        logger.warning("cache_set failed key=%s: %s", key, e)
+
+
+async def cache_delete(key: str) -> None:
+    """通用删缓存。"""
+    try:
+        r = await get_redis()
+        await r.delete(key)
+    except Exception as e:
+        logger.warning("cache_delete failed key=%s: %s", key, e)
+
+
+async def cache_invalidate(pattern: str) -> None:
+    """按 pattern 批量清缓存。"""
+    try:
+        r = await get_redis()
+        keys = await r.keys(pattern)
+        if keys:
+            await r.delete(*keys)
+    except Exception as e:
+        logger.warning("cache_invalidate failed pattern=%s: %s", pattern, e)

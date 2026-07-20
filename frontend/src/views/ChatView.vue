@@ -14,26 +14,25 @@
 // 左栏是对话区 + 思考轨迹,右栏是实时预览(PreviewPane)。
 import { computed, onMounted, onUnmounted, ref, watch, nextTick } from 'vue'
 import ThoughtTrail from '../components/ThoughtTrail.vue'
-import PreviewPane from '../components/PreviewPane.vue'
+import RightPanel from '../components/RightPanel.vue'
 import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
-import JSZip from 'jszip'
 import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
 import { listArtifacts, renameProject, patch } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { Artifact, ModelInfo, PlanEvent, RetryEvent, ThoughtStep } from '../types'
+import type { Artifact, Message, ModelInfo, PlanEvent, RetryEvent, ThoughtStep } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
-  enter_router: '路由分发',
-  dispatch: '技能调度',
-  enter_planner: '规划需求',
-  enter_coder: '编写代码',
-  enter_reviewer: '评审校验',
-  previewing: '投递预览',
-  preview: '生成预览',
-  done: '完成',
+  enter_router: '意图路由 — 识别你的需求类型，匹配最合适的处理流程',
+  dispatch: '技能调度 — 加载所需的 AI 能力和工具链',
+  enter_planner: '需求规划 — 拆解任务、制定执行步骤和产出目标',
+  enter_coder: '代码生成 — 正在为你编写/构建代码',
+  enter_reviewer: '评审校验 — 检查生成结果的完整性和正确性',
+  previewing: '投递预览 — 将生成产物上传到预览环境',
+  preview: '生成预览 — 正在生成可预览的网页',
+  done: '完成 — 全部任务执行完毕',
 }
 
 // ---- 本地 UI 状态 ----
@@ -153,31 +152,20 @@ function teardownScrollLoading() {
   scrollObserver = null
 }
 
-async function downloadArtifactZip(artifact: Artifact) {
-  if (!artifact.files) return
-  const zip = new JSZip()
-  const entries = Object.entries(artifact.files)
-  for (const [, f] of entries) {
-    if (f.url) {
-      try {
-        const r = await fetch(f.url)
-        if (r.ok) {
-          const blob = await r.blob()
-          zip.file(f.name, blob)
-        }
-      } catch {
-        // 下载失败跳过该文件
-      }
-    }
-  }
-  if (Object.keys(zip.files).length === 0) return
-  const blob = await zip.generateAsync({ type: 'blob' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = (artifact.title || 'site') + '.zip'
-  a.click()
-  URL.revokeObjectURL(url)
+// ---- 自动滚动到底部(微信风格) ----
+let autoScroll = true  // 用户手动上滚后暂停自动滚动
+function scrollToBottom(smooth = true) {
+  const el = convRef.value
+  if (!el) return
+  nextTick(() => {
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'instant' })
+  })
+}
+function onConvScroll() {
+  const el = convRef.value
+  if (!el) return
+  // 距底部 > 80px 视为用户手动上滚, 暂停自动追底
+  autoScroll = el.scrollHeight - el.scrollTop - el.clientHeight < 80
 }
 
 async function loadArtifacts() {
@@ -207,6 +195,17 @@ const auth = useAuth()
 const projectStore = useProjectStore()
 const convStore = useConversationStore()
 
+// 当有新消息时自动追底(除非用户手动上滚查看历史)
+watch(() => convStore.messages.length, () => {
+  if (autoScroll) scrollToBottom(true)
+})
+// 生成中 token 持续追加也追底
+watch(generatedHtml, () => {
+  if (autoScroll && generating.value) scrollToBottom(false)
+})
+
+// 所有会话统一消息流(微信风格: 最老的在上方, 最新的在最下方)
+// 数组顺序: [oldest_session, ..., current_session], 配合 flex-direction: column 渲染
 const allSessions = computed(() => {
   const past = convStore.pastSessions.map(s => ({
     conv: s.conv, loading: s.loading,
@@ -216,7 +215,8 @@ const allSessions = computed(() => {
   if (cur && convStore.currentConvId === cur.id && !past.some(p => p.conv.id === cur.id)) {
     past.unshift({ conv: cur, loading: false, msgs: convStore.messages })
   }
-  return past
+  // 逆转: pastSessions 是降序(新→旧)追加的, 需要反转为升序(旧→新)以符合微信风格
+  return past.reverse()
 })
 
 const currentProjectName = computed(
@@ -280,6 +280,38 @@ function getActiveGen(): { convId: number; traceId: string } | null {
     /* 忽略 */
   }
   return null
+}
+
+// ---- 生成中消息本地快照(刷新/崩溃恢复) ----
+const DRAFT_KEY_PREFIX = 'seedai:draft:'
+
+function saveDraft(convId: number) {
+  try {
+    const msgs = convStore.messages.filter(m => m.content)
+    if (msgs.length) {
+      sessionStorage.setItem(DRAFT_KEY_PREFIX + convId, JSON.stringify(msgs))
+    }
+  } catch { /* 忽略 */ }
+}
+
+function clearDraft() {
+  if (convStore.currentConvId) {
+    sessionStorage.removeItem(DRAFT_KEY_PREFIX + convStore.currentConvId)
+  }
+}
+
+function loadDraft(): boolean {
+  if (!convStore.currentConvId) return false
+  try {
+    const raw = sessionStorage.getItem(DRAFT_KEY_PREFIX + convStore.currentConvId)
+    if (!raw) return false
+    const msgs = JSON.parse(raw) as Message[]
+    if (msgs.length > convStore.messages.length) {
+      convStore.messages = msgs
+      return true
+    }
+  } catch { /* 忽略 */ }
+  return false
 }
 
 // 重置「本轮生成」的展示态(不含 messages 数组,数组在 send/resume 各自处理)。
@@ -357,7 +389,11 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     onToken: (t) => {
       generatedHtml.value += t
       const m = convStore.messages[assistantIdx]
-      if (m) m.content += t
+      if (m) {
+        m.content += t
+        // 每 10 个 token 存一次本地快照(减开销)
+        if (m.content.length % 40 === 0) saveDraft(convStore.currentConvId!)
+      }
     },
     onPreview: (d) => {
       if (d.url) previewUrl.value = d.url as string
@@ -369,9 +405,12 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       generating.value = false
       finished.value = true
       clearActiveGen()
+      clearDraft()
       loadArtifacts()
       // 从 DB 同步当前会话消息(替换乐观更新的 id:0)
-      if (projectStore.currentProjectId) convStore.loadConversations(projectStore.currentProjectId)
+      if (projectStore.currentProjectId) {
+        convStore.loadConversations(projectStore.currentProjectId).then(() => scrollToBottom(false))
+      }
       dequeueAndSend()
     },
     onAborted: () => {
@@ -379,7 +418,9 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       errorMsg.value = '已取消'
       clearActiveGen()
-      if (projectStore.currentProjectId) convStore.loadConversations(projectStore.currentProjectId)
+      if (projectStore.currentProjectId) {
+        convStore.loadConversations(projectStore.currentProjectId).then(() => scrollToBottom(false))
+      }
       dequeueAndSend()
     },
     onRetry: (d: RetryEvent) => {
@@ -553,7 +594,6 @@ function copyPreviewLink() {
 }
 
 onMounted(async () => {
-  // 启动顺序:先恢复登录态(/auth/me) -> 拉模型列表(公开) -> 登录后才加载项目/会话
   await auth.init()
   const m = await fetchModels()
   if (m.length) models.value = m
@@ -561,7 +601,9 @@ onMounted(async () => {
     await projectStore.load()
     await loadCurrentProject()
     await loadArtifacts()
-    await nextTick(() => setupScrollLoading())
+    await nextTick(() => { setupScrollLoading(); scrollToBottom(false) })
+    // 恢复未完成的本地草稿(刷新/崩溃后)
+    if (loadDraft()) scrollToBottom(false)
     await maybeResume()
   }
 })
@@ -573,7 +615,7 @@ watch(
     if (id != null) {
       await convStore.loadConversations(id)
       await loadArtifacts()
-      await nextTick(() => setupScrollLoading())
+      await nextTick(() => { setupScrollLoading(); scrollToBottom(false) })
       await maybeResume()
     }
   },
@@ -585,6 +627,8 @@ watch(
     if (id != null) {
       await convStore.loadConversations(projectStore.currentProjectId!)
       convStore.pendingConvId = null
+      autoScroll = true
+      scrollToBottom(false)
       await maybeResume()
     }
   },
@@ -659,7 +703,7 @@ watch(pendingRetry, (r) => {
         <button class="paused-abort" @click="abortPaused">放弃</button>
       </div>
 
-      <div ref="convRef" class="conv">
+      <div ref="convRef" class="conv" @scroll="onConvScroll">
         <div v-if="convStore.loadingMore" class="loading-more">加载更早的会话…</div>
         <div ref="sentinel" class="sentinel"></div>
 
@@ -684,7 +728,7 @@ watch(pendingRetry, (r) => {
         </template>
       </div>
 
-      <div v-if="isGenerateIntent && (thoughtSteps.length || planNodes.length)" class="trail-wrap">
+      <div v-if="thoughtSteps.length || planNodes.length" class="trail-wrap">
         <ThoughtTrail
           :steps="thoughtSteps"
           :plans="planNodes"
@@ -770,27 +814,14 @@ watch(pendingRetry, (r) => {
     </div>
 
     <div v-if="isGenerateIntent" class="right-pane">
-      <!-- 生成产物文件面板(按项目) -->
-      <div class="artifact-panel">
-        <div class="artifact-head">📁 生成产物</div>
-        <div v-if="generating && !projectArtifacts.length" class="artifact-empty">AI 正在生成…</div>
-        <template v-for="a in projectArtifacts" :key="a.id">
-          <div class="artifact-file">
-            <span class="af-name">📄 {{ a.title || '生成产物' }}</span>
-            <span v-if="a.created_at" class="af-time">{{ a.created_at.slice(0, 16) }}</span>
-            <a
-              v-if="a.files && Object.values(a.files).some((f: any) => f.url)"
-              :href="(Object.values(a.files).find((f: any) => f.url) as any)?.url"
-              target="_blank"
-              class="af-open"
-              title="线上预览"
-            >🔗</a>
-            <button class="af-dl" title="下载 ZIP" @click="downloadArtifactZip(a)">⬇ ZIP</button>
-          </div>
-        </template>
-        <div v-if="!generating && !projectArtifacts.length" class="artifact-empty">暂无生成产物</div>
-      </div>
-      <PreviewPane :html="generatedHtml" :url="previewUrl" :loading="generating" />
+      <RightPanel
+        :artifacts="projectArtifacts"
+        :generating="generating"
+        :generatedHtml="generatedHtml"
+        :previewUrl="previewUrl"
+        :projectId="projectStore.currentProjectId"
+        @refresh="loadArtifacts"
+      />
     </div>
 
   </div>
@@ -818,41 +849,8 @@ watch(pendingRetry, (r) => {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
-.artifact-panel {
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
-  min-height: 0;
-  overflow-y: auto;
-  max-height: 30%;
-}
-.artifact-head {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--muted);
-  text-transform: uppercase;
-  margin-bottom: 6px;
-}
-.artifact-empty {
-  font-size: 12px;
-  color: var(--muted);
-  font-style: italic;
-}
-.artifact-file {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  padding: 4px 6px;
-  border-radius: 6px;
-  background: #f8fafc;
-}
-.af-name { color: #334155; flex: 1; }
-.af-time { color: var(--muted); font-size: 11px; }
-.af-size { color: var(--muted); font-size: 11px; margin-left: auto; }
-.af-open { text-decoration: none; font-size: 13px; }
-.af-dl { border: 1px solid var(--brand2); background: transparent; color: var(--brand); border-radius: 6px; cursor: pointer; font-size: 11px; padding: 2px 8px; font-weight: 600; }
 .conv-bar {
   display: flex;
   align-items: center;

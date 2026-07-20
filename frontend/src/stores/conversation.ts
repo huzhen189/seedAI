@@ -18,6 +18,7 @@ export const useConversationStore = defineStore('conversation', () => {
   const loading = ref(false)
   const loadingMore = ref(false)                       // 上翻加载更早会话中
   const loadedPastCount = ref(0)                       // 已加载到第几个历史会话
+  const _currentProjectId = ref<number | null>(null)   // 当前加载的项目 id
   const pendingConvId = ref<number | null>(null)
   const creating = ref(false)  // 防并发创建
   let _busy = false            // 防 loadConversations 并发
@@ -48,10 +49,22 @@ export const useConversationStore = defineStore('conversation', () => {
       if (targetConv) {
         currentConvId.value = targetConv.id
         const c = await projectsApi.getConversation(targetConv.id)
-        messages.value = c.messages || []
+        const dbMsgs = c.messages || []
+        // 切换项目 → 无条件替换；同项目 → 保护生成中的乐观消息
+        const switching = _currentProjectId.value !== projectId
+        if (switching) {
+          messages.value = dbMsgs
+        } else {
+          const localHasContent = messages.value.some(m => m.content)
+          if (!localHasContent || dbMsgs.length > messages.value.length) {
+            messages.value = dbMsgs
+          }
+        }
+        _currentProjectId.value = projectId
       } else {
         currentConvId.value = null
         messages.value = []
+        _currentProjectId.value = projectId
       }
 
       // 加载历史会话卡片

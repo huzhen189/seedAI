@@ -1,19 +1,22 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, watch, computed } from 'vue'
+import { useRoute } from 'vue-router'
 import TopNav from './components/TopNav.vue'
 import Sidebar from './components/Sidebar.vue'
 import { useAuthStore } from './stores/auth'
 import { useProjectStore } from './stores/project'
 import { initPerfTracking } from './composables/usePerf'
 
-// 启动前端性能追踪(首次加载时上报 TTFB/dom_ready/page_load)
 initPerfTracking()
 
+const route = useRoute()
 const collapsed = ref(false)
 const auth = useAuthStore()
 const projectStore = useProjectStore()
 
-// 全局冷启动:先恢复登录态,登录后才拉项目;未登录不调鉴权接口。
+// 仅在对话页(/)显示左侧项目栏, 管理页/设置页等不显示
+const showSidebar = computed(() => route.path === '/')
+
 onMounted(async () => {
   await auth.init()
   if (auth.user) {
@@ -21,7 +24,6 @@ onMounted(async () => {
   }
 })
 
-// 登录成功后自动加载项目(401 未触发 watch,仅登录成功时执行)
 watch(
   () => auth.user,
   (u) => {
@@ -34,7 +36,7 @@ watch(
   <div class="app">
     <TopNav />
     <div class="layout">
-      <Sidebar :collapsed="collapsed" @toggle="collapsed = !collapsed" />
+      <Sidebar v-if="showSidebar" :collapsed="collapsed" @toggle="collapsed = !collapsed" />
       <main class="main"><RouterView /></main>
     </div>
   </div>

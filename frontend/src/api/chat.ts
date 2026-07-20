@@ -47,7 +47,10 @@ export function startChat(opts: StartChatOptions): EventSource {
   if (opts.resume) params.set('resume', 'true')
   if (opts.correct) params.set('correct', 'true')
 
-  const es = new EventSource(`/api/chat?${params.toString()}`)
+  const url = `/api/chat?${params.toString()}`
+  console.log('[SSE] 连接 %s', url)
+  const es = new EventSource(url)
+  es.onopen = () => console.log('[SSE] 已连接')
   const safeParse = (raw: string): any => {
     try {
       return JSON.parse(raw)
@@ -70,10 +73,12 @@ export function startChat(opts: StartChatOptions): EventSource {
   es.addEventListener('preview', (e) => opts.cb.onPreview?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('degraded', (e) => opts.cb.onDegraded?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('done', () => {
+    console.log('[SSE] 收到 done, 关闭连接')
     opts.cb.onDone?.()
     es.close()
   })
   es.addEventListener('aborted', () => {
+    console.log('[SSE] 收到 aborted')
     opts.cb.onAborted?.()
     es.close()
   })
@@ -86,6 +91,7 @@ export function startChat(opts: StartChatOptions): EventSource {
   // 服务端命名 error 事件带 data;网络层错误无 data。两者都关闭,不重连(避免重复生成)。
   es.addEventListener('error', (e) => {
     const me = e as MessageEvent
+    console.log('[SSE] 收到 error data=%s', me.data ? String(me.data).slice(0, 100) : '(无)')
     if (me.data) {
       const d = safeParse(me.data)
       const msg = String(d.message || me.data)

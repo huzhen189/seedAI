@@ -5,7 +5,7 @@ from typing import Optional
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import settings
@@ -64,8 +64,25 @@ class CurrentUser:
         self.role = role
 
 
+# 滑动过期阈值(秒): token 剩余不足此值时自动续期
+RENEW_THRESHOLD = 600  # 10 分钟
+
+
+def _set_access_cookie(response: Response, token: str) -> None:
+    """在 Response 上设置新的 access_token Cookie(滑动续期用)。"""
+    response.set_cookie(
+        ACCESS_COOKIE, token,
+        max_age=settings.access_token_ttl,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        domain=settings.cookie_domain or None,
+    )
+
+
 def get_current_user(
     request: Request,
+    response: Response,
     creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ) -> CurrentUser:
     # 1) HttpOnly Cookie(前端同源自动携带,SSE/页面均可用,文档 §2.1)
@@ -82,7 +99,14 @@ def get_current_user(
         payload = decode_token(token)
         if payload.get("type") != "access":
             raise ValueError("not an access token")
-        return CurrentUser(int(payload["sub"]), payload.get("role", "user"))
+        user = CurrentUser(int(payload["sub"]), payload.get("role", "user"))
+        # 滑动过期: token 剩余 <10min 自动续期, 活跃用户不会断线
+        exp = payload.get("exp", 0)
+        now_ts = datetime.now(timezone.utc).timestamp()
+        if exp - now_ts < RENEW_THRESHOLD:
+            new_token = create_access_token(user.id, user.role)
+            _set_access_cookie(response, new_token)
+        return user
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -99,6 +99,7 @@ def classify(messages: list[dict], model_id: str = "hy3", checkpoint_info: dict 
         )
 
     # LLM 分类
+    logger.info("意图分类开始 model=%s input=%.200s", model_id, last)
     order = resolve_fallback_order(model_id)
     for mid in order:
         try:
@@ -108,6 +109,7 @@ def classify(messages: list[dict], model_id: str = "hy3", checkpoint_info: dict 
                 {"role": "user", "content": last[:500]},
             ])
             raw = (resp.content or "").strip()
+            logger.info("意图分类 LLM 原始返回(%s): %s", mid, raw[:200])
             m = re.search(r"\{.*\}", raw, re.DOTALL)
             data = json.loads(m.group(0)) if m else {}
             l1 = data.get("level1", data.get("intent", ""))
@@ -131,7 +133,10 @@ def classify(messages: list[dict], model_id: str = "hy3", checkpoint_info: dict 
             logger.warning("意图分类 %s 失败: %s", mid, e)
             continue
 
-    return _keyword_fallback(last)
+    logger.info("意图分类 降级为关键词匹配 input=%.200s", last)
+    result = _keyword_fallback(last)
+    logger.info("意图分类 关键词结果 -> %s/%s industry=%s", result["level1"], result["level2"], result.get("industry"))
+    return result
 
 
 def _default(l1="learn", l2="casual", conf=1.0, ind="none") -> dict:

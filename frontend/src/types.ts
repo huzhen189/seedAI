@@ -99,6 +99,42 @@ export interface Message {
   created_at: string
 }
 
+// ---- 消息 content 解析后的类型（content 为 JSON 字符串时） ----
+export type ContentData = PlainContent | SiteContent | CodeContent | ImageContent | ErrorContent
+
+export interface PlainContent {
+  type: 'plain'
+  text: string
+}
+
+export interface SiteContent {
+  type: 'site'
+  artifact_id: number
+  title: string
+  preview_url: string
+  download_url?: string
+  files: { name: string; size: number }[]
+}
+
+export interface CodeContent {
+  type: 'code'
+  artifact_id: number
+  title: string
+  language: string
+  code_preview?: string
+}
+
+export interface ImageContent {
+  type: 'image'
+  url: string
+  title?: string
+}
+
+export interface ErrorContent {
+  type: 'error'
+  message: string
+}
+
 export interface Conversation {
   id: number
   project_id: number
@@ -151,7 +187,11 @@ export interface Artifact {
   id: number
   title?: string
   trace_id?: string
+  repo?: string        // site | code | image | doc
   files?: Record<string, { name: string; size: number; url?: string }>
+  preview_url?: string
+  download_url?: string
+  status?: string      // uploading | done | failed
   created_at?: string
 }
 

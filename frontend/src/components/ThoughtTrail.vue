@@ -19,13 +19,13 @@ const INTENT_COLORS: Record<string, string> = {
 }
 
 const STAGE_LABELS: Record<string, string> = {
-  enter_router: '路由分发',
-  dispatch: '技能调度',
-  enter_planner: '规划需求',
-  enter_coder: '编写代码',
-  enter_reviewer: '评审校验',
-  previewing: '投递预览',
-  preview: '生成预览',
+  enter_router: '意图路由 — 识别你的需求类型',
+  dispatch: '技能调度 — 加载 AI 能力',
+  enter_planner: '需求规划 — 拆解任务/制定步骤',
+  enter_coder: '代码生成 — 编写构建代码',
+  enter_reviewer: '评审校验 — 检查完整性',
+  previewing: '投递预览 — 上传预览环境',
+  preview: '生成预览 — 产出可预览页面',
   done: '完成',
 }
 

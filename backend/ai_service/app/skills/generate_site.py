@@ -204,9 +204,11 @@ async def generate_stream(
     trace_id: Optional[str] = None,
     is_cancelled=None,
     intent: Optional[str] = None,
+    level2: Optional[str] = None,
     industry: Optional[str] = None,
     checkpoint: Optional[dict] = None,
     resume_mode: str = "resume",
+    **kwargs,
 ) -> AsyncGenerator[Dict, None]:
     # 根据意图选 Coder 系统提示(游戏 vs 建站)
     coder_prompt = SYS_CODER_GAME if intent == "game" else SYS_CODER

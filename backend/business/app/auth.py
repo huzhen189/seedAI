@@ -14,6 +14,7 @@ from .cache import cache_user_get, cache_user_set
 from .config import settings
 from .db import get_db
 from .models import User
+from .repos.user_repo import user_repo
 from .schemas import LoginReq, RefreshReq, RegisterReq, UpdateMeReq, UserResp
 from .security import (
     ACCESS_COOKIE,
@@ -67,21 +68,24 @@ def _clear_cookies(resp: Response) -> None:
         resp.delete_cookie(name, domain=settings.cookie_domain or None)
 
 
+def _to_resp(u: User) -> UserResp:
+    return UserResp(id=u.id, username=u.username, nickname=u.nickname,
+                    email=u.email, role=u.role, plan=u.plan)
+
+
 @router.post("/register", response_model=UserResp)
 async def register(req: RegisterReq, response: Response, db=Depends(get_db)):
-    # 唯一性校验:用户名必查;邮箱仅当用户填写时才参与查重(允许空邮箱用户)。
-    # 用 or_ 合并,任一命中即视为已存在 -> 409,防止重复账号 / 邮箱撞车。
-    conditions = [User.username == req.username]
+    # 唯一性校验
+    existing = await user_repo.get_by_username(db, req.username)
+    if existing:
+        raise HTTPException(status_code=409, detail="username already exists")
     if req.email:
-        conditions.append(User.email == req.email)
-    exists = await db.scalar(select(User).where(or_(*conditions)))
-    if exists:
-        raise HTTPException(status_code=409, detail="username or email already exists")
-
-    # 新建用户:默认 role=user、plan=free(超级管理员由 SEED_SUPER_ADMIN 种子注入,
-    # 不在此开放自助注册);nickname 缺省回退为用户名;密码经 bcrypt 哈希存储,
-    # 绝不落明文。
-    user = User(
+        existing_email = await user_repo.get_by_email(db, req.email)
+        if existing_email:
+            raise HTTPException(status_code=409, detail="email already exists")
+    # 通过 Repo 创建(内部走 Redis+MySQL 双写)
+    user = await user_repo.create(
+        db,
         username=req.username,
         nickname=req.nickname or req.username,
         email=req.email or None,
@@ -89,43 +93,17 @@ async def register(req: RegisterReq, response: Response, db=Depends(get_db)):
         role="user",
         plan="free",
     )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    # 注册即签发并下发 Cookie,用户无需再走一次登录。
-    _set_cookies(
-        response,
-        create_access_token(user.id, user.role),
-        create_refresh_token(user.id),
-    )
-    return UserResp(
-        id=user.id,
-        username=user.username,
-        nickname=user.nickname,
-        email=user.email,
-        role=user.role,
-        plan=user.plan,
-    )
+    _set_cookies(response, create_access_token(user.id, user.role), create_refresh_token(user.id))
+    return _to_resp(user)
 
 
 @router.post("/login", response_model=UserResp)
 async def login(req: LoginReq, response: Response, db=Depends(get_db)):
-    user = await db.scalar(select(User).where(User.username == req.username))
+    user = await user_repo.get_by_username(db, req.username)
     if not user or not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid credentials")
-    _set_cookies(
-        response,
-        create_access_token(user.id, user.role),
-        create_refresh_token(user.id),
-    )
-    return UserResp(
-        id=user.id,
-        username=user.username,
-        nickname=user.nickname,
-        email=user.email,
-        role=user.role,
-        plan=user.plan,
-    )
+    _set_cookies(response, create_access_token(user.id, user.role), create_refresh_token(user.id))
+    return _to_resp(user)
 
 
 @router.post("/refresh", response_model=UserResp)
@@ -142,22 +120,11 @@ async def refresh(req: RefreshReq, response: Response, db=Depends(get_db)):
     except Exception:
         raise HTTPException(status_code=401, detail="invalid refresh token")
 
-    user = await db.get(User, uid)
+    user = await user_repo.get_by_id(db, uid)
     if not user:
         raise HTTPException(status_code=401, detail="user not found")
-    _set_cookies(
-        response,
-        create_access_token(user.id, user.role),
-        create_refresh_token(user.id),
-    )
-    return UserResp(
-        id=user.id,
-        username=user.username,
-        nickname=user.nickname,
-        email=user.email,
-        role=user.role,
-        plan=user.plan,
-    )
+    _set_cookies(response, create_access_token(user.id, user.role), create_refresh_token(user.id))
+    return _to_resp(user)
 
 
 @router.post("/logout")
@@ -168,59 +135,42 @@ async def logout(response: Response):
 
 @router.get("/me", response_model=UserResp)
 async def me(user=Depends(get_current_user), db=Depends(get_db)):
-    # 读缓存优先(活跃用户常用数据,30min 过期)
     cached = await cache_user_get(user.id)
     if cached:
         return UserResp(**cached)
-    u = await db.get(User, user.id)
+    u = await user_repo.get_by_id(db, user.id)
     if not u:
         raise HTTPException(status_code=404, detail="user not found")
-    data = UserResp(
-        id=u.id,
-        username=u.username,
-        nickname=u.nickname,
-        email=u.email,
-        role=u.role,
-        plan=u.plan,
-    ).model_dump()
-    await cache_user_set(user.id, data)  # 回填
+    data = _to_resp(u).model_dump()
+    await cache_user_set(user.id, data)
     return UserResp(**data)
 
 
 @router.patch("/me", response_model=UserResp)
 async def update_me(req: UpdateMeReq, user=Depends(get_current_user), db=Depends(get_db)):
-    """修改当前用户信息:昵称 / 邮箱 / 密码(改密码需验旧密码)。"""
-    u = await db.get(User, user.id)
+    u = await user_repo.get_by_id(db, user.id)
     if not u:
         raise HTTPException(status_code=404, detail="user not found")
 
     # 邮箱变更需查重(排除自己)
     if req.email is not None and req.email != u.email:
-        exists = await db.scalar(select(User).where((User.email == req.email) & (User.id != u.id)))
-        if exists:
+        existing = await user_repo.get_by_email(db, req.email)
+        if existing and existing.id != u.id:
             raise HTTPException(status_code=409, detail="email already exists")
-        u.email = req.email
-
-    if req.nickname is not None:
-        u.nickname = req.nickname
 
     if req.new_password:
-        # 即便已登录也要验旧密码:防止会话被劫持时攻击者无声改密把自己锁在外面。
-        # 旧密码错误直接 400,不泄露任何额外信息。
         if not req.old_password or not verify_password(req.old_password, u.password_hash):
             raise HTTPException(status_code=400, detail="old password incorrect")
         u.password_hash = hash_password(req.new_password)
+        await db.commit()
+        await db.refresh(u)
 
-    await db.commit()
-    await db.refresh(u)
-    # 更新缓存(让 /auth/me 立即生效)
-    data = UserResp(
-        id=u.id,
-        username=u.username,
-        nickname=u.nickname,
-        email=u.email,
-        role=u.role,
-        plan=u.plan,
-    ).model_dump()
+    # 普通字段走 Repo update(自动 Redis 缓存)
+    u = await user_repo.update_profile(
+        db, u,
+        nickname=req.nickname,
+        email=req.email,
+    )
+    data = _to_resp(u).model_dump()
     await cache_user_set(u.id, data)
     return UserResp(**data)

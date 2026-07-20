@@ -14,7 +14,7 @@ SYS_PROMPTS: dict[str, str] = {
     "explain": "你是编程入门导师，用通俗易懂的中文解释概念和知识点，多举实际例子。",
     "debug": "你是资深 Debug 专家。根据用户贴的错误信息给出根因分析、修复方案和预防建议。用中文。",
     "compare": "你是技术选型顾问。对比用户提到的技术方案，列出各自优劣、适用场景和推荐。用中文。",
-    "casual": "你是友好的编程助手，轻松自然地回答用户的日常问题。",
+    "casual": "你叫小胡，是一个友好的AI编程助手。你对用户自称「小胡」，用轻松自然的语气回答。如果有人问你是谁，你说你是小胡，一个智能编程助手。",
     "text": "你是翻译专家。把用户提供的文本准确翻译到目标语言，只输出翻译结果。",
 }
 SYS_DEFAULT = SYS_PROMPTS["explain"]
@@ -31,6 +31,34 @@ async def explain_skill(
 ) -> str:
     sys_prompt = SYS_PROMPTS.get(level2 or "", SYS_DEFAULT)
     SKILL_LOG.info("[chat] 问答开始 trace=%s model=%s level2=%s", trace_id, model_id, level2)
+
+    # 搜索增强: 取最后一条用户消息, 尝试联网搜索, 拼接结果到 system prompt
+    user_query = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            user_query = m.get("content", "") or ""
+            break
+    if user_query:
+        try:
+            from ..tools.web_search import web_search
+            search_res = await web_search(user_query, top_k=3)
+            if search_res.get("ok") and search_res.get("results"):
+                snippets = []
+                for r in search_res["results"][:3]:
+                    sn = f"- {r['title']}: {r['snippet']}"[:300]
+                    if r.get("url"):
+                        sn += f" ({r['url']})"
+                    snippets.append(sn)
+                if snippets:
+                    sys_prompt += (
+                        f"\n\n【联网搜索结果（{search_res.get('provider','?')}）】\n"
+                        + "\n".join(snippets)
+                        + "\n请结合以上实时信息回答用户的问题。如果搜索结果不相关，请用自己的知识回答。"
+                    )
+                    SKILL_LOG.info("[chat] 搜索增强 trace=%s provider=%s hits=%d", trace_id, search_res.get("provider"), len(snippets))
+        except Exception as e:
+            SKILL_LOG.debug("[chat] 搜索增强跳过 trace=%s: %s", trace_id, e)
+
     t0 = time.time()
     try:
         chat = get_chat_model(model_id, streaming=False)
