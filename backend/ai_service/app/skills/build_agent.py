@@ -241,7 +241,7 @@ def _deliver(html: str, trace_id: str) -> Optional[str]:
 
 register_skill(
     name="build_agent",
-    intent_tags=["建站", "生成", "网站", "网页", "页面"],
+    intent_tags=[],  # 已废弃, 由 requirement_agent + builder_agent 替代
     handler=build_agent,
     is_graph=False,
     description="智能建站助手: 需求分析→文案确认→代码生成",
