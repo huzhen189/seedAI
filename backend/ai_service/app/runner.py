@@ -22,6 +22,7 @@ async def run_skill(
     trace_id: Optional[str] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
     intent_info: Optional[dict] = None,
+    **extra_kwargs,  # 透传: requirement_doc, project_status, conversation_summary 等
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """统一入口:意图 → 分发 → Skill 执行 → done。"""
     logger.info(
@@ -83,6 +84,7 @@ async def run_skill(
                 intent=intent_val,
                 level2=level2,
                 industry=industry,
+                **extra_kwargs,
             ):
                 if isinstance(item, dict) and "event" in item:
                     yield item

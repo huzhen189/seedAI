@@ -370,6 +370,9 @@ async def worker_loop(concurrency: int = 1):
                     skill_name, model_id, messages,
                     trace_id=trace_id, is_cancelled=_cancelled,
                     intent_info=intent,
+                    requirement_doc=job.get("requirement_doc"),
+                    project_status=job.get("project_status", "draft"),
+                    conversation_summary=job.get("conversation_summary", ""),
                 ):
                     await q.publish(trace_id, event)
             except Exception as e:  # 防御:避免 Worker 崩溃
