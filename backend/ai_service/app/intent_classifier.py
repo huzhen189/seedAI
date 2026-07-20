@@ -82,22 +82,28 @@ def classify(messages: list[dict], model_id: str = "deepseek", checkpoint_info: 
     if not last.strip():
         return _default()
 
-    # 上下文关联: 前端的 context_hint 优先, 否则走 Chroma 向量检索
+    # 上下文关联: 1.前端context_hint 2.Chroma向量检索 3.直接读上条回复(零依赖兜底)
     ctx_hint = context_hint
     if not ctx_hint and conversation_id:
         try:
             from .rag import find_relevant_messages
             relevant_ids = find_relevant_messages(last, conversation_id)
             if relevant_ids:
-                # 取最近一条关联消息的 assistant 回复做摘要
                 relevant = [m for m in messages if m.get("_msg_id") in relevant_ids]
                 ctx_text = " ".join(m.get("content", "")[:200] for m in relevant[-6:])
-                context_hint = _summarize_context(ctx_text)
+                ctx_hint = _summarize_context(ctx_text)
         except Exception:
             pass
-    if context_hint:
-        logger.info("意图分类 [上下文] hint=%.80s", context_hint)
-        last = f"用户输入: {last}\n上下文: {context_hint}"
+    # 零依赖兜底: 直接读最后1条assistant回复做关键词摘要
+    if not ctx_hint:
+        for m in reversed(messages):
+            if m.get("role") == "assistant":
+                ctx_hint = _summarize_context(m.get("content", ""))
+                break
+    if ctx_hint:
+        logger.info("意图分类 [上下文] source=%s hint=%.80s",
+                   "frontend" if context_hint else ("chroma" if conversation_id else "fallback"), ctx_hint)
+        last = f"用户输入: {last}\n上下文: {ctx_hint}"
 
     sys_prompt = INTENT_SYSTEM
     if checkpoint_info:
