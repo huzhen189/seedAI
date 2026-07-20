@@ -72,10 +72,21 @@ async def run_skill(
     level2 = intent_info.get("level2") if intent_info else None
     industry = intent_info.get("industry", "other") if intent_info else "other"
     intent_val = intent_info.get("level1") if intent_info else None
+    logger.info(
+        "[Runner] [1/3] 分发 skill=%s 意图=%s/%s 行业=%s is_graph=%s doc=%s status=%s summary=%s",
+        entry.name, intent_val or "-", level2 or "-", industry,
+        entry.is_graph,
+        "有" if extra_kwargs.get("requirement_doc") else "无",
+        extra_kwargs.get("project_status", "?"),
+        "有" if extra_kwargs.get("conversation_summary") else "无",
+    )
 
     handler = entry.handler
+    t0 = time.time()
+    event_cnt = 0
     try:
         if entry.is_graph or inspect.isasyncgenfunction(handler):
+            logger.info("[Runner] [2/3] 开始执行 skill=%s (async生成器)", entry.name)
             async for item in handler(
                 model_id=model_id,
                 messages=messages,
@@ -86,18 +97,24 @@ async def run_skill(
                 industry=industry,
                 **extra_kwargs,
             ):
+                event_cnt += 1
                 if isinstance(item, dict) and "event" in item:
                     yield item
                 else:
                     yield ev("token", data=item if isinstance(item, str) else str(item))
         else:
+            logger.info("[Runner] [2/3] 开始执行 skill=%s (同步)", entry.name)
             result = await handler(model_id=model_id, messages=messages, trace_id=trace_id)
+            event_cnt += 1
             if isinstance(result, dict) and "event" in result:
                 yield result
             else:
                 yield ev("token", data=result if isinstance(result, str) else str(result))
     except Exception as e:
-        logger.warning("Skill '%s' 异常 trace=%s: %s", skill_name, trace_id, e)
+        elapsed = (time.time() - t0) * 1000
+        logger.error("[Runner] skill=%s 执行异常 耗时=%.0fms 错误=%s: %s",
+                    entry.name, elapsed, type(e).__name__, e)
         yield ev("error", message=f"{type(e).__name__}: {e}")
-    logger.info("◼ trace=%s 执行完毕, 发送 done", trace_id)
+    elapsed = (time.time() - t0) * 1000
+    logger.info("[Runner] [3/3] 执行完毕 skill=%s 事件数=%d 耗时=%.0fms", entry.name, event_cnt, elapsed)
     yield ev("done")

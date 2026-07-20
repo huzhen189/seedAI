@@ -306,62 +306,80 @@ async def worker_loop(concurrency: int = 1):
         while True:
             try:
                 job = await q.dequeue()
-                logger.info("Worker 从队列取出任务 trace=%s", job.get("trace_id"))
+                logger.info("[Worker] [1/6] 从队列取出任务 trace=%s", job.get("trace_id"))
             except Exception as e:
-                logger.warning("Worker dequeue 失败, 1s 后重试: %s", e)
+                logger.warning("[Worker] 取任务失败,1秒后重试: %s", e)
                 await asyncio.sleep(1)
                 continue
             trace_id = job.get("trace_id")
             model_id = job.get("model_id")
             messages = job.get("messages", [])
             skill = job.get("skill")
-
             conversation_id = job.get("conversation_id")
 
-            # 索引消息到 Chroma(向量上下文检测)
+            # ── [2/6] Chroma 向量索引 ──
             if conversation_id:
                 from .rag import index_message
-                logger.info("[Work] 索引 %d 条消息到向量库 conv=%s", len(messages), conversation_id)
+                logger.info("[Worker] [2/6] Chroma向量索引 conv=%d msgs=%d 开始...",
+                           conversation_id, len(messages))
+                indexed = 0
                 for i, msg in enumerate(messages):
                     idx = msg.get("_msg_id") or (conversation_id * 1000 + i)
-                    index_message(idx, conversation_id, msg.get("role", "user"), msg.get("content", ""))
+                    try:
+                        index_message(idx, conversation_id, msg.get("role", "user"), msg.get("content", ""))
+                        indexed += 1
+                    except Exception:
+                        pass
+                logger.info("[Worker] [2/6] Chroma索引完成 成功=%d/%d", indexed, len(messages))
+            else:
+                logger.info("[Worker] [2/6] 跳过Chroma索引(无conversation_id)")
 
             async def _cancelled(trace_id=trace_id):
                 return await q.is_cancelled(trace_id) if trace_id else False
 
             try:
-                # 记录取到的任务详情
+                # ── [3/6] 上下文检测 ──
+                ctx_hint = job.get("context_hint", "")
+                summary = job.get("conversation_summary", "")
+                doc = job.get("requirement_doc")
+                proj_status = job.get("project_status", "draft")
                 user_text = ""
                 for msg in messages:
                     if msg.get("role") == "user":
-                        user_text = msg.get("content", "")[:200]
+                        user_text = (msg.get("content", "") or "")[:100]
                         break
-                logger.info(
-                    "Worker 收到任务 trace=%s model=%s conv=%s skill=%s msgs=%d input=%.100s",
-                    trace_id, model_id, conversation_id, skill or "auto", len(messages), user_text,
-                )
-                intent = detect_intent(messages, model_id, conversation_id=conversation_id, context_hint=job.get("context_hint", ""))
+                logger.info("[Worker] [3/6] 上下文检测 输入=\"%.80s\" ctx_hint=%.40s summary=%.40s",
+                           user_text, ctx_hint[:40] if ctx_hint else "无", summary[:40] if summary else "无")
+                intent = detect_intent(messages, model_id,
+                                       conversation_id=conversation_id,
+                                       context_hint=ctx_hint)
+                ctx_result = ctx_hint or "检测完成"
+                logger.info("[Worker] [3/6] 上下文结果 ctx=%.60s", ctx_result)
+
+                # ── [4/6] 意图分类 ──
                 skill_name = skill or skill_for(intent["level1"], intent["level2"]) or "explain"
-                # 状态路由: draft/planning → requirement_agent (跳过直接生成)
-                proj_status = job.get("project_status", "draft")
+                logger.info("[Worker] [4/6] 意图分类 结果=一级:%s 二级:%s 置信度:%.0f%% 行业:%s 候选skill:%s",
+                           intent["level1"], intent["level2"],
+                           intent.get("confidence", 0) * 100,
+                           intent.get("industry", "?"), skill_name)
+
+                # ── [5/6] 路由分发 ──
                 if skill_name == "builder_agent" and proj_status in ("draft", "planning"):
-                    logger.info("[路由] 项目状态=%s → 切换 requirement_agent", proj_status)
+                    logger.info("[Worker] [5/6] 状态路由 项目状态=%s → builder→requirement_agent", proj_status)
                     skill_name = "requirement_agent"
-                logger.info(
-                    "意图识别结果 trace=%s -> %s/%s(conf=%.2f) industry=%s -> skill=%s",
-                    trace_id, intent["level1"], intent["level2"],
-                    intent.get("confidence", 0), intent.get("industry", "?"), skill_name,
-                )
+                elif intent["level1"] == "unsupported":
+                    logger.info("[Worker] [5/6] 路由结果 不支持的功能 → explain降级")
+                else:
+                    logger.info("[Worker] [5/6] 路由结果 skill=%s doc=%s status=%s",
+                               skill_name, "有" if doc else "无", proj_status)
 
                 if intent["level1"] == "unsupported":
-                    # 记录 unsupported 统计(给业务端 metrics 用)
                     async for event in run_skill(
                         "explain", model_id, messages,
                         trace_id=trace_id, is_cancelled=_cancelled,
                         intent_info=intent,
                     ):
                         await q.publish(trace_id, event)
-                    # 额外发一个 unsupported 事件
                     await q.publish(
                         trace_id,
                         {"event": "unsupported", "data": {
@@ -369,18 +387,26 @@ async def worker_loop(concurrency: int = 1):
                         }},
                     )
                     await q.publish(trace_id, {"event": "done", "data": {}})
+                    logger.info("[Worker] [6/6] 执行完毕 unsupported→已降级")
                     continue
 
+                # ── [6/6] 执行 ──
+                event_cnt = 0
                 async for event in run_skill(
                     skill_name, model_id, messages,
                     trace_id=trace_id, is_cancelled=_cancelled,
                     intent_info=intent,
-                    requirement_doc=job.get("requirement_doc"),
-                    project_status=job.get("project_status", "draft"),
-                    conversation_summary=job.get("conversation_summary", ""),
+                    requirement_doc=doc,
+                    project_status=proj_status,
+                    conversation_summary=summary,
                 ):
                     await q.publish(trace_id, event)
-            except Exception as e:  # 防御:避免 Worker 崩溃
+                    event_cnt += 1
+                logger.info("[Worker] [6/6] 执行完毕 trace=%s skill=%s 共发出%d个事件",
+                           trace_id, skill_name, event_cnt)
+            except Exception as e:
+                logger.error("[Worker] 执行异常 trace=%s skill=%s 错误=%s: %s",
+                            trace_id, skill_name, type(e).__name__, e)
                 await q.publish(trace_id, {"event": "error", "data": str(e)})
                 await q.publish(trace_id, {"event": "done", "data": {}})
 

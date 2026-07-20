@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 from typing import Dict
 
@@ -61,10 +62,10 @@ SYS_REQUIREMENT = (
 async def requirement_agent_handler(
     model_id: str, messages: list, trace_id: str | None = None,
     is_cancelled=None, project_status: str = "draft",
-    industry: str = "other", **kwargs,
+    industry: str = "other", requirement_doc: dict | None = None, **kwargs,
 ) -> AsyncGenerator[Dict, None]:
-    AGENT_LOG.info("[req] 需求分析 trace=%s status=%s industry=%s msgs=%d",
-                   trace_id, project_status, industry, len(messages))
+    AGENT_LOG.info("[需求] [1/4] 开始分析 trace=%s 行业=%s 状态=%s msgs=%d 已有文档=%s",
+                   trace_id, industry, project_status, len(messages), "有" if requirement_doc else "无")
 
     yield ev("node", stage="analyzing", agent_id="requirement_agent")
     yield ev("think", stage="analyst", content="正在分析您的需求…",
@@ -72,21 +73,26 @@ async def requirement_agent_handler(
 
     # 行业特化指令(注入 system prompt)
     focus = INDUSTRY_FOCUS.get(industry, INDUSTRY_FOCUS["other"])
-    AGENT_LOG.info("[req] 行业=%s focus=%.80s", industry, focus)
+    AGENT_LOG.info("[需求] [1/4] 行业特化 行业=%s 提问策略=%.80s", industry, focus)
 
     full_sys = f"{SYS_REQUIREMENT}\n当前行业: {industry}\n{focus}\n用户输入: "
 
     req_msgs = [{"role": "user", "content": m.get("content", "")}
                 for m in messages if m.get("role") == "user"]
+    user_input = req_msgs[-1]["content"][:100] if req_msgs else "(无)"
+    AGENT_LOG.info("[需求] [2/4] 调用LLM需求分析 model=%s input=%.100s", model_id, user_input)
 
+    t0 = time.time()
     chat = get_chat_model(model_id, streaming=False)
     resp = chat.invoke([{"role": "system", "content": full_sys}, *req_msgs])
     raw = (resp.content or "").strip()
-    AGENT_LOG.info("[req] LLM完成 chars=%d", len(raw))
+    AGENT_LOG.info("[需求] [2/4] LLM完成 耗时=%.0fms 输出长度=%d", (time.time() - t0) * 1000, len(raw))
 
     # 解析输出
+    AGENT_LOG.info("[需求] [3/4] 解析LLM输出 raw=%.200s", raw)
     m = __import__("re").search(r"\{[\s\S]*\}", raw)
     if not m:
+        AGENT_LOG.info("[需求] [3/4] 未检测到JSON → 纯文本追问")
         yield ev("token", data=raw, agent_id="requirement_agent")
         yield ev("think", stage="analyst", content="请告诉我更多关于您的项目…",
                  agent_id="requirement_agent")
@@ -96,18 +102,20 @@ async def requirement_agent_handler(
     # 多选方案
     if "options" in data:
         opts = data["options"]
-        AGENT_LOG.info("[req] 出多选方案 question=%s choices=%d",
+        AGENT_LOG.info("[需求] [3/4] 输出=多方案 问题=\"%s\" 选项数=%d",
                        opts.get("question"), len(opts.get("choices", [])))
         yield ev("think", stage="analyst", content=opts.get("question", "请选择一个方案"),
                  agent_id="requirement_agent")
         yield ev("options", question=opts.get("question"), choices=opts.get("choices", []),
                  agent_id="requirement_agent")
+        AGENT_LOG.info("[需求] [4/4] 等待用户选择方案")
         return
 
     # 需求文档
     if "brand" in data and data.get("status") == "confirmed":
-        AGENT_LOG.info("[req] 需求文档完成 brand=%s pages=%d features=%d",
-                       data["brand"].get("name"), len(data.get("pages", [])), len(data.get("features", [])))
+        AGENT_LOG.info("[需求] [3/4] 输出=需求文档 品牌=%s 页面数=%d 功能数=%d 风格=%s",
+                       data["brand"].get("name", "?"), len(data.get("pages", [])),
+                       len(data.get("features", [])), data.get("design_style", "?"))
         summary = [
             f"**品牌**: {data['brand'].get('name','?')}",
             f"**定位**: {data.get('target_user','?')}",
@@ -124,11 +132,13 @@ async def requirement_agent_handler(
         yield ev("requirement_doc", data=data, agent_id="requirement_agent")
         yield ev("paused", stage="await_confirm", plan_title=data["brand"].get("name", ""),
                  agent_id="requirement_agent")
+        AGENT_LOG.info("[需求] [4/4] 需求文档已推送,等待用户确认")
         return
 
     # 信息不全 → 追问
-    AGENT_LOG.info("[req] 信息不全, 继续追问")
+    AGENT_LOG.info("[需求] [3/4] 输出=追问(信息不全)")
     yield ev("token", data=raw, agent_id="requirement_agent")
+    AGENT_LOG.info("[需求] [4/4] 已推送追问消息")
 
 register_skill(
     name="requirement_agent",

@@ -137,8 +137,20 @@ async def registry_summary():
 async def generate(req: GenerateReq, after: str | None = None):
     """SSE 生成端点:入队 → 订阅进度流 → 透传事件流(§3.7 / 1-C)。"""
     q = get_queue()
-    queue_type = type(q).__name__
     trace_id = req.trace_id or uuid.uuid4().hex
+    user_input = ""
+    for m in req.messages:
+        if m.get("role") == "user":
+            user_input = (m.get("content", "") or "")[:80]
+            break
+    logger.info(
+        "[1/3] 接收入参 trace=%s model=%s conv=%s msgs=%d skill=%s "
+        "ctx_hint=%.40s summary=%.40s project=%s doc=%s input=%.80s",
+        trace_id, req.model_id, req.conversation_id, len(req.messages),
+        req.skill or "auto", req.context_hint[:40] if req.context_hint else "-",
+        req.conversation_summary[:40] if req.conversation_summary else "-",
+        req.project_status, "有" if req.requirement_doc else "无", user_input,
+    )
     resuming = await q.stream_exists(trace_id)
     if not resuming:
         await q.open_channel(trace_id)
@@ -154,25 +166,16 @@ async def generate(req: GenerateReq, after: str | None = None):
             "requirement_doc": req.requirement_doc,
         }
         await q.enqueue(job)
-        logger.info(
-            "[generate] 新任务入队 trace=%s model=%s msgs=%d skill=%s queue=%s",
-            trace_id, req.model_id, len(req.messages), req.skill or "auto", queue_type,
-        )
+        logger.info("[2/3] 新任务入队 trace=%s queue=%s", trace_id, type(q).__name__)
     else:
-        after_info = f" after={after}" if after else " 全量回放"
-        logger.info(
-            "[generate] 续接已有流 trace=%s%s queue=%s — 从 Redis Stream 读取事件并透传",
-            trace_id, after_info, queue_type,
-        )
-
+        logger.info("[2/3] 续接已有流 trace=%s after=%s 全量回放", trace_id, after or "无")
     event_count = 0
     async def stream():
         nonlocal event_count
         async for event in q.subscribe(trace_id, after):
             event_count += 1
             yield to_sse(event)
-        logger.info("[generate] 流结束 trace=%s 事件数=%s", trace_id, event_count)
-
+        logger.info("[3/3] SSE流结束 trace=%s 共推送%d个事件", trace_id, event_count)
     return EventSourceResponse(stream())
 
 
