@@ -71,9 +71,53 @@ OLD_TO_LEVELS: dict[str, tuple[str, str]] = {
 }
 
 
+def detect_context(messages: list[dict], conversation_id: int | None = None,
+                   frontend_hint: str = "") -> str:
+    """独立上下文检测: 1.前端hint 2.Chroma向量 3.兜底关键词。
+    返回上下文描述字符串, 供 classify() 拼入 prompt。
+    """
+    last = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last = m.get("content", "") or ""
+            break
+    if not last:
+        return ""
+
+    # 1. 前端 context_hint 优先
+    if frontend_hint:
+        logger.info("[上下文] 来源=frontend hint=%.60s", frontend_hint)
+        return frontend_hint
+
+    # 2. Chroma 向量检索
+    if conversation_id:
+        try:
+            from .rag import find_relevant_messages
+            relevant_ids = find_relevant_messages(last, conversation_id)
+            if relevant_ids:
+                relevant = [m for m in messages if m.get("_msg_id") in relevant_ids]
+                ctx_text = " ".join(m.get("content", "")[:200] for m in relevant[-6:])
+                hint = _summarize_context(ctx_text)
+                if hint:
+                    logger.info("[上下文] 来源=chroma hint=%.60s", hint)
+                    return hint
+        except Exception:
+            pass
+
+    # 3. 零依赖兜底
+    for m in reversed(messages):
+        if m.get("role") == "assistant":
+            hint = _summarize_context(m.get("content", ""))
+            if hint:
+                logger.info("[上下文] 来源=fallback hint=%.60s", hint)
+                return hint
+            break
+    return ""
+
+
 def classify(messages: list[dict], model_id: str = "deepseek", checkpoint_info: dict | None = None,
-             conversation_id: int | None = None, context_hint: str = "") -> dict:
-    """分类, 返回 {level1, level2, confidence, industry, checkpoint_relation}。"""
+             context_hint: str = "") -> dict:
+    """纯分类(上下文已在外部检测好)。"""
     last = ""
     for m in reversed(messages):
         if m.get("role") == "user":
@@ -82,29 +126,11 @@ def classify(messages: list[dict], model_id: str = "deepseek", checkpoint_info: 
     if not last.strip():
         return _default()
 
-    # 上下文关联: 1.前端context_hint 2.Chroma向量检索 3.直接读上条回复(零依赖兜底)
-    ctx_hint = context_hint
-    if not ctx_hint and conversation_id:
-        try:
-            from .rag import find_relevant_messages
-            relevant_ids = find_relevant_messages(last, conversation_id)
-            if relevant_ids:
-                relevant = [m for m in messages if m.get("_msg_id") in relevant_ids]
-                ctx_text = " ".join(m.get("content", "")[:200] for m in relevant[-6:])
-                ctx_hint = _summarize_context(ctx_text)
-        except Exception:
-            pass
-    # 零依赖兜底: 直接读最后1条assistant回复做关键词摘要
-    if not ctx_hint:
-        for m in reversed(messages):
-            if m.get("role") == "assistant":
-                ctx_hint = _summarize_context(m.get("content", ""))
-                break
-    if ctx_hint:
-        logger.info("意图分类 [上下文] source=%s hint=%.80s",
-                   "frontend" if context_hint else ("chroma" if conversation_id else "fallback"), ctx_hint)
-        last = f"用户输入: {last}\n上下文: {ctx_hint}"
+    # 注入上下文
+    if context_hint:
+        last = f"用户输入: {last}\n上下文: {context_hint}"
 
+    # 构建 prompt
     sys_prompt = INTENT_SYSTEM
     if checkpoint_info:
         ck = checkpoint_info

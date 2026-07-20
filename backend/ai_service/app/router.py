@@ -83,7 +83,11 @@ def detect_intent(messages: list[dict], model_id: str = "deepseek",
                   context_hint: str = "") -> dict:
     """返回 {level1, level2, confidence, industry, checkpoint_relation, label}。"""
     t0 = time.time()
-    result = classify(messages, model_id, checkpoint_info=checkpoint_info, conversation_id=conversation_id, context_hint=context_hint)
+    # 步骤1: 上下文检测(独立于分类)
+    from .intent_classifier import detect_context
+    ctx = detect_context(messages, conversation_id=conversation_id, frontend_hint=context_hint)
+    # 步骤2: 纯意图分类
+    result = classify(messages, model_id, checkpoint_info=checkpoint_info, context_hint=ctx)
     l1 = result["level1"]
     l2 = result["level2"]
     elapsed = time.time() - t0
