@@ -25,7 +25,7 @@ export interface ChatCallbacks {
 
 export interface StartChatOptions {
   model: string
-  messages: ChatMessage[]
+  messages?: ChatMessage[]  // 已废弃: 后端从 DB 取历史, 前端只传 q
   traceId: string
   conversationId: number
   cb: ChatCallbacks
@@ -40,7 +40,6 @@ export interface StartChatOptions {
 export function startChat(opts: StartChatOptions): EventSource {
   const params = new URLSearchParams()
   params.set('model', opts.model)
-  params.set('messages', JSON.stringify(opts.messages))
   params.set('trace_id', opts.traceId)
   params.set('conversation_id', String(opts.conversationId))
   if (opts.q) params.set('q', opts.q)

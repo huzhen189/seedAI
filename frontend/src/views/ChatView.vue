@@ -108,7 +108,7 @@ async function resumeConversation() {
   convStore.currentConvId = pc.id
   setActiveGen(pc.id, traceId.value)
   generating.value = true
-  startChat({ model: model.value, messages: [], traceId: traceId.value, conversationId: pc.id, cb: makeCallbacks(0), resume: true })
+  startChat({ model: model.value, traceId: traceId.value, conversationId: pc.id, cb: makeCallbacks(0), resume: true })
 }
 
 async function abortPaused() {
@@ -132,9 +132,6 @@ function doConfirmPlan() {
   generating.value = true
   esRef.value = startChat({
     model: model.value,
-    messages: convStore.messages.filter(m => !m.content.includes('"type":"trail"')).map((m) => ({
-      role: m.role as 'user' | 'assistant', content: m.content,
-    })),
     traceId: traceId.value,
     conversationId: convStore.currentConvId!,
     resume: true,
@@ -585,10 +582,6 @@ async function doSend(text: string) {
 
   esRef.value = startChat({
     model: model.value,
-    messages: convStore.messages.slice(-20).map((m) => ({
-      role: m.role as 'user' | 'assistant',
-      content: (m.content || '').length > 2000 ? (m.content || '').substring(0, 2000) + '...(已截断)' : (m.content || ''),
-    })),
     traceId: traceId.value,
     conversationId: cid,
     q: text,
@@ -608,10 +601,6 @@ async function resume(convId: number, tid: string) {
   setActiveGen(convId, tid)
   esRef.value = startChat({
     model: model.value,
-    messages: convStore.messages.slice(-20).map((m) => ({
-      role: m.role as 'user' | 'assistant',
-      content: (m.content || '').length > 2000 ? (m.content || '').substring(0, 2000) + '...(已截断)' : (m.content || ''),
-    })),
     traceId: tid,
     conversationId: convId,
     cb: makeCallbacks(idx),

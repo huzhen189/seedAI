@@ -167,6 +167,37 @@ def _map_upstream_error(status: int, body: bytes) -> tuple[str, str]:
     return "UPSTREAM_ERROR", message
 
 
+async def _build_messages_from_db(db: AsyncSession, conversation_id: int, request: Request) -> list:
+    """从 DB 取最近 20 条消息 + 当前 q，替代前端传 messages（避开 URL 64KB 限制）。"""
+    messages: list = []
+    if conversation_id:
+        try:
+            db_msgs = await message_repo.list_by_conversation(db, conversation_id)
+            if db_msgs:
+                for m in db_msgs[-20:]:
+                    content = m.content or ""
+                    if len(content) > 2000:
+                        content = content[:2000] + "...(已截断)"
+                    messages.append({"role": m.role, "content": content})
+                logger.info("[chat] DB取消息 conv=%d total=%d 取最近%d", conversation_id, len(db_msgs), len(messages))
+        except Exception as e:
+            logger.warning("[chat] DB取消息失败 conv=%d err=%s", conversation_id, e)
+
+    # 追加当前用户输入(首条消息或新消息)
+    q = request.query_params.get("q")
+    if q:
+        # 避免重复: 如果最后一条消息恰好是同样的 user 内容则不追加
+        if not messages or messages[-1].get("role") != "user" or messages[-1].get("content") != q:
+            messages.append({"role": "user", "content": q})
+            logger.info("[chat] 追加当前用户输入 q=%.60s", q)
+
+    if not messages:
+        raise HTTPException(status_code=400, detail="missing 'q' query param and no history")
+
+    logger.info("[chat] 最终消息数=%d", len(messages))
+    return messages
+
+
 def _parse_messages(request: Request) -> list:
     """从 query 解析消息列表。
 
@@ -388,8 +419,8 @@ async def chat(
         return _sse_auth_error()
     logger.info("[chat] [1/8] 鉴权通过 user=%s role=%s", user.id, user.role)
 
-    # --- 2) 解析消息(含内容安全) ---
-    messages = _parse_messages(request)
+    # --- 2) 从 DB 取最近 20 条消息 + 当前 q ---
+    messages = await _build_messages_from_db(db, conversation_id, request)
     # 清洗用户输入(防 XSS/注入) + 打 _msg_id 给 AI 侧向量索引
     for i, m in enumerate(messages):
         m["_msg_id"] = conversation_id * 1000 + i + 1
