@@ -167,6 +167,24 @@ def _map_upstream_error(status: int, body: bytes) -> tuple[str, str]:
     return "UPSTREAM_ERROR", message
 
 
+def _strip_trail(content: str) -> str | None:
+    """去除思考过程(trail JSON) — 历史消息上下文不需要。返回 None 表示整条消息应丢弃。"""
+    if not content:
+        return None
+    # trail: {"type":"trail","events":[...]}  → 丢弃整条
+    # text:  {"type":"text","data":"..."}      → 取 data
+    try:
+        obj = json.loads(content)
+        if isinstance(obj, dict):
+            if obj.get("type") == "trail":
+                return None  # 丢弃思考过程消息
+            if "data" in obj:
+                return str(obj["data"])
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return content  # 纯文本原样返回
+
+
 async def _build_messages_from_db(db: AsyncSession, conversation_id: int, request: Request) -> list:
     """从 Redis → MySQL 取最近 5 条消息 + 当前 q。
 
@@ -189,6 +207,8 @@ async def _build_messages_from_db(db: AsyncSession, conversation_id: int, reques
         cached = await r.get(redis_key)
         if cached:
             messages = json.loads(cached)
+            # 过滤旧缓存中残留的 trail 消息
+            messages = [m for m in messages if _strip_trail(m.get("content", "")) is not None]
             await r.expire(redis_key, 600)
             logger.info("[chat] Redis命中 conv=%d cursor=%s cnt=%d TTL已刷新",
                        conversation_id, cursor_id or 'latest', len(messages))
@@ -209,10 +229,13 @@ async def _build_messages_from_db(db: AsyncSession, conversation_id: int, reques
             db_msgs.reverse()  # 恢复时间线升序
             for m in db_msgs:
                 content = m.content or ""
+                content = _strip_trail(content)
+                if content is None:
+                    continue  # trail 消息直接丢弃
                 if len(content) > 2000:
                     content = content[:2000] + "...(已截断)"
                 messages.append({"role": m.role, "content": content})
-            logger.info("[chat] MySQL回源 conv=%d cursor=%s db_total_fetched=%d",
+            logger.info("[chat] MySQL回源 conv=%d cursor=%s db_total_fetched=%d kept=%d",
                        conversation_id, cursor_id or 'latest', len(messages))
         except Exception as e:
             logger.warning("[chat] MySQL查询失败 conv=%d err=%s", conversation_id, e)
