@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .analytics import record_error, record_intent_result, record_model_detail, record_skill_outcome, record_user_active
 from .analytics import record_agent_usage, record_context_detection, record_requirement_doc, record_project_status_transition
-from .cache import cache_get, cache_set, ck_delete, ck_get, ck_set, enqueue_write_error
+from .cache import cache_get, cache_set, ck_delete, ck_get, ck_set, enqueue_write_error, get_redis
 from .config import settings
 from .db import get_db
 from .metrics import consume_daily_quota, record_model_usage, record_unsupported
@@ -229,8 +229,62 @@ async def list_agents():
     return data
 
 
+# ---- 对话摘要(Redis 滑动窗口, 每 10 条消息压缩一次) ----
+async def get_summary(conversation_id: int) -> str:
+    """读取对话摘要(500字滑动窗口)"""
+    try:
+        r = await get_redis()
+        val = await r.get(f"summary:{conversation_id}")
+        return val.decode() if isinstance(val, bytes) else (val or "")
+    except Exception:
+        return ""
+
+
+async def save_summary(conversation_id: int, text: str) -> None:
+    """写入对话摘要, 7天过期"""
+    try:
+        r = await get_redis()
+        await r.setex(f"summary:{conversation_id}", 86400 * 7, text[:1000])
+    except Exception:
+        pass
+
+
+async def maybe_compress_summary(conversation_id: int, model: str, latest_user: str, latest_assistant: str) -> None:
+    """每6条消息压缩一次摘要: 旧摘要 + 最新一轮 → LLM → 存 Redis"""
+    try:
+        r = await get_redis()
+        # Redis 计数器: 每轮递增
+        cnt = await r.incr(f"summary_cnt:{conversation_id}")
+        await r.expire(f"summary_cnt:{conversation_id}", 86400 * 7)
+        if cnt % 6 != 1:  # 每6条才压缩一次(第1/7/13...条)
+            return
+        old_summary = await get_summary(conversation_id)
+        logger.info("[chat] 触发摘要压缩 conv=%s round=%s", conversation_id, cnt)
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                compress_prompt = (
+                    "把对话压缩成 ≤200字 摘要(主题/决策/进度)。\n"
+                    f"旧摘要: {old_summary or '(无)'}\n"
+                    f"用户: {latest_user[:300]}\nAI: {latest_assistant[:500]}\n新摘要: "
+                )
+                resp = await client.post(
+                    "https://api.deepseek.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
+                    json={"model": "deepseek-chat", "messages": [{"role":"user","content":compress_prompt}],
+                          "max_tokens": 200, "temperature": 0.3},
+                )
+                data = resp.json()
+                new_summary = data["choices"][0]["message"]["content"].strip()
+                await save_summary(conversation_id, new_summary)
+                logger.info("[chat] 对话摘要已更新 conv=%s len=%d", conversation_id, len(new_summary))
+        except Exception as e:
+            logger.debug("[chat] 摘要压缩失败: %s", e)
+    except Exception:
+        pass
+
+
 async def _sync_checkpoint_to_mysql(conversation_id: int, stage: str,
-                                        ck_data: dict, progress_pct: int) -> None:
+                                     ck_data: dict, progress_pct: int) -> None:
     """后台异步: 将 Redis checkpoint 同步到 MySQL(不阻塞 SSE)"""
     try:
         from .db import SessionLocal as _S
@@ -262,6 +316,8 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
                 if terminal_status != "paused":
                     await ck_delete(conversation_id)
                 logger.info("[chat] 后台落库完成 trace=%s", tid)
+                # 落库成功后: 触发对话摘要压缩(异步, 失败不影响主流程)
+                asyncio.create_task(maybe_compress_summary(conversation_id, model, user_text, assistant_text))
                 return  # 成功, 直接返回
         except Exception as e:
             last_err = e
@@ -373,7 +429,7 @@ async def chat(
     logger.info("[chat] [4/8] 计量已记录 + trace=%s 已创建", tid)
 
     payload = {"model_id": model, "messages": messages, "trace_id": tid, "conversation_id": conversation_id}
-    # 前端上下文检测(context_hint)
+    # 前端上下文检测 + Redis 对话摘要
     ctx = request.query_params.get("context_hint")
     if ctx:
         payload["context_hint"] = ctx
@@ -381,6 +437,9 @@ async def chat(
         await record_context_detection("webllm")
     else:
         await record_context_detection("chroma")
+    summary = await get_summary(conversation_id)
+    if summary:
+        payload["conversation_summary"] = summary
     gen_url = f"{settings.ai_service_url}/generate"
     # 项目上下文: 状态+需求文档
     try:
