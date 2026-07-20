@@ -879,6 +879,10 @@ watch(pendingRetry, (r) => {
             </span>
           </div>
         </div>
+        <div v-if="pendingOptionsText" class="pending-opt-badge">
+          📌 待发送: {{ pendingOptionsText }}
+          <button class="pob-clear" @click="pendingOptionsText = ''">✕ 清除</button>
+        </div>
         <ChatInput
           v-model:value="input"
           v-model:model="model"
@@ -903,7 +907,7 @@ watch(pendingRetry, (r) => {
           </div>
         </div>
         <!-- 方案选择弹窗(单选, 确认后记录, 下次 send 一起发送) -->
-        <div v-if="showOptionsModal && optionsData" class="options-modal-backdrop" @click.self="cancelOptions">
+        <div v-if="showOptionsModal && optionsData" class="options-modal-backdrop" @click.self="cancelOptions" @keydown.escape="cancelOptions">
           <div class="options-modal">
             <div class="om-title">{{ optionsData.question || '请选择方案' }}</div>
             <div class="om-choices">
@@ -1169,8 +1173,8 @@ watch(pendingRetry, (r) => {
   padding: 12px; border-radius: 8px; border: 1px solid var(--border);
   cursor: pointer; transition: border-color .2s, background .2s;
 }
-.om-choice.on { border-color: #3b82f6; background: #eff6ff; }
-.om-choice:hover { border-color: #93c5fd; }
+.om-choice.on { border-color: #3b82f6; background: rgba(59,130,246,.08); }
+.om-choice:hover { border-color: #93c5fd; background: rgba(59,130,246,.04); }
 .om-radio { margin-top: 3px; accent-color: #3b82f6; }
 .om-info { flex: 1; min-width: 0; }
 .om-name { font-weight: 600; font-size: 14px; color: var(--text); }
@@ -1184,6 +1188,19 @@ watch(pendingRetry, (r) => {
 .om-confirm:not(:disabled):hover { background: #2563eb; }
 .om-cancel { background: #f1f5f9; color: #64748b; }
 .om-cancel:hover { background: #e2e8f0; }
+
+/* ── 待发送选项提示 ── */
+.pending-opt-badge {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; margin: 0 16px 4px;
+  background: rgba(59,130,246,.1); border: 1px solid #93c5fd;
+  border-radius: 6px; font-size: 12px; color: #1d4ed8;
+}
+.pob-clear {
+  margin-left: auto; border: none; background: none;
+  color: #94a3b8; cursor: pointer; font-size: 12px;
+}
+.pob-clear:hover { color: #dc2626; }
 
 .feedback {
   display: flex;
