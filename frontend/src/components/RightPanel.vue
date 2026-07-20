@@ -3,12 +3,11 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import type { Artifact } from '../types'
 
 const props = defineProps<{
-  artifacts: Artifact[]
+  artifacts: Artifact[]          // 生成的文件(COS/本地)
   generating: boolean
-  generatedHtml: string
-  previewUrl: string | null
+  previewUrl: string | null       // COS直链
   projectId: number | null
-  requirementDoc: Record<string, any> | null
+  requirementDoc: Record<string, any> | null  // 需求文档
 }>()
 
 const emit = defineEmits<{ refresh: [] }>()
@@ -144,31 +143,10 @@ const mode = computed(() => {
       <div v-if="!generating && !allFiles.length" class="tree-empty">暂无文件</div>
     </div>
 
-    <!-- 右侧预览区 -->
+    <!-- 右侧预览区: 仅展示生成的文件内容 -->
     <div class="preview-area">
-      <!-- HTML 预览 -->
-      <iframe
-        v-if="mode === 'html' && currentFile"
-        class="pv-frame"
-        :src="currentFile.url || undefined"
-        :srcdoc="currentFile.url ? undefined : ((currentFile.artifact?.files?.[currentFile.name || ''] as any)?.content || '')"
-        sandbox="allow-scripts allow-same-origin allow-forms"
-        title="preview"
-      ></iframe>
-
-      <!-- 图片预览 -->
-      <div v-else-if="mode === 'image' && currentFile?.url" class="pv-image">
-        <img :src="currentFile.url" :alt="currentFile.name" />
-      </div>
-
-      <!-- 代码/文本预览 -->
-      <div v-else-if="mode === 'code'" class="pv-code">
-        <div class="pv-code-head">{{ currentFile?.name }}</div>
-        <pre><code>{{ (currentFile?.artifact.files?.[currentFile?.name || ''] as any)?.content || '(二进制文件，无法预览)' }}</code></pre>
-      </div>
-
-      <!-- 需求文档预览 -->
-      <div v-else-if="mode === 'requirement'" class="pv-requirement">
+      <!-- 需求文档预览(优先) -->
+      <div v-if="mode === 'requirement'" class="pv-requirement">
         <div class="pv-code-head">📋 {{ requirementDoc?.brand?.name || '需求文档' }}</div>
         <div class="req-body">
           <div v-if="requirementDoc?.brand" class="req-section">
@@ -205,15 +183,37 @@ const mode = computed(() => {
         </div>
       </div>
 
-      <!-- 生成中占位 -->
-      <div v-if="generating" class="pv-placeholder">
+      <!-- HTML 预览(生成的文件) -->
+      <iframe
+        v-else-if="mode === 'html' && currentFile"
+        class="pv-frame"
+        :src="currentFile.url || undefined"
+        :srcdoc="currentFile.url ? undefined : ((currentFile.artifact?.files?.[currentFile.name || ''] as any)?.content || '')"
+        sandbox="allow-scripts allow-same-origin allow-forms"
+        title="preview"
+      ></iframe>
+
+      <!-- 图片预览 -->
+      <div v-else-if="mode === 'image' && currentFile?.url" class="pv-image">
+        <img :src="currentFile.url" :alt="currentFile.name" />
+      </div>
+
+      <!-- 代码/文本预览 -->
+      <div v-else-if="mode === 'code'" class="pv-code">
+        <div class="pv-code-head">{{ currentFile?.name }}</div>
+        <pre><code>{{ (currentFile?.artifact.files?.[currentFile?.name || ''] as any)?.content || '(二进制文件，无法预览)' }}</code></pre>
+      </div>
+
+      <!-- 生成中 -->
+      <div v-else-if="generating && !allFiles.length" class="pv-placeholder">
         <div class="spinner"></div>
         <span>AI 正在生成…</span>
       </div>
 
       <!-- 空状态 -->
-      <div v-if="!generating && !allFiles.length" class="pv-placeholder">
+      <div v-else class="pv-placeholder">
         <span>暂无生成产物</span>
+        <span class="pv-hint">文件生成后将在此预览</span>
       </div>
     </div>
   </div>
@@ -362,8 +362,9 @@ const mode = computed(() => {
   justify-content: center;
   height: 100%;
   color: var(--muted);
-  gap: 10px;
+  gap: 6px;
 }
+.pv-hint { font-size: 11px; opacity: 0.6; }
 .spinner {
   width: 24px;
   height: 24px;

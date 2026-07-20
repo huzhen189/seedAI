@@ -442,7 +442,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planNodes.value.push({ title: d.title, goal: d.goal, steps: d.steps })
     },
     onToken: (t) => {
-      generatedHtml.value += t
+      // 仅 builder_agent 的 token 才是生成的 HTML 代码
+      if (currentIntent.value.level1 === 'build') generatedHtml.value += t
       const m = convStore.messages[assistantIdx]
       if (m) {
         m.content += t
@@ -988,7 +989,6 @@ watch(pendingRetry, (r) => {
       <RightPanel
         :artifacts="projectArtifacts"
         :generating="generating"
-        :generatedHtml="generatedHtml"
         :previewUrl="previewUrl"
         :projectId="projectStore.currentProjectId"
         :requirementDoc="requirementDoc"
