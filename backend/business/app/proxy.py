@@ -380,8 +380,7 @@ async def _sync_checkpoint_to_mysql(conversation_id: int, stage: str,
 
 async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
                       terminal_status: str, user_text: str, assistant_text: str,
-                      preview_url: str | None = None,
-                      trail_parts: list | None = None) -> None:
+                      preview_url: str | None = None) -> None:
     """后台异步落库(独立 session, 3 次重试, 全失败入 Redis 错误队列兜底)"""
     from .db import SessionLocal as _S
     last_err: Exception | None = None
@@ -390,7 +389,7 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
             logger.info("[chat] [8/8] 后台落库 trace=%s attempt=%d", tid, attempt + 1)
             async with _S() as s:
                 await finish_trace(s, tid, terminal_status, max(0, len(assistant_text) // 4))
-                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url, trail_parts)
+                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url)
                 # 流结束(done/aborted/error)清理 Redis checkpoint; paused 保留供恢复
                 if terminal_status != "paused":
                     await ck_delete(conversation_id)
@@ -575,7 +574,6 @@ async def chat(
         # read 不超时(生成可能持续数分钟),connect 给 10s
         timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
         assistant_parts: list[str] = []
-        trail_parts: list[dict] = []  # 收集 think/plan/node/intent 事件, 结束时落库
         preview_url: str | None = None  # 捕获预览直链(供分享「复制预览链接」使用)
         event_seq: int = 0  # 结构化事件序号(供回放重建时间线)
         terminal_status: str = "done"
@@ -626,9 +624,6 @@ async def chat(
                                             payload_obj = json.loads(data) if data else None
                                         except Exception:
                                             payload_obj = None
-                                        # 收集 trail (think/plan/node 事件)
-                                        if isinstance(payload_obj, dict) and event in ("think", "plan", "node"):
-                                            trail_parts.append({"event": event, "data": payload_obj})
                                         stage = None
                                         if isinstance(payload_obj, dict) and event in ("node", "think"):
                                             stage = payload_obj.get("stage")
@@ -668,8 +663,6 @@ async def chat(
                                                          "steps": payload_obj.get("plan_steps", [])},
                                                         30)
                                     elif event == "intent" and isinstance(payload_obj, dict):
-                                        # 收集 trail
-                                        trail_parts.append({"event": "intent", "data": payload_obj})
                                         # 两级意图记录(供管理后台系统分析)
                                         l1 = payload_obj.get("level1") or payload_obj.get("intent") or "unknown"
                                         l2 = payload_obj.get("level2") or "unknown"
@@ -729,7 +722,6 @@ async def chat(
                 user_text=user_text,
                 assistant_text=assistant_full_text,
                 preview_url=preview_url,
-                trail_parts=trail_parts,
             ))
 
     return StreamingResponse(
@@ -787,7 +779,6 @@ async def _persist_conversation(
     assistant_text: str,
     trace_id: str,
     preview_url: str | None = None,
-    trail_parts: list | None = None,
 ) -> None:
     """SSE 结束后落库。build 类消息走 Artifact+结构化 JSON, chat 类存纯文本。"""
     # 归一化: 拆解 {"data":"x"}{"data":"y"}... → "xy..." (兜底防 AI 服务旧格式)
@@ -848,15 +839,8 @@ async def _persist_conversation(
         conv.title = user_text[:20]
         logger.info("[chat] 自动设置会话标题 conv=%s title=%.20s", conv.id, user_text)
     conv.updated_at = datetime.utcnow()
-    # trail 持久化: 将 think/plan/node/intent 事件序列化为一条消息
-    if trail_parts:
-        db.add(Message(
-            conversation_id=conv.id, role="assistant",
-            content=json.dumps({"type": "trail", "events": trail_parts}, ensure_ascii=False),
-            model_id=model, trace_id=trace_id + "_trail",
-        ))
     await db.commit()
-    logger.info("[chat] 消息落库成功 conv=%s trail=%d", conv.id, len(trail_parts or []))
+    logger.info("[chat] 消息落库成功 conv=%s", conv.id)
 
 
 @router.post("/feedback")

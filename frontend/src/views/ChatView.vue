@@ -464,6 +464,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     onDone: () => {
       generating.value = false
       finished.value = true
+      thoughtSteps.value = []
+      planNodes.value = []
       clearActiveGen()
       clearDraft()
       loadArtifacts()
@@ -476,6 +478,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     onAborted: () => {
       generating.value = false
       finished.value = true
+      thoughtSteps.value = []
+      planNodes.value = []
       errorMsg.value = '已取消'
       clearActiveGen()
       if (projectStore.currentProjectId) {
@@ -522,6 +526,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     onError: (m) => {
       generating.value = false
       finished.value = true
+      thoughtSteps.value = []
+      planNodes.value = []
       errorMsg.value = m
       clearActiveGen()
     },
@@ -844,7 +850,7 @@ watch(pendingRetry, (r) => {
         </template>
       </div>
 
-      <div v-if="thoughtSteps.length || planNodes.length" class="trail-wrap">
+      <div v-if="generating && (thoughtSteps.length || planNodes.length)" class="trail-wrap">
         <ThoughtTrail
           :steps="thoughtSteps"
           :plans="planNodes"
