@@ -14,6 +14,7 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import List
 
+import httpx
 from langchain_openai import ChatOpenAI
 
 from .config import settings
@@ -130,8 +131,8 @@ def get_chat_model(model_id: str, streaming: bool = True) -> ChatOpenAI:
         streaming=streaming,
         temperature=0.7,
         max_tokens=4096,
-        request_timeout=30,    # 30秒超时,防止 API 卡死
-        max_retries=1,         # 失败重试 1 次
+        request_timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0),
+        max_retries=1,
     )
 
 

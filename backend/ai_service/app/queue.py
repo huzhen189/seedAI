@@ -350,9 +350,18 @@ async def worker_loop(concurrency: int = 1):
                         break
                 logger.info("[Worker] [3/6] 上下文检测 输入=\"%.80s\" ctx_hint=%.40s summary=%.40s",
                            user_text, ctx_hint[:40] if ctx_hint else "无", summary[:40] if summary else "无")
-                intent = detect_intent(messages, model_id,
-                                       conversation_id=conversation_id,
-                                       context_hint=ctx_hint)
+                # 意图分类包裹在子线程中执行(防 LLM 调用阻塞事件循环)
+                try:
+                    intent = await asyncio.wait_for(
+                        asyncio.to_thread(detect_intent, messages, model_id,
+                                         conversation_id=conversation_id,
+                                         context_hint=ctx_hint),
+                        timeout=35.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("[Worker] [3/6] 意图分类超时(35s) → 降级关键词匹配")
+                    intent = {"level1": "learn", "level2": "casual", "confidence": 0.3,
+                              "industry": "other", "checkpoint_relation": "none"}
                 ctx_result = ctx_hint or "检测完成"
                 logger.info("[Worker] [3/6] 上下文结果 ctx=%.60s", ctx_result)
 
