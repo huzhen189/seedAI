@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 
 from .providers import get_chat_model, resolve_fallback_order
 
