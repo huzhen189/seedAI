@@ -30,7 +30,7 @@ from fastapi.security import HTTPBearer
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .analytics import record_error, record_intent_result, record_model_detail, record_skill_outcome, record_user_active
+from .analytics import record_error, record_intent_result, record_model_detail, record_skill_outcome, record_user_active, record_intent_decision
 from .analytics import record_agent_usage, record_context_detection, record_requirement_doc, record_project_status_transition
 from .cache import cache_get, cache_set, ck_delete, ck_get, ck_set, enqueue_write_error, get_redis
 from .config import settings
@@ -616,6 +616,15 @@ async def chat(
                                     event_counts[event or "message"] = (
                                         event_counts.get(event or "message", 0) + 1
                                     )
+                                    # 统一解析 payload / 初始化 stage(供下方所有事件分支共用,
+                                    # 避免 checkpoint/paused/unsupported/intent 分支引用未初始化变量)
+                                    payload_obj = None
+                                    stage = None
+                                    if event != "token" and data:
+                                        try:
+                                            payload_obj = json.loads(data)
+                                        except Exception:
+                                            payload_obj = None
                                     if event == "token":
                                         # AI 服务 token 数据格式为 JSON({"data": "text"}), 需提取纯文本
                                         try:
@@ -624,12 +633,7 @@ async def chat(
                                         except (json.JSONDecodeError, TypeError):
                                             text = data
                                         assistant_parts.append(text)
-                                    elif event in ("node", "think", "plan", "error", "aborted", "degraded", "unsupported", "intent"):
-                                        try:
-                                            payload_obj = json.loads(data) if data else None
-                                        except Exception:
-                                            payload_obj = None
-                                        stage = None
+                                    elif event in ("node", "think", "plan", "error", "aborted", "degraded"):
                                         if isinstance(payload_obj, dict) and event in ("node", "think"):
                                             stage = payload_obj.get("stage")
                                         if event == "node" and isinstance(payload_obj, dict):
@@ -644,6 +648,7 @@ async def chat(
                                     elif event == "unsupported":
                                         terminal_status = "unsupported"
                                         await record_unsupported(user.id, user_text)
+                                        await record_intent_decision("unsupported")
                                     elif event == "checkpoint" and isinstance(payload_obj, dict):
                                         # 断点续跑(§7): 写 Redis(不阻塞 SSE), MySQL 异步同步
                                         stage = payload_obj.get("stage", "?")
@@ -673,6 +678,12 @@ async def chat(
                                         l2 = payload_obj.get("level2") or "unknown"
                                         captured_level1 = l1
                                         await record_intent_result(l1, l2, True)
+                                        # 决策分布(含 block/confirm/options/route/fallback)
+                                        await record_intent_decision(
+                                            payload_obj.get("decision") or "route",
+                                            skill=payload_obj.get("selected_skill") or "",
+                                            risk=payload_obj.get("risk_level") or "low",
+                                        )
                                         logger.info(
                                             "[chat] 意图 %s/%s label=%s industry=%s confidence=%s",
                                             l1, l2,
@@ -680,6 +691,14 @@ async def chat(
                                             payload_obj.get("industry", "-"),
                                             payload_obj.get("confidence", "-"),
                                         )
+                                    elif event in ("block", "confirm", "options"):
+                                        # 决策统计: 安全拦截/二次确认/多选项(未确认态)
+                                        if isinstance(payload_obj, dict):
+                                            await record_intent_decision(
+                                                event,
+                                                skill=payload_obj.get("skill")
+                                                or payload_obj.get("selected_skill") or "",
+                                            )
                                     logger.info(
                                             "[chat] ◇ SSE #%d type=%s stage=%s data=%.200s",
                                             event_seq, event, stage or "-", data,

@@ -35,6 +35,7 @@ P_FRONTEND = "an:frontend"
 P_ERROR = "an:error"
 P_USER = "an:user:dau"
 P_MODEL = "an:model"
+P_INTENT_DECISION = "an:intent:decision"  # 意图管道决策结果分布(block/confirm/options/route/fallback/unsupported)
 
 
 async def record_intent_result(level1: str, level2: str, matched: bool) -> None:
@@ -50,6 +51,20 @@ async def record_intent_result(level1: str, level2: str, matched: bool) -> None:
             await r.hincrby(f"{P_INTENT_HIT}:{level1}", "count", 1)
     except Exception as e:
         logger.warning("analytics record_intent_result failed: %s", e)
+
+
+async def record_intent_decision(decision: str, skill: str = "", risk: str = "low") -> None:
+    """统计意图管道决策结果(block/confirm/options/route/fallback/unsupported)。
+    供管理后台「系统分析」展示安全拦截/二次确认/多选项触发频次与命中 skill。"""
+    try:
+        r = await get_redis()
+        await r.hincrby(P_INTENT_DECISION, decision, 1)
+        if skill:
+            await r.hincrby(f"{P_INTENT_DECISION}:skill", skill, 1)
+        if risk in ("high", "critical"):
+            await r.hincrby(f"{P_INTENT_DECISION}:risk", risk, 1)
+    except Exception as e:
+        logger.warning("analytics record_intent_decision failed: %s", e)
 
 
 async def record_skill_outcome(skill: str, status: str, elapsed_ms: float) -> None:
@@ -290,6 +305,17 @@ async def analytics_snapshot() -> dict:
             if t > 0:
                 wllm_stats[act] = {"total": t, "ok": o, "rate": round(o / t, 3)}
 
+        # 意图决策分布(v0.8.1: 安全拦截/二次确认/多选项/路由)
+        decision_raw = await r.hgetall(P_INTENT_DECISION)
+        decision_stats = {k.decode() if isinstance(k, bytes) else k: int(v)
+                          for k, v in (decision_raw or {}).items()}
+        decision_skill_raw = await r.hgetall(f"{P_INTENT_DECISION}:skill")
+        decision_skill_stats = {k.decode() if isinstance(k, bytes) else k: int(v)
+                                for k, v in (decision_skill_raw or {}).items()}
+        decision_risk_raw = await r.hgetall(f"{P_INTENT_DECISION}:risk")
+        decision_risk_stats = {k.decode() if isinstance(k, bytes) else k: int(v)
+                               for k, v in (decision_risk_raw or {}).items()}
+
         return {
             "intent_stats": intent_stats,
             "skill_outcomes": skills,
@@ -307,6 +333,11 @@ async def analytics_snapshot() -> dict:
                                 "avg_features": round(req_feat_sum / max(req_feat_cnt, 1), 1)},
             "context_detection": context_stats,
             "webllm": wllm_stats,
+            "intent_decisions": {
+                "by_decision": decision_stats,
+                "by_skill": decision_skill_stats,
+                "by_risk": decision_risk_stats,
+            },
             "user_stats": {
                 "dau_today": dau_today,
                 "active_users": active_users,

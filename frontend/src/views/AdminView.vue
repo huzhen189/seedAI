@@ -230,6 +230,11 @@ interface AnalyticsSnapshot {
   error_stats?: Record<string, number>
   model_stats?: Record<string, { total: number; ok: number; fail: number; rate: number }>
   user_stats?: { dau_today: number; active_users: number; total_generations: number; avg_per_user: number }
+  intent_decisions?: {
+    by_decision: Record<string, number>
+    by_skill: Record<string, number>
+    by_risk: Record<string, number>
+  }
   error?: string
 }
 const al = ref<AnalyticsSnapshot | null>(null)
@@ -264,6 +269,13 @@ function statusLabel(s: string) {
 function eventTypeLabel(t: string) {
   const m: Record<string, string> = { node: '节点', think: '思考', plan: '计划', token: '输出', error: '错误', done: '完成', aborted: '取消', degraded: '降级' }
   return m[t] || t
+}
+function decisionLabel(d: string) {
+  const m: Record<string, string> = {
+    block: '安全拦截', confirm: '二次确认', options: '多选项',
+    route: '直接路由', fallback: '降级兜底', unsupported: '不支持',
+  }
+  return m[d] || d
 }
 
 onMounted(() => {
@@ -462,6 +474,21 @@ onUnmounted(() => {
             </tbody>
           </table>
           <p v-else class="muted">暂无数据</p>
+        </div>
+        <!-- 意图决策分布 -->
+        <div class="block" v-if="al.intent_decisions && al.intent_decisions.by_decision && Object.keys(al.intent_decisions.by_decision).length">
+          <h4>意图决策分布</h4>
+          <table class="atable">
+            <thead><tr><th>决策</th><th>次数</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.intent_decisions.by_decision" :key="k">
+                <td>{{ decisionLabel(k) }}</td><td>{{ v }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="al.intent_decisions.by_risk && Object.keys(al.intent_decisions.by_risk).length" class="muted">
+            高风险拦截: {{ al.intent_decisions.by_risk.high || 0 }} · 致命拦截: {{ al.intent_decisions.by_risk.critical || 0 }}
+          </p>
         </div>
         <!-- Skill 成功率 -->
         <div class="block">
