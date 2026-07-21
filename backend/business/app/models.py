@@ -133,7 +133,7 @@ class TraceEvent(Base):
 
 
 class Feedback(Base):
-    """用户对一次生成的评价(1—10 分 + 评论);统计 + 回归数据集(文档 §3.11/#36)。"""
+    """用户对一次生成的评价(1—10 分 + 评论 + 6 维细分);统计 + 回归数据集(文档 §3.11/#36)。"""
 
     __tablename__ = "feedbacks"
 
@@ -141,8 +141,30 @@ class Feedback(Base):
     user_id: Mapped[int] = mapped_column(Integer, index=True)
     trace_id: Mapped[str] = mapped_column(String(64), index=True)
     conversation_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
-    rating: Mapped[int] = mapped_column(Integer)  # 1-10
+    rating: Mapped[int] = mapped_column(Integer)  # 1-10 整体评分
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 6 维细分(气泡内多维度星级): {"correctness": int(1-10), ..., "safety": int}
+    # 缺省为 None(旧评价 / 未展开评价)
+    dimensions: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class QcScore(Base):
+    """后置 QC 三裁判评分(v0.8.5 M1): 以 trace_id 串联生成, 供后台雷达图复盘。"""
+
+    __tablename__ = "qc_scores"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    conversation_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    model_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)  # 被评判生成的模型
+    overall: Mapped[float] = mapped_column(default=0.0)  # 整体评分(6 维均值平均)
+    # 完整 QC 聚合结果(JSON): judges / dimensions(每维 mean+variance+scores) / overall /
+    # needs_review / safety_risk / partial
+    result: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    safety_risk: Mapped[str] = mapped_column(String(16), default="low")
+    partial: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

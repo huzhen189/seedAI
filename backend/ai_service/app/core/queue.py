@@ -446,6 +446,13 @@ async def worker_loop(concurrency: int = 1):
                 logger.info("[Worker] [5/6] 路由执行 skill=%s decision=%s doc=%s status=%s confirmed=%s",
                            skill_name, decision, "有" if doc else "无", proj_status, confirmed)
                 event_cnt = 0
+                qc_user_text = ""
+                for m in messages:
+                    if m.get("role") == "user":
+                        qc_user_text = m.get("content", "") or ""
+                        break
+                qc_assistant_buf: list[str] = []
+                done_event: dict | None = None
                 async for event in run_skill(
                     skill_name, model_id, messages,
                     trace_id=trace_id, is_cancelled=_cancelled,
@@ -456,8 +463,38 @@ async def worker_loop(concurrency: int = 1):
                     project_system_prompt=proj_prompt,
                     project_constraints=proj_constraints,
                 ):
+                    # 拦截 done: 先发 QC 再发 done(QC 在 done 前, 不阻塞前端 done 渲染)
+                    if event.get("event") == "done":
+                        done_event = event
+                        continue
+                    if event.get("event") == "token":
+                        data = event.get("data", "")
+                        if isinstance(data, str):
+                            qc_assistant_buf.append(data)
                     await q.publish(trace_id, event)
                     event_cnt += 1
+                # ── [6/6] 后置 QC 三裁判(默认全量, v0.8.5 M1) ──
+                qc_assistant_text = "".join(qc_assistant_buf)
+                if qc_assistant_text.strip() and done_event is not None:
+                    try:
+                        from ..qc import run_qc
+                        from .safety import run_safety
+                        safety_risk = run_safety(messages, project_constraints).risk_level
+                        qc_result = await asyncio.wait_for(
+                            run_qc(qc_user_text, qc_assistant_text,
+                                   project_constraints=project_constraints,
+                                   safety_risk=safety_risk),
+                            timeout=60.0,
+                        )
+                        await q.publish(trace_id, {"event": "qc", "data": qc_result})
+                        logger.info("[Worker] [6/6] QC 完成 trace=%s overall=%.2f needs_review=%s partial=%s",
+                                   trace_id, qc_result.get("overall", 0),
+                                   qc_result.get("needs_review"), qc_result.get("partial"))
+                    except Exception as qc_err:  # noqa: BLE001
+                        logger.warning("[Worker] [6/6] QC 执行失败(已跳过, 不影响主流程) trace=%s: %s",
+                                       trace_id, qc_err)
+                if done_event is not None:
+                    await q.publish(trace_id, done_event)
                 logger.info("[Worker] [6/6] 执行完毕 trace=%s skill=%s 共发出%d个事件",
                            trace_id, skill_name, event_cnt)
             except Exception as e:

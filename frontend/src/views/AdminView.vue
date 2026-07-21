@@ -2,7 +2,8 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { get, post } from '../api/client'
 import { useAuthStore } from '../stores/auth'
-import { ROLE_LABELS, type AdminUser, type MetricsSnapshot, type Role } from '../types'
+import RadarChart from '../components/RadarChart.vue'
+import { ROLE_LABELS, QC_DIM_LABELS, type AdminUser, type MetricsSnapshot, type Role } from '../types'
 
 const auth = useAuthStore()
 const isSuper = computed(() => auth.user?.role === 'super_admin')
@@ -173,6 +174,15 @@ interface QualityData {
   generation_total: number
   generation_success_rate: number
   unsupported_count?: number
+  // QC 三裁判聚合(v0.8.5 M1)
+  qc_count: number
+  qc_overall_avg: number | null
+  qc_overall_dim_avg: Record<string, number>
+  qc_model_avg: Record<string, Record<string, number>>
+  qc_review_rate: number
+  qc_dimensions: string[]
+  qc_dim_labels: Record<string, string>
+  qc_judges: string[]
 }
 const quality = ref<QualityData | null>(null)
 const qualityLoading = ref(false)
@@ -185,18 +195,47 @@ async function fetchQuality() {
   finally { qualityLoading.value = false }
 }
 
+// QC 雷达图序列: 3 模型 + 整体(各 6 维)
+const qcSeries = computed(() => {
+  const q = quality.value
+  if (!q || !q.qc_dimensions?.length) return []
+  const axes = q.qc_dimensions
+  const mk = (name: string, color: string, src: Record<string, number>) => ({
+    name, color, values: axes.map((d) => Number(src?.[d] ?? 0)),
+  })
+  return [
+    mk('DeepSeek', '#2563eb', q.qc_model_avg?.['deepseek'] || {}),
+    mk('Qwen', '#16a34a', q.qc_model_avg?.['qwen'] || {}),
+    mk('HY3', '#d97706', q.qc_model_avg?.['hy3'] || {}),
+    mk('整体', '#7c3aed', q.qc_overall_dim_avg || {}),
+  ]
+})
+
+// 维度 key -> 中文标签(兼容任意字符串 key, 避免模板内严格索引报错)
+function qcLabel(d: string): string {
+  return (QC_DIM_LABELS as Record<string, string>)[d] || d
+}
+
 // ---- 回放(③-a) ----
 interface TraceItem {
   id: number; trace_id: string; user_id: number; model_id: string | null
   status: string; total_tokens: number; started_at: string | null; finished_at: string | null
+  qc_overall?: number | null
+  feedback_rating?: number | null
 }
 interface TraceEventItem {
   seq: number; event_type: string; stage: string | null
   payload: unknown; created_at: string | null
 }
+interface QcDetail { overall: number; result: any; needs_review: boolean; safety_risk: string; partial: boolean; created_at: string | null }
+interface FeedbackDetail { rating: number; comment: string | null; dimensions: any; created_at: string | null }
+interface TraceMessage { role: string; model_id: string | null; content: string; created_at: string | null }
 interface TraceDetail {
   trace: TraceItem
   events: TraceEventItem[]
+  qc?: QcDetail | null
+  feedback?: FeedbackDetail | null
+  messages?: TraceMessage[]
 }
 const traces = ref<TraceItem[]>([])
 const tracesLoading = ref(false)
@@ -396,6 +435,27 @@ onUnmounted(() => {
           <div class="k">不支持意图</div>
           <div class="v">{{ quality.unsupported_count ?? 0 }}</div>
         </div>
+        <div class="card">
+          <div class="k">QC 样本数</div>
+          <div class="v">{{ quality.qc_count ?? 0 }}</div>
+        </div>
+        <div class="card">
+          <div class="k">QC 整体均分</div>
+          <div class="v">{{ quality.qc_overall_avg != null ? quality.qc_overall_avg.toFixed(2) : '-' }}</div>
+        </div>
+        <div class="card">
+          <div class="k">需复核占比</div>
+          <div class="v">{{ ((quality.qc_review_rate ?? 0) * 100).toFixed(0) }}%</div>
+        </div>
+      </div>
+      <!-- QC 六维雷达图(v0.8.5 M1) -->
+      <div v-if="qcSeries.length" class="block qc-radar">
+        <h3>QC 六维雷达(三裁判 + 整体)</h3>
+        <RadarChart
+          :axes="(quality?.qc_dimensions || []).map((d: string) => quality?.qc_dim_labels?.[d] || d)"
+          :series="qcSeries"
+          :size="340"
+        />
       </div>
       <div v-if="quality && quality.rating_distribution && Object.keys(quality.rating_distribution).length" class="block">
         <h3>评分分布</h3>
@@ -428,6 +488,50 @@ onUnmounted(() => {
       <div v-if="selectedTrace" class="block">
         <button class="back" @click="selectedTrace = null">← 返回列表</button>
         <p class="hint">Trace: {{ selectedTrace.trace.trace_id }} | 模型: {{ selectedTrace.trace.model_id || '-' }} | 状态: {{ statusLabel(selectedTrace.trace.status) }} | Token: ~{{ selectedTrace.trace.total_tokens }}</p>
+
+        <!-- 后置 QC 三裁判详情 -->
+        <div v-if="selectedTrace.qc && selectedTrace.qc.result?.dimensions" class="block">
+          <h3>
+            后置 QC 三裁判
+            <span class="pill">整体 {{ selectedTrace.qc.overall.toFixed(2) }}</span>
+            <span v-if="selectedTrace.qc.needs_review" class="pill warn">需复核</span>
+            <span v-if="selectedTrace.qc.partial" class="pill gray">部分裁判</span>
+            <span v-if="selectedTrace.qc.safety_risk && selectedTrace.qc.safety_risk !== 'low'" class="pill danger">{{ selectedTrace.qc.safety_risk }}</span>
+          </h3>
+          <table class="qctable">
+            <thead><tr><th>维度</th><th>均值</th><th>DeepSeek</th><th>Qwen</th><th>HY3</th></tr></thead>
+            <tbody>
+              <tr v-for="d in Object.keys(selectedTrace.qc.result.dimensions)" :key="d">
+                <td>{{ qcLabel(d) }}</td>
+                <td>{{ selectedTrace.qc.result.dimensions[d].mean.toFixed(1) }}</td>
+                <td>{{ selectedTrace.qc.result.dimensions[d].scores?.[0] || '-' }}</td>
+                <td>{{ selectedTrace.qc.result.dimensions[d].scores?.[1] || '-' }}</td>
+                <td>{{ selectedTrace.qc.result.dimensions[d].scores?.[2] || '-' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 用户反馈 -->
+        <div v-if="selectedTrace.feedback" class="block">
+          <h3>用户评价</h3>
+          <div class="fb-row">评分: <b>{{ selectedTrace.feedback.rating }}</b> / 10</div>
+          <div v-if="selectedTrace.feedback.comment" class="fb-row">评语: {{ selectedTrace.feedback.comment }}</div>
+          <div v-if="selectedTrace.feedback.dimensions" class="fb-dims">
+            <span v-for="(v, k) in selectedTrace.feedback.dimensions" :key="k" class="fb-dim">{{ qcLabel(String(k)) }}: {{ v }}</span>
+          </div>
+          <div v-else class="muted">（仅整体评分，无多维细分）</div>
+        </div>
+
+        <!-- 对话内容 -->
+        <div v-if="selectedTrace.messages && selectedTrace.messages.length" class="block">
+          <h3>对话内容</h3>
+          <div v-for="(m, i) in selectedTrace.messages" :key="i" class="msg" :class="m.role">
+            <div class="msg-role">{{ m.role === 'user' ? '用户' : 'AI' }}</div>
+            <div class="msg-body">{{ m.content }}</div>
+          </div>
+        </div>
+
         <div v-if="selectedTrace.events.length" class="events">
           <div v-for="(e, i) in selectedTrace.events" :key="i" class="evt">
             <span class="eseq">{{ e.seq }}</span>
@@ -440,13 +544,15 @@ onUnmounted(() => {
       </div>
       <table v-else class="utable">
         <thead>
-          <tr><th>Trace ID</th><th>模型</th><th>状态</th><th>Token</th><th>时间</th></tr>
+          <tr><th>Trace ID</th><th>模型</th><th>状态</th><th>QC</th><th>评分</th><th>Token</th><th>时间</th></tr>
         </thead>
         <tbody>
           <tr v-for="t in traces" :key="t.id" style="cursor:pointer;" @click="viewTrace(t.trace_id)">
             <td>{{ t.trace_id.slice(0, 12) }}</td>
             <td>{{ t.model_id || '-' }}</td>
             <td>{{ statusLabel(t.status) }}</td>
+            <td>{{ t.qc_overall != null ? t.qc_overall.toFixed(1) : '-' }}</td>
+            <td>{{ t.feedback_rating != null ? t.feedback_rating : '-' }}</td>
             <td>~{{ t.total_tokens }}</td>
             <td>{{ t.started_at?.slice(0, 19) || '-' }}</td>
           </tr>
@@ -908,4 +1014,23 @@ onUnmounted(() => {
 .rate-sub { font-size: 13px; color: var(--muted); font-weight: 400; }
 h4 { margin: 12px 0 8px; font-size: 14px; color: #1e293b; }
 .reset-log { white-space: pre-wrap; font-size: 12px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 12px; margin-top: 10px; color: #991b1b; line-height: 1.6; }
+
+/* QC 雷达 + 复盘详情(v0.8.5 M1) */
+.qc-radar { display: flex; flex-direction: column; align-items: center; }
+.qc-radar h3 { align-self: flex-start; }
+.pill { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: #ede9fe; color: #6d28d9; margin-left: 6px; }
+.pill.warn { background: #fef3c7; color: #b45309; }
+.pill.danger { background: #fee2e2; color: #b91c1c; }
+.pill.gray { background: #f1f5f9; color: #64748b; }
+.qctable { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+.qctable th { text-align: left; padding: 6px 8px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }
+.qctable td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.fb-row { font-size: 13px; margin: 4px 0; }
+.fb-dims { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.fb-dim { font-size: 12px; background: #f1f5f9; border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; color: #475569; }
+.msg { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 6px 0; }
+.msg.user { background: #eef2ff; }
+.msg.assistant { background: #fff; }
+.msg-role { font-size: 11px; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
+.msg-body { font-size: 13px; white-space: pre-wrap; word-break: break-word; max-height: 280px; overflow: auto; }
 </style>

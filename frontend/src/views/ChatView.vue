@@ -12,7 +12,7 @@
 //   6. 取消:stop() 级联 cancelChat -> 业务 -> AI 中断生成(C1);
 //   7. 评价:生成完成后可对本次 trace 投 👍/👎。
 // 左栏是对话区 + 思考轨迹,右栏是实时预览(PreviewPane)。
-import { computed, onMounted, onUnmounted, ref, watch, nextTick } from 'vue'
+import { computed, onMounted, onUnmounted, ref, reactive, watch, nextTick } from 'vue'
 import ThoughtTrail from '../components/ThoughtTrail.vue'
 import RightPanel from '../components/RightPanel.vue'
 import ChatInput from '../components/ChatInput.vue'
@@ -22,7 +22,7 @@ import { listArtifacts, renameProject, patch } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { Artifact, Message, ModelInfo, OptionEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent } from '../types'
+import type { Artifact, Message, ModelInfo, OptionEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent, QcResult, RatingDims } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
   enter_router: '意图路由 — 识别你的需求类型，匹配最合适的处理流程',
@@ -286,9 +286,9 @@ async function loadArtifacts() {
 }
 const traceId = ref('')
 const esRef = ref<EventSource | null>(null)
-const rating = ref(0)
-const rateComment = ref('')
-const rateSubmitted = ref(false)
+// 后置 QC 三裁判结果 / 用户评价, 均按 trace_id 索引(气泡内展示, v0.8.5 M1)
+const qcMap = reactive<Record<string, QcResult>>({})
+const ratedMap = reactive<Record<string, { rating: number; dims: RatingDims; comment: string }>>({})
 const projectArtifacts = ref<Artifact[]>([])
 
 const pendingSend = ref(false)
@@ -428,9 +428,6 @@ function resetGenState() {
   previewUrl.value = null
   errorMsg.value = ''
   finished.value = false
-  rating.value = 0
-  rateComment.value = ''
-  rateSubmitted.value = false
   currentIntent.value = { level1: '', level2: '' }
   pendingRetry.value = null
 }
@@ -593,6 +590,10 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       errorMsg.value = m
       clearActiveGen()
     },
+    onQc: (data: QcResult) => {
+      // 后置 QC 三裁判结果:按当前 trace_id 存入 qcMap, 气泡徽标读取
+      if (traceId.value) qcMap[traceId.value] = data
+    },
   }
 }
 
@@ -739,20 +740,19 @@ async function stop() {
   esRef.value = null
 }
 
-async function rate(val: number) {
-  rating.value = val
-}
-
-async function submitRate() {
-  if (rating.value < 1 || rating.value > 10) return
-  rateSubmitted.value = true
+// 气泡内多维度评价提交(v0.8.5 M1): 按 trace_id 存储, 落库 + 前端即时反馈
+async function onRate(tid: string, p: { rating: number; comment: string; dimensions: RatingDims }) {
+  if (!tid) return
   const ok = await sendFeedback(
-    traceId.value,
-    rating.value,
+    tid,
+    p.rating,
     convStore.currentConvId ?? undefined,
-    rateComment.value || undefined,
+    p.comment || undefined,
+    p.dimensions,
   )
-  if (!ok) rateSubmitted.value = false
+  if (ok) {
+    ratedMap[tid] = { rating: p.rating, dims: p.dimensions || {}, comment: p.comment || '' }
+  }
 }
 
 function copyPreviewLink() {
@@ -908,6 +908,13 @@ watch(pendingRetry, (r) => {
             :role="m.role"
             :content="m.content"
             :time="m.role === 'user' ? (m.created_at || '') : ''"
+            :trace-id="m.trace_id || undefined"
+            :qc="m.trace_id ? (qcMap[m.trace_id] ?? null) : null"
+            :my-rating="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].rating : null"
+            :my-dims="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].dims : null"
+            :my-comment="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].comment : null"
+            :can-rate="!!auth.user"
+            @rate="(p) => m.trace_id && onRate(m.trace_id, p)"
           />
         </template>
       </div>
@@ -1023,30 +1030,7 @@ watch(pendingRetry, (r) => {
           </div>
         </div>
         <div v-if="finished && !errorMsg && !blockReason" class="feedback">
-          <span class="rate-label">评分 (1-10):</span>
-          <template v-for="n in 10" :key="n">
-            <button
-              :class="{ on: rating >= n, sel: rating === n }"
-              class="star-btn"
-              @click="rate(n)"
-            >
-              {{ rating >= n ? '★' : '☆' }}
-            </button>
-          </template>
-          <input
-            v-if="rating >= 1 && !rateSubmitted"
-            v-model="rateComment"
-            class="comment-inp"
-            placeholder="写点评语（可选）"
-          />
-          <button
-            v-if="rating >= 1 && !rateSubmitted"
-            class="submit-rate"
-            @click="submitRate"
-          >
-            提交评分
-          </button>
-          <span v-if="rateSubmitted" class="rated">已评价 {{ rating }} 分 ✓</span>
+          <span class="rate-hint-text">评分已移到每条 AI 回复气泡内，点击「⭐ 评价」即可多维度打分</span>
           <button
             v-if="previewUrl"
             class="copy-link"

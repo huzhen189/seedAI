@@ -18,7 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .db import get_db
 from .db import reset_db as do_reset_db, schedule_biz_restart
 from .metrics import snapshot
-from .models import Feedback, Trace, TraceEvent, UsageLog, User
+from .models import Feedback, Message, QcScore, Trace, TraceEvent, UsageLog, User
+
+# 6 维度 / 3 裁判(与 backend/ai_service/app/qc.py 保持一致, 供雷达图轴序)
+QC_DIMENSIONS = ["correctness", "completeness", "compliance", "efficiency", "readability", "safety"]
+QC_JUDGES = ["deepseek", "qwen", "hy3"]
+QC_DIM_LABELS = {
+    "correctness": "正确性", "completeness": "完整性", "compliance": "合规性",
+    "efficiency": "效率", "readability": "可读性", "safety": "安全性",
+}
 from .orchestrator import run_scale, run_start, run_stop
 from .schemas import AdminUserResp, SetPlanReq, SetRoleReq
 from .security import (
@@ -198,6 +206,11 @@ async def list_traces(
         .scalars()
         .all()
     )
+    # 关联 QC 整体分 + 用户反馈分(供列表快速预览)
+    qc_rows = (await db.execute(select(QcScore))).scalars().all()
+    qc_by_trace: dict[str, float] = {q.trace_id: q.overall for q in qc_rows}
+    fb_rows = (await db.execute(select(Feedback))).scalars().all()
+    fb_by_trace: dict[str, int] = {f.trace_id: f.rating for f in fb_rows}
     return [
         {
             "id": t.id,
@@ -206,6 +219,8 @@ async def list_traces(
             "model_id": t.model_id,
             "status": t.status,
             "total_tokens": t.total_tokens,
+            "qc_overall": qc_by_trace.get(t.trace_id),
+            "feedback_rating": fb_by_trace.get(t.trace_id),
             "started_at": t.started_at.isoformat() if t.started_at else None,
             "finished_at": t.finished_at.isoformat() if t.finished_at else None,
         }
@@ -236,6 +251,39 @@ async def get_trace(
         .scalars()
         .all()
     )
+    # 关联 QC 三裁判结果 + 用户反馈 + 实际对话内容(供复盘详情)
+    qc = (
+        await db.execute(select(QcScore).where(QcScore.trace_id == trace_id))
+    ).scalar_one_or_none()
+    fb = (
+        await db.execute(select(Feedback).where(Feedback.trace_id == trace_id))
+    ).scalar_one_or_none()
+    msgs = []
+    if t.conversation_id is not None:
+        mrows = (
+            await db.execute(
+                select(Message)
+                .where(Message.conversation_id == t.conversation_id,
+                       Message.trace_id == trace_id)
+                .order_by(Message.id.asc())
+            )
+        ).scalars().all()
+        for m in mrows:
+            content = m.content or ""
+            # 结构化(建站产物)内容仅截摘要, 避免详情过大
+            if content.startswith("{") and len(content) > 600:
+                try:
+                    obj = json.loads(content)
+                    if isinstance(obj, dict) and obj.get("type") in ("site", "code"):
+                        content = f"[结构化产物:{obj.get('title', '')}]"
+                except Exception:
+                    content = content[:600] + "…"
+            msgs.append({
+                "role": m.role,
+                "model_id": m.model_id,
+                "content": content,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            })
     return {
         "trace": {
             "id": t.id,
@@ -247,6 +295,27 @@ async def get_trace(
             "started_at": t.started_at.isoformat() if t.started_at else None,
             "finished_at": t.finished_at.isoformat() if t.finished_at else None,
         },
+        "qc": (
+            {
+                "overall": qc.overall,
+                "result": qc.result,
+                "needs_review": qc.needs_review,
+                "safety_risk": qc.safety_risk,
+                "partial": qc.partial,
+                "created_at": qc.created_at.isoformat() if qc.created_at else None,
+            }
+            if qc is not None else None
+        ),
+        "feedback": (
+            {
+                "rating": fb.rating,
+                "comment": fb.comment,
+                "dimensions": fb.dimensions,
+                "created_at": fb.created_at.isoformat() if fb.created_at else None,
+            }
+            if fb is not None else None
+        ),
+        "messages": msgs,
         "events": [
             {
                 "seq": e.seq,
@@ -315,6 +384,41 @@ async def quality(_=Depends(require_admin), db: AsyncSession = Depends(get_db)):
         unsupported_total = 0
         samples = []
 
+    # ── QC 三裁判聚合(v0.8.5 M1) ──
+    qc_rows = (await db.execute(select(QcScore))).scalars().all()
+    qc_count = len(qc_rows)
+    # 每模型每维平均分(雷达图 3 条序列) + 整体每维平均分(第 4 条序列)
+    qc_model_dims: dict[str, dict] = {m: {d: [] for d in QC_DIMENSIONS} for m in QC_JUDGES}
+    qc_overall_dim: dict[str, list] = {d: [] for d in QC_DIMENSIONS}
+    qc_overall_list: list[float] = []
+    for q in qc_rows:
+        res = q.result or {}
+        if isinstance(res, dict):
+            if res.get("overall") is not None:
+                qc_overall_list.append(float(res.get("overall", 0)))
+            dims = res.get("dimensions", {}) or {}
+            for d in QC_DIMENSIONS:
+                dd = dims.get(d, {}) or {}
+                # 整体序列: 用每维 mean
+                mean = dd.get("mean")
+                if mean is not None and mean > 0:
+                    qc_overall_dim[d].append(float(mean))
+                scores = dd.get("scores", []) or []
+                for mi, m in enumerate(QC_JUDGES):
+                    if mi < len(scores) and scores[mi] and scores[mi] > 0:
+                        qc_model_dims[m][d].append(float(scores[mi]))
+    qc_model_avg = {
+        m: {d: round(sum(v) / len(v), 2) if v else 0.0 for d, v in dm.items()}
+        for m, dm in qc_model_dims.items()
+    }
+    qc_overall_dim_avg = {
+        d: round(sum(v) / len(v), 2) if v else 0.0 for d, v in qc_overall_dim.items()
+    }
+    qc_overall_avg = round(sum(qc_overall_list) / len(qc_overall_list), 2) if qc_overall_list else None
+    # 需复核占比
+    qc_review_list = [1 for q in qc_rows if q.needs_review]
+    qc_review_rate = round(len(qc_review_list) / max(qc_count, 1), 3)
+
     return {
         "feedback_count": len(ratings),
         "avg_rating": avg,
@@ -326,6 +430,15 @@ async def quality(_=Depends(require_admin), db: AsyncSession = Depends(get_db)):
         "generation_success_rate": round(done / max(total, 1), 3),
         "unsupported_count": unsupported_total,
         "unsupported_samples": samples,
+        # QC 三裁判聚合(M1)
+        "qc_count": qc_count,
+        "qc_overall_avg": qc_overall_avg,
+        "qc_overall_dim_avg": qc_overall_dim_avg,   # 整体每维均值(雷达图第4序列)
+        "qc_model_avg": qc_model_avg,               # 3 模型每维均值(雷达图 3 序列)
+        "qc_review_rate": qc_review_rate,           # 需人工复核占比
+        "qc_dimensions": QC_DIMENSIONS,
+        "qc_dim_labels": QC_DIM_LABELS,
+        "qc_judges": QC_JUDGES,
     }
 
 

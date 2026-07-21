@@ -1,4 +1,4 @@
-import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent } from '../types'
+import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent, QcResult, RatingDims } from '../types'
 import { notifyAuthRequired } from '../stores/auth'
 import { post, publicGet } from './client'
 
@@ -27,6 +27,8 @@ export interface ChatCallbacks {
   onBlock?: (data: BlockEvent) => void
   /** 二次确认(安全 high, 等待用户确认后带 confirmed 重发) */
   onConfirm?: (data: ConfirmEvent) => void
+  /** 后置 QC 三裁判结果(v0.8.5 M1):整体分 + 6 维聚合, 落入气泡徽标 */
+  onQc?: (data: QcResult) => void
 }
 
 export interface StartChatOptions {
@@ -89,6 +91,10 @@ export function startChat(opts: StartChatOptions): EventSource {
   })
   es.addEventListener('preview', (e) => opts.cb.onPreview?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('degraded', (e) => opts.cb.onDegraded?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('qc', (e) => {
+    const d = safeParse((e as MessageEvent).data) as QcResult
+    opts.cb.onQc?.(d)
+  })
   es.addEventListener('done', () => {
     console.log('[SSE] 收到 done, 关闭连接')
     opts.cb.onDone?.()
@@ -164,12 +170,14 @@ export async function fetchModels(): Promise<ModelInfo[]> {
   }
 }
 
-/** 提交 1-10 评分评价(③-a:统计 + 回归数据集)。后端 /api/feedback 已实现。 */
+/** 提交 1-10 评分评价(③-a:统计 + 回归数据集)。后端 /api/feedback 已实现。
+ *  dimensions: 气泡内 6 维细分(可选), 缺省 null。 */
 export async function sendFeedback(
   traceId: string,
   rating: number,
   conversationId?: number,
   comment?: string,
+  dimensions?: RatingDims,
 ): Promise<boolean> {
   try {
     await post('/api/feedback', {
@@ -177,6 +185,7 @@ export async function sendFeedback(
       conversation_id: conversationId ?? null,
       rating,
       comment: comment || null,
+      dimensions: dimensions && Object.keys(dimensions).length ? dimensions : null,
     })
     return true
   } catch {

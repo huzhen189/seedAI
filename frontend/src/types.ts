@@ -117,6 +117,7 @@ export interface Message {
   role: string
   content: string
   model_id: string | null
+  trace_id?: string | null
   created_at: string
 }
 
@@ -238,3 +239,54 @@ export interface AdminUser {
   role: string
   plan: string
 }
+
+// ---------- 后置 QC 三裁判(v0.8.5 M1) ----------
+// 维度与 3 裁判顺序须与 backend/ai_service/app/qc.py 保持一致(雷达图轴序 + scores 下标)
+export const QC_DIMENSIONS = [
+  'correctness',
+  'completeness',
+  'compliance',
+  'efficiency',
+  'readability',
+  'safety',
+] as const
+export type QcDimension = (typeof QC_DIMENSIONS)[number]
+
+export const QC_DIM_LABELS: Record<QcDimension, string> = {
+  correctness: '正确性',
+  completeness: '完整性',
+  compliance: '合规性',
+  efficiency: '效率',
+  readability: '可读性',
+  safety: '安全性',
+}
+
+export const QC_JUDGES = ['deepseek', 'qwen', 'hy3'] as const
+export type QcJudge = (typeof QC_JUDGES)[number]
+
+/** 单裁判结果(整体评分用不到原始分, 明细走 dimensions.scores) */
+export interface QcJudgeResult {
+  model: QcJudge
+  valid: boolean
+  comment: string
+}
+
+/** 单维度聚合: 均值 + 方差 + 三裁判原始分(对齐 QC_JUDGES) */
+export interface QcDimensionScore {
+  mean: number
+  variance: number
+  scores: number[] // [deepseek, qwen, hy3], 0=未参与/失败
+}
+
+/** QC 三裁判聚合结果(即 SSE `qc` 事件 data, 亦为 qc_scores.result) */
+export interface QcResult {
+  judges: QcJudgeResult[]
+  dimensions: Record<QcDimension, QcDimensionScore>
+  overall: number
+  needs_review: boolean
+  safety_risk: string // low|medium|high|critical
+  partial: boolean
+}
+
+/** 用户气泡内多维度评价(6 维各 1-10) */
+export type RatingDims = Partial<Record<QcDimension, number>>

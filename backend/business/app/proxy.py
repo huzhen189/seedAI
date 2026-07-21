@@ -38,7 +38,7 @@ from .db import get_db
 from .metrics import consume_daily_quota, record_model_usage, record_unsupported
 from .models import Artifact, Conversation, Message, Project, User
 from .repos.business_repos import conv_repo, message_repo
-from .repos.trace_repos import feedback_repo, trace_repo
+from .repos.trace_repos import feedback_repo, qc_score_repo, trace_repo
 from .schemas import FeedbackReq
 from .security import ACCESS_COOKIE, CurrentUser, _set_access_cookie, create_access_token, decode_token, get_current_user
 from .tracing import append_trace_event, create_trace, finish_trace, log_usage
@@ -401,7 +401,8 @@ async def _sync_checkpoint_to_mysql(conversation_id: int, stage: str,
 
 async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
                       terminal_status: str, user_text: str, assistant_text: str,
-                      preview_url: str | None = None) -> None:
+                      preview_url: str | None = None,
+                      qc_result: dict | None = None) -> None:
     """后台异步落库(独立 session, 3 次重试, 全失败入 Redis 错误队列兜底)"""
     from .db import SessionLocal as _S
     last_err: Exception | None = None
@@ -411,6 +412,15 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
             async with _S() as s:
                 await finish_trace(s, tid, terminal_status, max(0, len(assistant_text) // 4))
                 await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url)
+                # 后置 QC 三裁判结果落库(幂等 upsert by trace_id)
+                if qc_result is not None:
+                    try:
+                        await qc_score_repo.upsert(
+                            s, tid, model, conversation_id, qc_result)
+                        logger.info("[chat] QC 已落库 trace=%s overall=%s",
+                                    tid, qc_result.get("overall"))
+                    except Exception as qc_e:  # noqa: BLE001
+                        logger.warning("[chat] QC 落库失败(跳过) trace=%s: %s", tid, qc_e)
                 # 流结束(done/aborted/error)清理 Redis checkpoint; paused 保留供恢复
                 if terminal_status != "paused":
                     await ck_delete(conversation_id)
@@ -609,6 +619,7 @@ async def chat(
         timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
         assistant_parts: list[str] = []
         preview_url: str | None = None  # 捕获预览直链(供分享「复制预览链接」使用)
+        qc_result: dict | None = None  # 捕获后置 QC 三裁判聚合结果(供落库 + 前端展示)
         event_seq: int = 0  # 结构化事件序号(供回放重建时间线)
         terminal_status: str = "done"
         captured_level1: str = "unknown"  # 从 intent 事件捕获, 供统计
@@ -728,6 +739,13 @@ async def chat(
                                                 skill=payload_obj.get("skill")
                                                 or payload_obj.get("selected_skill") or "",
                                             )
+                                    elif event == "qc" and isinstance(payload_obj, dict):
+                                        # 后置 QC 三裁判结果(v0.8.5 M1): 捕获供落库 + 前端气泡展示
+                                        qc_result = payload_obj
+                                        logger.info(
+                                            "[chat] ◇ QC 结果 trace=%s overall=%s needs_review=%s",
+                                            tid, payload_obj.get("overall"), payload_obj.get("needs_review"),
+                                        )
                                     logger.info(
                                             "[chat] ◇ SSE #%d type=%s stage=%s data=%.200s",
                                             event_seq, event, stage or "-", data,
@@ -775,6 +793,7 @@ async def chat(
                 user_text=user_text,
                 assistant_text=assistant_full_text,
                 preview_url=preview_url,
+                qc_result=qc_result,
             ))
 
     return StreamingResponse(
@@ -904,6 +923,7 @@ async def post_feedback(
 ):
     fb = await feedback_repo.upsert(
         db, user.id, req.trace_id, req.conversation_id, req.rating, req.comment,
+        dimensions=req.dimensions,
     )
     return {"ok": True, "rating": fb.rating}
 

@@ -9,7 +9,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import Feedback, Trace, TraceEvent, UsageLog
+from ..models import Feedback, QcScore, Trace, TraceEvent, UsageLog
 from .base import BaseRepo
 
 logger = logging.getLogger("business.repo")
@@ -54,13 +54,51 @@ class FeedbackRepo(BaseRepo[Feedback]):
         return await self.get_by(db, trace_id=trace_id)
 
     async def upsert(self, db: AsyncSession, user_id: int, trace_id: str,
-                      conv_id: int | None, rating: int, comment: str | None = None) -> Feedback:
+                      conv_id: int | None, rating: int, comment: str | None = None,
+                      dimensions: dict | None = None) -> Feedback:
         existing = await self.get_by_trace(db, trace_id)
         if existing:
-            return await self.update(db, existing, rating=rating, comment=comment)
+            return await self.update(
+                db, existing, rating=rating, comment=comment, dimensions=dimensions)
         return await self.create(
             db, user_id=user_id, trace_id=trace_id,
-            conversation_id=conv_id, rating=rating, comment=comment,
+            conversation_id=conv_id, rating=rating, comment=comment, dimensions=dimensions,
+        )
+
+
+class QcScoreRepo(BaseRepo[QcScore]):
+    model = QcScore
+    cache_prefix = "qc"
+    cache_ttl = 0
+    cache_enabled = False
+
+    async def get_by_trace(self, db: AsyncSession, trace_id: str) -> Optional[QcScore]:
+        return await self.get_by(db, trace_id=trace_id)
+
+    async def upsert(self, db: AsyncSession, trace_id: str, model_id: str | None,
+                     conversation_id: int | None, result: dict) -> QcScore:
+        existing = await self.get_by_trace(db, trace_id)
+        if existing:
+            return await self.update(
+                db, existing,
+                model_id=model_id,
+                conversation_id=conversation_id,
+                overall=result.get("overall", 0.0),
+                result=result,
+                needs_review=bool(result.get("needs_review", False)),
+                safety_risk=result.get("safety_risk", "low"),
+                partial=bool(result.get("partial", False)),
+            )
+        return await self.create(
+            db,
+            trace_id=trace_id,
+            conversation_id=conversation_id,
+            model_id=model_id,
+            overall=result.get("overall", 0.0),
+            result=result,
+            needs_review=bool(result.get("needs_review", False)),
+            safety_risk=result.get("safety_risk", "low"),
+            partial=bool(result.get("partial", False)),
         )
 
 
@@ -75,4 +113,5 @@ class UsageLogRepo(BaseRepo[UsageLog]):
 trace_repo = TraceRepo()
 trace_event_repo = TraceEventRepo()
 feedback_repo = FeedbackRepo()
+qc_score_repo = QcScoreRepo()
 usage_log_repo = UsageLogRepo()

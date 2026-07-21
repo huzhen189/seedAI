@@ -101,21 +101,20 @@ async def init_db():
     from .models import Base
 
     async with engine.begin() as conn:
-        # 检查关键表是否存在(防御性检查;不自动建表)
-        def _check_tables(sync_conn):
-            from sqlalchemy import inspect, text
+        # 自动补齐缺失表(仅 create_all 新增, 不删改已有表) + 增量补齐缺失列
+        def _ensure_schema(sync_conn):
+            from sqlalchemy import inspect
             insp = inspect(sync_conn)
             existing = set(insp.get_table_names())
             expected = set(Base.metadata.tables.keys())
-            missing = expected - existing
-            if missing:
-                logger.warning(
-                    "数据库缺少以下表: %s。请运行 scripts/reset_all.bat 初始化。",
-                    ", ".join(sorted(missing)),
-                )
+            missing_tables = expected - existing
+            if missing_tables:
+                # 仅创建缺失的表(安全: 不影响已有数据)
+                Base.metadata.create_all(sync_conn)
+                logger.info("数据库已自动创建缺失表: %s", ", ".join(sorted(missing_tables)))
             return existing
-        existing_tables = await conn.run_sync(_check_tables)
-        # 仅当表已存在时才做增量补齐(不建新表)
+        existing_tables = await conn.run_sync(_ensure_schema)
+        # 仅当表已存在时才做增量补齐(新增列)
         if existing_tables:
             added = await conn.run_sync(_add_missing_columns)
             if added:

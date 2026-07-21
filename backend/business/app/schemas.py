@@ -79,6 +79,7 @@ class MessageResp(BaseModel):
     role: str
     content: str
     model_id: str | None = None
+    trace_id: str | None = None
     created_at: datetime
 
 
@@ -128,9 +129,14 @@ class SetPlanReq(BaseModel):
 
 # ---------- 对话反馈(③-a:1-10 评分 + 评论) ----------
 class FeedbackReq(BaseModel):
-    """提交一次生成的评价;trace_id 关联 Trace/Message,供统计与回归数据集。"""
+    """提交一次生成的评价;trace_id 关联 Trace/Message,供统计与回归数据集。
+
+    dimensions: 气泡内 6 维细分评分(可选), 键=QC_DIMENSIONS,
+    值=1-10 整数; 缺省 None(旧评价 / 仅整体评分)。
+    """
 
     trace_id: str = Field(min_length=1, max_length=64)
     conversation_id: int | None = None
-    rating: int = Field(ge=1, le=10)  # 1-10 分
+    rating: int = Field(ge=1, le=10)  # 1-10 分(整体)
     comment: str | None = None
+    dimensions: dict | None = None  # {"correctness": int, ..., "safety": int}
