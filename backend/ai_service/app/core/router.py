@@ -40,6 +40,7 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
                            conversation_id: int | None = None,
                            context_hint: str = "",
                            project_status: str = "draft",
+                           project_constraints: list[str] | None = None,
                            checkpoint_info: dict | None = None) -> dict:
     """v2 意图管道: 5模块并行 → PipelineResult → 兼容旧 dict。"""
     t0 = time.time()
@@ -48,6 +49,7 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
         conversation_id=conversation_id,
         context_hint=context_hint,
         project_status=project_status,
+        project_constraints=project_constraints,
         checkpoint_info=checkpoint_info,
     )
     l1 = result.intent["level1"]

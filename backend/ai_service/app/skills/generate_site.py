@@ -29,6 +29,7 @@ from ..providers import (
     get_chat_model,
     resolve_fallback_order,
 )
+from ..intent.common import build_skill_sys
 from ..knowledge.chroma import build_rag_context, save_memory
 from ..registry import register_skill
 
@@ -208,10 +209,12 @@ async def generate_stream(
     industry: Optional[str] = None,
     checkpoint: Optional[dict] = None,
     resume_mode: str = "resume",
+    project_system_prompt: Optional[str] = None,
     **kwargs,
 ) -> AsyncGenerator[Dict, None]:
-    # 根据意图选 Coder 系统提示(游戏 vs 建站)
-    coder_prompt = SYS_CODER_GAME if intent == "game" else SYS_CODER
+    # 根据意图选 Coder 系统提示(游戏 vs 建站), 并注入项目约束(Tier 1)
+    base_coder = SYS_CODER_GAME if intent == "game" else SYS_CODER
+    coder_prompt = build_skill_sys(base_coder, project_system_prompt)
 
     # 断点恢复入口(§7): 跳过已完成阶段
     if checkpoint:
@@ -321,7 +324,7 @@ async def generate_stream(
             planner_msgs.append(
                 {"role": "user", "content": f"【行业设计约束: {industry}】\n{design_hint}"}
             )
-        spec = _chat(model_id, SYS_PLANNER, planner_msgs)
+        spec = _chat(model_id, build_skill_sys(SYS_PLANNER, project_system_prompt), planner_msgs)
         plan = _parse_plan(spec)
         GEN_LOG.info(
             "[gen] Planner 完成 trace=%s title=%s steps=%s",

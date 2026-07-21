@@ -356,6 +356,9 @@ async def worker_loop(concurrency: int = 1):
                 summary = job.get("conversation_summary", "")
                 doc = job.get("requirement_doc")
                 proj_status = job.get("project_status", "draft")
+                # Tier 1/2: 项目系统 prompt + 结构化硬约束(由 business 侧解析后下发)
+                proj_prompt = job.get("project_system_prompt", "") or ""
+                proj_constraints = job.get("project_constraints") or []
                 user_text = ""
                 for msg in messages:
                     if msg.get("role") == "user":
@@ -369,7 +372,8 @@ async def worker_loop(concurrency: int = 1):
                         detect_intent_v2(messages, model_id,
                                          conversation_id=conversation_id,
                                          context_hint=ctx_hint,
-                                         project_status=proj_status),
+                                         project_status=proj_status,
+                                         project_constraints=proj_constraints),
                         timeout=35.0,
                     )
                 except asyncio.TimeoutError:
@@ -449,6 +453,8 @@ async def worker_loop(concurrency: int = 1):
                     requirement_doc=doc,
                     project_status=proj_status,
                     conversation_summary=summary,
+                    project_system_prompt=proj_prompt,
+                    project_constraints=proj_constraints,
                 ):
                     await q.publish(trace_id, event)
                     event_cnt += 1

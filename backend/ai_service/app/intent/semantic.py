@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from ..providers import get_chat_model, resolve_fallback_order
 from .common import (
     VALID_LEVEL1, VALID_LEVEL2, VALID_INDUSTRIES, OLD_TO_LEVELS,
+    UNSUPPORTED_HINT,
 )
 
 logger = logging.getLogger("ai_service.intent.semantic")
@@ -29,7 +30,7 @@ INTENT_SYSTEM = (
     "doc→readme(README)|tutorial(教程)|plan(方案设计)\n"
     "translate→text(翻译)|code_lang(跨语言翻译)\n"
     "unsupported→无子类\n"
-    "(注意: 后端开发/数据库/App/游戏引擎/运维部署等非网页前端需求 → unsupported)\n\n"
+    f"{UNSUPPORTED_HINT}\n\n"
     "industry(12选1, build/doc 时必填, 其他填 none):\n"
     "restaurant(餐饮)|ecommerce(电商)|gov(政务)|edu(教育)|health(医疗)\n"
     "|finance(金融)|game(游戏)|personal(个人)|corp(企业)|tech(科技)|media(媒体)|other\n\n"

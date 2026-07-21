@@ -39,6 +39,7 @@ async def classify_v2(
     conversation_id: int | None = None,
     context_hint: str = "",
     project_status: str = "draft",
+    project_constraints: list[str] | None = None,
     checkpoint_info: dict | None = None,
 ) -> PipelineResult:
     """v2 意图管道: 语义异步发射 + 4 同步模块重叠执行 + 汇总器决策。
@@ -65,7 +66,7 @@ async def classify_v2(
     try:
         rule_result = run_rules(messages)
         context_result = run_context(messages, conversation_id=conversation_id, frontend_hint=context_hint)
-        safety_result = run_safety(messages)
+        safety_result = run_safety(messages, project_constraints=project_constraints)
         logger.info("[管道] [3/5] 规则完成 rule=%s/%s ctx=%s safety=%s",
                    rule_result.pattern, rule_result.confidence,
                    context_result.source, safety_result.risk_level)
@@ -96,7 +97,8 @@ async def classify_v2(
                semantic_result.level1, semantic_result.level2,
                semantic_result.confidence * 100,
                rule_result.pattern, safety_result.risk_level)
-    return _aggregate(rule_result, semantic_result, context_result, safety_result, project_status)
+    return _aggregate(rule_result, semantic_result, context_result, safety_result,
+                     project_status, project_constraints)
 
 
 def _aggregate(
@@ -105,6 +107,7 @@ def _aggregate(
     context: ContextResult,
     safety: SafetyResult,
     project_status: str,
+    project_constraints: list[str] | None = None,
 ) -> PipelineResult:
     """汇总器: 安全优先短路 → 意图融合 → 工具选择 → 二次确认 → 多选项 → 路由。
 

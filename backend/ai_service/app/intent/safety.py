@@ -8,24 +8,18 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from .common import (
+    SAFETY_CRITICAL_KEYWORDS,
+    SAFETY_HIGH_KEYWORDS,
+    SAFETY_MEDIUM_KEYWORDS,
+)
+
 logger = logging.getLogger("ai_service.intent.safety")
 
-CRITICAL_KEYWORDS = {
-    "删除", "清空", "drop", "rm ", "remove", "del ", "delete",
-    "支付", "付款", "充值", "订单", "交易", "转账",
-    "密码", "密钥", "token", "api_key", "secret",
-}
-
-HIGH_KEYWORDS = {
-    "发布", "上线", "deploy", "publish",
-    "管理", "admin", "后台",
-    "修改权限", "更改角色",
-}
-
-MEDIUM_KEYWORDS = {
-    "修改", "改", "modify", "update", "更新",
-    "新增", "添加", "add", "create",
-}
+# 单一来源: 关键词集定义在 intent/common.py, 防与 INTENT_SYSTEM 漂移(Tier 3)
+CRITICAL_KEYWORDS = SAFETY_CRITICAL_KEYWORDS
+HIGH_KEYWORDS = SAFETY_HIGH_KEYWORDS
+MEDIUM_KEYWORDS = SAFETY_MEDIUM_KEYWORDS
 
 
 @dataclass
@@ -37,8 +31,11 @@ class SafetyResult:
     risk_tags: list[str] = field(default_factory=list)
 
 
-def run_safety(messages: list[dict]) -> SafetyResult:
-    """安全模块入口: 检测风险。"""
+def run_safety(messages: list[dict], project_constraints: list[str] | None = None) -> SafetyResult:
+    """安全模块入口: 检测风险。
+
+    project_constraints: 项目级结构化禁用词(Tier 2), 命中即 critical 拦截。
+    """
     last = ""
     for m in reversed(messages):
         if m.get("role") == "user":
@@ -49,6 +46,16 @@ def run_safety(messages: list[dict]) -> SafetyResult:
 
     t = last.lower()
     risk_tags = []
+
+    # 项目级硬约束(Tier 2): 命中结构化 --forbid 词 → 直接拦截(不可绕过)
+    if project_constraints:
+        hits = [kw for kw in project_constraints if kw and kw in t]
+        if hits:
+            logger.warning("[安全] 🔴 项目约束命中=%s → 拦截", hits)
+            return SafetyResult(
+                risk_level="critical", requires_confirm=True, permissions_ok=False,
+                block_reason=f"项目禁止: {', '.join(hits)}", risk_tags=hits,
+            )
 
     for kw in CRITICAL_KEYWORDS:
         if kw in t:

@@ -70,6 +70,27 @@ def _sanitize_html(html_str: str) -> str:
     return html_str
 
 
+def _parse_project_forbid(text: str | None) -> list[str]:
+    """从项目 system_prompt 抽取结构化禁用意图/词(Tier 2, 与 ai_service 侧约定一致)。
+
+    约定: system_prompt 内以独立行 `--forbid: deploy, payment` 声明, 逗号/空白分隔。
+    只取结构化片段, 绝不解析自由文本(防误拦/漏拦)。无声明返回空列表。
+    """
+    if not text:
+        return []
+    out: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s.lower().startswith("--forbid:"):
+            continue
+        body = s[len("--forbid:"):].strip()
+        for tok in body.replace(",", " ").split():
+            tok = tok.strip().strip("\"'")
+            if tok:
+                out.append(tok.lower())
+    return out
+
+
 # 模型 id -> 供应商(用于用量账本成本归集;与 providers.py 的适配器命名保持一致)
 _PROVIDER_BY_MODEL = {
     "hy3": "tokenhub",
@@ -524,19 +545,27 @@ async def chat(
     if summary:
         payload["conversation_summary"] = summary
     gen_url = f"{settings.ai_service_url}/generate"
-    # 项目上下文: 状态+需求文档
+    # 项目上下文: 状态+需求文档+系统prompt+硬约束
+    # 注意: 必须先取 Conversation 得到 project_id(此前此处直接引用 conv 而未定义,
+    # 整段被 try/except 吞掉, 导致 project_status/requirement_doc 从未下发 —— 已修正)
     try:
-        from .models import Project
-        proj = await db.get(Project, conv.project_id)
-        if proj:
-            payload["project_status"] = proj.status or "draft"
-            if proj.requirement_doc:
-                try:
-                    payload["requirement_doc"] = json.loads(proj.requirement_doc)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+        conv = await db.get(Conversation, conversation_id)
+        project_id = conv.project_id if conv else None
+        if project_id:
+            proj = await db.get(Project, project_id)
+            if proj:
+                payload["project_status"] = proj.status or "draft"
+                if proj.requirement_doc:
+                    try:
+                        payload["requirement_doc"] = json.loads(proj.requirement_doc)
+                    except Exception:
+                        pass
+                # 项目系统 prompt(Tier 1): 注入 skill 执行上下文
+                payload["project_system_prompt"] = proj.system_prompt or ""
+                # 项目硬约束(Tier 2): 从 system_prompt 的 --forbid: 行抽取结构化词
+                payload["project_constraints"] = _parse_project_forbid(proj.system_prompt)
+    except Exception as e:
+        logger.warning("[chat] 项目上下文获取失败 conv=%s: %s", conversation_id, e)
     # 断点续跑: 方案确认后→锁死 generate_site, 防止重新进需求分析
     use_skill_override = False
     if resume:

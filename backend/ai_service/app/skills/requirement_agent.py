@@ -16,6 +16,7 @@ from collections.abc import AsyncGenerator
 from typing import Dict
 
 from ..events import ev
+from ..intent.common import build_skill_sys
 from ..providers import get_chat_model
 from ..registry import register_skill
 
@@ -62,7 +63,8 @@ SYS_REQUIREMENT = (
 async def requirement_agent_handler(
     model_id: str, messages: list, trace_id: str | None = None,
     is_cancelled=None, project_status: str = "draft",
-    industry: str = "other", requirement_doc: dict | None = None, **kwargs,
+    industry: str = "other", requirement_doc: dict | None = None,
+    project_system_prompt: str | None = None, **kwargs,
 ) -> AsyncGenerator[Dict, None]:
     AGENT_LOG.info("[需求] [1/4] 开始分析 trace=%s 行业=%s 状态=%s msgs=%d 已有文档=%s",
                    trace_id, industry, project_status, len(messages), "有" if requirement_doc else "无")
@@ -75,7 +77,10 @@ async def requirement_agent_handler(
     focus = INDUSTRY_FOCUS.get(industry, INDUSTRY_FOCUS["other"])
     AGENT_LOG.info("[需求] [1/4] 行业特化 行业=%s 提问策略=%.80s", industry, focus)
 
-    full_sys = f"{SYS_REQUIREMENT}\n当前行业: {industry}\n{focus}\n用户输入: "
+    full_sys = build_skill_sys(
+        f"{SYS_REQUIREMENT}\n当前行业: {industry}\n{focus}\n用户输入: ",
+        project_system_prompt,
+    )
 
     req_msgs = [{"role": "user", "content": m.get("content", "")}
                 for m in messages if m.get("role") == "user"]
