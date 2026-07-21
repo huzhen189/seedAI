@@ -41,20 +41,22 @@ async def classify_v2(
     project_status: str = "draft",
     checkpoint_info: dict | None = None,
 ) -> PipelineResult:
-    """v2 意图管道: 5 模块并行 + 汇总器决策。
+    """v2 意图管道: 语义异步发射 + 4 同步模块重叠执行 + 汇总器决策。
 
-    时序优化: LLM 语义模块先发射(asyncio.create_task),
-    4 个同步规则模块在 LLM 飞行期间完成(0延迟)。
+    时序说明(澄清"并行"表述): 并非真并行计算。而是把耗时的 LLM 语义模块
+    先用 asyncio.create_task 发射, 在它飞行(等待)期间, 4 个零延迟的同步
+    规则模块(run_rules/run_context/run_safety + 汇总准备)重叠执行, 从而
+    消除同步阶段的等待开销。各模块均为纯函数, 不共享可变状态, 无内存污染。
     """
     logger.info("[管道] [1/5] 开始 %d条消息 model=%s project=%s", len(messages), model_id, project_status)
 
     # ── 发射语义任务(LLM, 异步) ──
-    logger.info("[管道] [2/5] 发射语义模块(LLM异步)...")
+    logger.info("[管道] [2/5] 发射语义模块(LLM异步, 同步模块在其等待期重叠执行)...")
     semantic_task = asyncio.create_task(
         run_semantic(messages, model_id, context_hint=context_hint, checkpoint_info=checkpoint_info)
     )
 
-    # ── [3/5] 4 个同步规则模块(0ms) ──
+    # ── [3/5] 4 个同步规则模块(零延迟, 与语义 LLM 等待期重叠) ──
     logger.info("[管道] [3/5] 执行4个规则模块(同步)...")
     rule_result: RuleResult = RuleResult()
     context_result: ContextResult = ContextResult()
@@ -104,7 +106,11 @@ def _aggregate(
     safety: SafetyResult,
     project_status: str,
 ) -> PipelineResult:
-    """汇总器: 优先级决策 + 证据融合 + 置信度排序。"""
+    """汇总器: 安全优先短路 → 意图融合 → 工具选择 → 二次确认 → 多选项 → 路由。
+
+    关键: confirm/options 分支都携带已算好的 selected_skill, 供 Worker 在用户
+    确认/选择后直接执行(避免 Worker 自己重写路由逻辑, 破坏单一来源)。
+    """
     evidence = {
         "rule": {"pattern": rule.pattern, "keywords": rule.keywords, "confidence": rule.confidence},
         "semantic": {"level1": semantic.level1, "level2": semantic.level2, "confidence": semantic.confidence, "industry": semantic.industry, "latency_ms": semantic.latency_ms},
@@ -124,18 +130,7 @@ def _aggregate(
             selected_skill="explain",
         )
 
-    if safety.risk_level == "high":
-        logger.info("[汇总] 安全检查→需要二次确认 risk=%s reason=%s", safety.risk_level, safety.block_reason)
-        return PipelineResult(
-            intent={"level1": "learn", "level2": "casual", "confidence": 0.5, "industry": semantic.industry},
-            plan=[{"action": "confirm", "reason": safety.block_reason}],
-            risk=safety,
-            evidence=evidence,
-            decision="confirm",
-            selected_skill="explain",
-        )
-
-    # ── Step 2: 意图消歧义(融合多路证据) ──
+    # ── Step 2: 意图融合(语义为主 + 规则冲突修正 + 上下文修正) ──
     # 权重: 语义 70% + 规则 20% + 上下文修正 10%
     final_l1 = semantic.level1
     final_l2 = semantic.level2
@@ -175,9 +170,26 @@ def _aggregate(
             selected_skill="explain",
         )
 
-    # 低置信度 → 出多选项
-    if confidence < 0.5 or (tools.skills and tools.skills[0].confidence < 0.5):
-        logger.info("[汇总] 低置信度(%.0f%%) → 出多选项", confidence * 100)
+    # 工具已就绪 → 取出最终候选 skill
+    selected = tools.skills[0].name
+
+    # ── Step 4: 二次确认(high) — 已算出 selected_skill, 确认后执行它 ──
+    if safety.risk_level == "high":
+        logger.info("[汇总] 安全检查→需二次确认 risk=%s reason=%s skill=%s",
+                   safety.risk_level, safety.block_reason, selected)
+        return PipelineResult(
+            intent={"level1": final_l1, "level2": final_l2, "confidence": 0.5, "industry": industry},
+            plan=[{"action": "confirm", "reason": safety.block_reason, "skill": selected}],
+            risk=safety,
+            evidence=evidence,
+            decision="confirm",
+            selected_skill=selected,
+        )
+
+    # ── Step 5: 低置信度 → 出多选项(候选含正确 skill 名) ──
+    if confidence < 0.5 or tools.skills[0].confidence < 0.5:
+        logger.info("[汇总] 低置信度(意图%.0f%%/工具%.0f%%) → 出多选项",
+                   confidence * 100, tools.skills[0].confidence * 100)
         return PipelineResult(
             intent={"level1": final_l1, "level2": final_l2, "confidence": confidence, "industry": industry},
             plan=[{"action": "options", "skills": [s.name for s in tools.skills]}],
@@ -185,16 +197,11 @@ def _aggregate(
             tools=tools,
             evidence=evidence,
             decision="options",
-            selected_skill=tools.fallback,
+            selected_skill=selected,
         )
 
-    # 正常路由
-    selected = tools.skills[0].name
-    logger.info("[汇总] 证据 summary: rule=%s/%.0f%% sem=%s/%s/%.0f%% ctx=%s safety=%s skill=%s",
-               rule.pattern, rule.confidence * 100,
-               semantic.level1, semantic.level2, semantic.confidence * 100,
-               context.source, safety.risk_level, selected)
-    logger.info("[汇总] 决策完成 intent=%s/%s conf=%.0f%% skill=%s",
+    # ── Step 6: 正常路由 ──
+    logger.info("[汇总] 决策完成 intent=%s/%s conf=%.0f%% skill=%s decision=route",
                final_l1, final_l2, confidence * 100, selected)
     return PipelineResult(
         intent={"level1": final_l1, "level2": final_l2, "confidence": confidence, "industry": industry},

@@ -25,12 +25,24 @@ from ..config import settings
 from ..events import TERMINAL_EVENTS
 from .router import detect_intent_v2, skill_for
 from .runner import run_skill
+from ..registry import SkillRegistry
 
 
 _JOB_QUEUE = "queue:generate"
 _STREAM_PREFIX = "gen:stream:"  # + trace_id -> Redis Stream(可回放进度)
 
 logger = logging.getLogger(__name__)
+
+
+def _skill_label(name: str) -> str:
+    """取 skill 的前端展示名(用于多选项弹框标题)。"""
+    try:
+        entry = SkillRegistry.get(name)
+        if entry and entry.display_name:
+            return entry.display_name
+    except Exception:
+        pass
+    return name
 
 
 class QueueBackend:
@@ -327,6 +339,7 @@ async def worker_loop(concurrency: int = 1):
                     idx = msg.get("_msg_id") or (conversation_id * 1000 + i)
                     try:
                         index_message(idx, conversation_id, msg.get("role", "user"), msg.get("content", ""))
+                        msg["_msg_id"] = idx  # 回写, 修复上下文模块 Chroma 死代码
                         indexed += 1
                     except Exception:
                         pass
@@ -367,24 +380,26 @@ async def worker_loop(concurrency: int = 1):
                 ctx_result = ctx_hint or "检测完成"
                 logger.info("[Worker] [3/6] 上下文结果 ctx=%.60s", ctx_result)
 
-                # ── [4/6] 意图分类 ──
-                skill_name = skill or skill_for(intent["level1"], intent["level2"]) or "explain"
-                logger.info("[Worker] [4/6] 意图分类 结果=一级:%s 二级:%s 置信度:%.0f%% 行业:%s 候选skill:%s",
-                           intent["level1"], intent["level2"],
-                           intent.get("confidence", 0) * 100,
-                           intent.get("industry", "?"), skill_name)
+                # ── [4/6] 意图分类(汇总器已算好最终 skill, 单一来源) ──
+                decision = intent.get("decision", "route")
+                confirmed = bool(job.get("confirmed", False))
+                skill_name = skill or intent.get("selected_skill") or skill_for(intent["level1"], intent["level2"]) or "explain"
+                logger.info("[Worker] [4/6] 决策 decision=%s risk=%s 汇总skill=%s 最终skill=%s conf=%.0f%%",
+                           decision, intent.get("risk_level", "?"), intent.get("selected_skill"),
+                           skill_name, intent.get("confidence", 0) * 100)
 
-                # ── [5/6] 路由分发 ──
-                if skill_name == "builder_agent" and proj_status in ("draft", "planning"):
-                    logger.info("[Worker] [5/6] 状态路由 项目状态=%s → builder→requirement_agent", proj_status)
-                    skill_name = "requirement_agent"
-                elif intent["level1"] == "unsupported":
-                    logger.info("[Worker] [5/6] 路由结果 不支持的功能 → explain降级")
-                else:
-                    logger.info("[Worker] [5/6] 路由结果 skill=%s doc=%s status=%s",
-                               skill_name, "有" if doc else "无", proj_status)
+                # ── [5/6] 决策分流(switch on decision) ──
+                # 1) 高危拦截: 死红线, 即便用户确认也不可绕过
+                if decision == "block":
+                    reason = (intent.get("plan") or [{}])[0].get("reason", "高风险操作, 已拦截")
+                    logger.warning("[Worker] [5/6] 安全拦截(不可绕过) reason=%s", reason)
+                    await q.publish(trace_id, {"event": "block", "data": {"reason": reason}})
+                    await q.publish(trace_id, {"event": "done", "data": {}})
+                    continue
 
+                # 2) 不支持的意图 → explain 降级(保留原有 unsupported 处理)
                 if intent["level1"] == "unsupported":
+                    logger.info("[Worker] [5/6] 不支持的功能 → explain降级")
                     async for event in run_skill(
                         "explain", model_id, messages,
                         trace_id=trace_id, is_cancelled=_cancelled,
@@ -401,7 +416,31 @@ async def worker_loop(concurrency: int = 1):
                     logger.info("[Worker] [6/6] 执行完毕 unsupported→已降级")
                     continue
 
-                # ── [6/6] 执行 ──
+                # 3) 二次确认(high): 未确认则发 confirm 事件等前端回传(确认后带 confirmed 重发)
+                if decision == "confirm" and not confirmed:
+                    reason = (intent.get("plan") or [{}])[0].get("reason", "需确认")
+                    logger.info("[Worker] [5/6] 二次确认 等待用户确认 skill=%s reason=%s", skill_name, reason)
+                    await q.publish(trace_id, {"event": "confirm", "data": {"reason": reason, "skill": skill_name}})
+                    await q.publish(trace_id, {"event": "done", "data": {}})
+                    continue
+
+                # 4) 多选项(options): 用户未选则发 options 事件; 已带 skill 参数则直接执行
+                if decision == "options" and not confirmed and not job.get("skill"):
+                    plan = intent.get("plan") or []
+                    skill_list = []
+                    for p in plan:
+                        if p.get("action") == "options":
+                            skill_list = p.get("skills", [])
+                    choices = [{"id": s, "title": _skill_label(s), "desc": ""} for s in skill_list]
+                    logger.info("[Worker] [5/6] 多选项 候选=%s", skill_list)
+                    await q.publish(trace_id, {"event": "options", "data": {
+                        "question": "请选择处理方式", "choices": choices, "mode": "skill"}})
+                    await q.publish(trace_id, {"event": "done", "data": {}})
+                    continue
+
+                # 5) 正常路由 / fallback / 已确认 / 已选项 → 直接执行
+                logger.info("[Worker] [5/6] 路由执行 skill=%s decision=%s doc=%s status=%s confirmed=%s",
+                           skill_name, decision, "有" if doc else "无", proj_status, confirmed)
                 event_cnt = 0
                 async for event in run_skill(
                     skill_name, model_id, messages,

@@ -88,6 +88,7 @@ class GenerateReq(BaseModel):
     conversation_summary: str = ""    # Redis对话摘要
     project_status: str = "draft"     # 项目状态
     requirement_doc: dict | None = None  # 需求文档
+    confirmed: bool = False             # 二次确认已通过(安全 confirm 后由前端带此标记重发)
 
 
 @app.get("/health")
@@ -167,6 +168,7 @@ async def generate(req: GenerateReq, after: str | None = None):
             "conversation_summary": req.conversation_summary,
             "project_status": req.project_status,
             "requirement_doc": req.requirement_doc,
+            "confirmed": req.confirmed,
         }
         await q.enqueue(job)
         logger.info("[2/3] 新任务入队 trace=%s queue=%s", trace_id, type(q).__name__)

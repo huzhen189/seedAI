@@ -1,6 +1,6 @@
 """Router:意图管道v2 + Skill 分发。
 
-- detect_intent_v2: 并行 5 模块 → PipelineResult → 兼容旧 dict
+- detect_intent_v2: 语义异步发射 + 4 同步模块重叠执行 → PipelineResult → 兼容旧 dict
 - skill_for: (level1, level2) → skill_name 查表
 """
 

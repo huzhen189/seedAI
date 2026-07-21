@@ -507,6 +507,11 @@ async def chat(
     logger.info("[chat] [4/8] 计量已记录 + trace=%s 已创建", tid)
 
     payload = {"model_id": model, "messages": messages, "trace_id": tid, "conversation_id": conversation_id}
+    # 前端二次确认回传(安全 confirm 通过后带 confirmed=1 重发, Worker 据此跳过拦截)
+    confirmed = request.query_params.get("confirmed")
+    if confirmed in ("1", "true", "True"):
+        payload["confirmed"] = True
+        logger.info("[chat] 二次确认已通过, 跳过安全拦截")
     # 前端上下文检测 + Redis 对话摘要
     ctx = request.query_params.get("context_hint")
     if ctx:
@@ -532,12 +537,12 @@ async def chat(
                     pass
     except Exception:
         pass
-    # 断点续跑: 方案确认后→锁死 build_agent_coder, 防止重新进需求分析
+    # 断点续跑: 方案确认后→锁死 generate_site, 防止重新进需求分析
     use_skill_override = False
     if resume:
         ck_redis = await ck_get(conversation_id)
         if ck_redis and ck_redis.get("stage") == "await_confirm":
-            payload["skill"] = "build_agent_coder"
+            payload["skill"] = "generate_site"
             use_skill_override = True
     if after:
         from urllib.parse import urlencode
@@ -655,7 +660,7 @@ async def chat(
                                             conversation_id, stage, ck_data, progress_pct))
                                     elif event == "paused":
                                         terminal_status = "paused"
-                                        # 方案确认暂停: 保存阶段信息到 checkpoint, 恢复时锁死 build_agent_coder
+                                        # 方案确认暂停: 保存阶段信息到 checkpoint, 恢复时锁死 generate_site
                                         if isinstance(payload_obj, dict) and payload_obj.get("stage") == "await_confirm":
                                             await ck_set(conversation_id, "await_confirm",
                                                         {"title": payload_obj.get("plan_title", ""),

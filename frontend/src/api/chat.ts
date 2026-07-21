@@ -1,4 +1,4 @@
-import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent } from '../types'
+import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent } from '../types'
 import { notifyAuthRequired } from '../stores/auth'
 import { post, publicGet } from './client'
 
@@ -23,6 +23,10 @@ export interface ChatCallbacks {
   onOptions?: (data: OptionEvent) => void
   /** 不支持的功能提示(意图不属于已知范围) */
   onUnsupported?: (data: UnsupportedEvent) => void
+  /** 高危拦截(安全 critical, 不可绕过) */
+  onBlock?: (data: BlockEvent) => void
+  /** 二次确认(安全 high, 等待用户确认后带 confirmed 重发) */
+  onConfirm?: (data: ConfirmEvent) => void
 }
 
 export interface StartChatOptions {
@@ -36,6 +40,10 @@ export interface StartChatOptions {
   after?: string
   resume?: boolean
   correct?: boolean
+  /** 二次确认已通过标记(安全 confirm 通过后重发) */
+  confirmed?: boolean
+  /** 多选项选中后重发: 指定 Worker 直接执行的 skill(管道级 options 选择) */
+  skill?: string
 }
 
 /** 打开与业务服务的 SSE 对话流(需登录 Cookie + conversation_id)。返回 EventSource 以便取消。 */
@@ -49,6 +57,8 @@ export function startChat(opts: StartChatOptions): EventSource {
   if (opts.after) params.set('after', opts.after)
   if (opts.resume) params.set('resume', 'true')
   if (opts.correct) params.set('correct', 'true')
+  if (opts.confirmed) params.set('confirmed', '1')
+  if (opts.skill) params.set('skill', opts.skill)
 
   const url = `/api/chat?${params.toString()}`
   console.log('[SSE] 连接 %s', url)
@@ -68,6 +78,8 @@ export function startChat(opts: StartChatOptions): EventSource {
   es.addEventListener('intent', (e) => opts.cb.onIntent?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('options', (e) => opts.cb.onOptions?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('unsupported', (e) => opts.cb.onUnsupported?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('block', (e) => opts.cb.onBlock?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('confirm', (e) => opts.cb.onConfirm?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('paused', (e) => opts.cb.onPaused?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('requirement_doc', (e) => opts.cb.onRequirement?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('token', (e) => {

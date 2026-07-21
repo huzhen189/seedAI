@@ -12,6 +12,9 @@ import time
 from dataclasses import dataclass
 
 from ..providers import get_chat_model, resolve_fallback_order
+from .common import (
+    VALID_LEVEL1, VALID_LEVEL2, VALID_INDUSTRIES, OLD_TO_LEVELS,
+)
 
 logger = logging.getLogger("ai_service.intent.semantic")
 
@@ -39,19 +42,6 @@ INTENT_SYSTEM = (
     "- none: 不存在断点或不需要判断\n\n"
     "用户输入: "
 )
-
-VALID_LEVEL1 = frozenset({"learn", "code", "build", "doc", "translate", "unsupported"})
-VALID_LEVEL2 = frozenset({
-    "explain", "debug", "compare", "casual",
-    "snippet", "component", "fix", "refactor",
-    "page", "site", "modify", "game",
-    "readme", "tutorial", "plan",
-    "text", "code_lang",
-})
-VALID_INDUSTRIES = frozenset({
-    "restaurant", "ecommerce", "gov", "edu", "health",
-    "finance", "game", "personal", "corp", "tech", "media", "other", "none",
-})
 
 
 @dataclass
@@ -120,7 +110,6 @@ async def run_semantic(messages: list[dict], model_id: str = "deepseek",
                                      confidence=confidence, checkpoint_relation=ck_rel,
                                      raw_output=raw, latency_ms=elapsed)
             old = data.get("intent", "")
-            from .rules import OLD_TO_LEVELS
             if old in OLD_TO_LEVELS:
                 l1, l2 = OLD_TO_LEVELS[old]
                 return SemanticResult(level1=l1, level2=l2, industry=industry,

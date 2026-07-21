@@ -51,11 +51,32 @@ export interface IntentEvent {
   level2_label?: string
   confidence?: number
   industry?: string
+  /** 汇总器决策: route|block|confirm|options|fallback */
+  decision?: string
+  /** 安全等级: low|medium|high|critical */
+  risk_level?: string
+  requires_confirm?: boolean
+  /** 汇总器算定的最终技能(单一来源) */
+  selected_skill?: string
+  /** 计划(含 options 候选 / confirm 原因 / block 原因) */
+  plan?: { action: string; reason?: string; skill?: string; skills?: string[] }[]
 }
 
 /** 不支持的功能提示. */
 export interface UnsupportedEvent {
   message?: string
+}
+
+/** 高危拦截(安全 critical, 不可绕过). */
+export interface BlockEvent {
+  reason?: string
+}
+
+/** 二次确认(安全 high, 等待用户确认后带 confirmed 重发). */
+export interface ConfirmEvent {
+  reason?: string
+  /** 确认后要执行的技能名 */
+  skill?: string
 }
 
 /** 思考时间线中的一步:每个 agent 节点对应一步,含该步的思考文本与状态。 */
@@ -144,6 +165,8 @@ export interface TrailContent {
 export interface OptionEvent {
   question?: string
   choices?: { id: string; title: string; desc?: string; pros?: string; cons?: string }[]
+  /** "skill": 管道级多选项, 选中即带 skill 参数重发; 省略: requirement_agent 文本拼接模式 */
+  mode?: string
 }
 
 export interface Conversation {

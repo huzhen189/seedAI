@@ -22,7 +22,7 @@ import { listArtifacts, renameProject, patch } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { Artifact, Message, ModelInfo, OptionEvent, PlanEvent, RetryEvent, ThoughtStep } from '../types'
+import type { Artifact, Message, ModelInfo, OptionEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
   enter_router: '意图路由 — 识别你的需求类型，匹配最合适的处理流程',
@@ -130,12 +130,24 @@ const showOptionsModal = ref(false)
 const optionsData = ref<OptionEvent | null>(null)
 const selectedOption = ref('')  // radio 单选绑定
 const pendingOptionsText = ref('')  // 已确认但未发送的选项文本
+// 二次确认弹框(安全 high)
+const pendingConfirm = ref<{ reason: string; skill: string } | null>(null)
+const showConfirmModal = ref(false)
+// 高危拦截提示(安全 critical, 不可绕过)
+const blockReason = ref('')
 
 function onOptionsConfirm() {
   if (!optionsData.value || !selectedOption.value) return
   const choices = optionsData.value.choices || []
   const selected = choices.find(c => c.id === selectedOption.value)
   if (!selected) return
+  // 管道级多选项: 选中即带 skill 参数重发(不拼文本)
+  if (optionsData.value.mode === 'skill') {
+    showOptionsModal.value = false
+    resendWithSkill(selected.id)
+    return
+  }
+  // requirement_agent 级: 拼文本, 下次 send 一起发
   pendingOptionsText.value = `方案确认: 选择了 ${selected.id}: ${selected.title}`
   showOptionsModal.value = false
   upsertStep('option_selected', 'done', `已选择: ${selected.id}. ${selected.title}`)
@@ -177,6 +189,43 @@ function cancelConfirmPlan() {
   confirmPlan.value = null
   generating.value = false
   finished.value = true
+}
+
+// 二次确认通过后: 带 confirmed 标记重发(Worker 据此跳过安全拦截, 执行 selected_skill)
+function resendConfirmed() {
+  if (!pendingConfirm.value) return
+  pendingConfirm.value = null
+  showConfirmModal.value = false
+  resetGenState()
+  traceId.value = genTraceId()
+  const cid = convStore.currentConvId!
+  setActiveGen(cid, traceId.value)
+  generating.value = true
+  const assistantIdx = convStore.messages.length - 1
+  esRef.value = startChat({
+    model: model.value,
+    traceId: traceId.value,
+    conversationId: cid,
+    confirmed: true,
+    cb: makeCallbacks(assistantIdx),
+  })
+}
+
+// 多选项选中: 带 skill 参数重发(Worker 直接执行该 skill)
+function resendWithSkill(skillName: string) {
+  resetGenState()
+  traceId.value = genTraceId()
+  const cid = convStore.currentConvId!
+  setActiveGen(cid, traceId.value)
+  generating.value = true
+  const assistantIdx = convStore.messages.length - 1
+  esRef.value = startChat({
+    model: model.value,
+    traceId: traceId.value,
+    conversationId: cid,
+    skill: skillName,
+    cb: makeCallbacks(assistantIdx),
+  })
 }
 
 // ---- 上翻加载更早会话 ----
@@ -511,6 +560,19 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       generating.value = false
       finished.value = true
       errorMsg.value = '暂不支持此功能，请尝试其他类型请求'
+      clearActiveGen()
+    },
+    onBlock: (d: BlockEvent) => {
+      generating.value = false
+      finished.value = true
+      blockReason.value = d.reason || '该操作存在高风险，已被安全策略拦截'
+      clearActiveGen()
+    },
+    onConfirm: (d: ConfirmEvent) => {
+      generating.value = false
+      finished.value = true
+      pendingConfirm.value = { reason: d.reason || '该操作需二次确认', skill: d.skill || '' }
+      showConfirmModal.value = true
       clearActiveGen()
     },
     onPaused: (d: any) => {
@@ -944,7 +1006,23 @@ watch(pendingRetry, (r) => {
             </div>
           </div>
         </div>
-        <div v-if="finished && !errorMsg" class="feedback">
+        <!-- 高危拦截提示(安全 critical, 不可绕过) -->
+        <div v-if="blockReason" class="error block-warn">
+          🛑 高危操作已被拦截：{{ blockReason }}
+          <button class="pob-clear" @click="blockReason = ''">✕ 我知道了</button>
+        </div>
+        <!-- 二次确认对话框(安全 high) -->
+        <div v-if="showConfirmModal && pendingConfirm" class="confirm-plan">
+          <div class="cp-title">⚠️ 安全确认</div>
+          <div class="cp-body">
+            <div class="cp-goal">{{ pendingConfirm.reason }}</div>
+          </div>
+          <div class="cp-actions">
+            <button class="cp-btn cp-confirm" @click="resendConfirmed">✅ 确认继续</button>
+            <button class="cp-btn cp-cancel" @click="showConfirmModal = false; pendingConfirm = null">取消</button>
+          </div>
+        </div>
+        <div v-if="finished && !errorMsg && !blockReason" class="feedback">
           <span class="rate-label">评分 (1-10):</span>
           <template v-for="n in 10" :key="n">
             <button

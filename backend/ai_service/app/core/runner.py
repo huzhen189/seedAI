@@ -46,6 +46,11 @@ async def run_skill(
             level2_label=intent_info.get("level2_label"),
             confidence=intent_info.get("confidence"),
             industry=intent_info.get("industry"),
+            decision=intent_info.get("decision"),
+            risk_level=intent_info.get("risk_level"),
+            requires_confirm=intent_info.get("requires_confirm"),
+            selected_skill=intent_info.get("selected_skill"),
+            plan=intent_info.get("plan"),
             agent_id=skill_name,
         )
 

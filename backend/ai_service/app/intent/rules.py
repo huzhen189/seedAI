@@ -10,27 +10,8 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger("ai_service.intent.rules")
 
-# 有效的值域
-VALID_LEVEL1 = frozenset({"learn", "code", "build", "doc", "translate", "unsupported"})
-VALID_LEVEL2 = frozenset({
-    "explain", "debug", "compare", "casual",
-    "snippet", "component", "fix", "refactor",
-    "page", "site", "modify", "game",
-    "readme", "tutorial", "plan",
-    "text", "code_lang",
-})
-VALID_INDUSTRIES = frozenset({
-    "restaurant", "ecommerce", "gov", "edu", "health",
-    "finance", "game", "personal", "corp", "tech", "media", "other", "none",
-})
-
-OLD_TO_LEVELS = {
-    "build_site": ("build", "site"),
-    "build_page": ("build", "page"),
-    "code_snippet": ("code", "snippet"),
-    "learn_explain": ("learn", "explain"),
-    "learn_casual": ("learn", "casual"),
-}
+# 有效值域统一来自 intent/common(单一来源, 避免与 semantic.py 重复定义)
+from .common import VALID_LEVEL1, VALID_LEVEL2, VALID_INDUSTRIES, OLD_TO_LEVELS  # noqa: E402
 
 
 @dataclass

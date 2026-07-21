@@ -5,7 +5,6 @@
 """
 
 from . import (
-    builder_agent,
     design_agent,
     explain,
     fix_agent,
@@ -20,7 +19,6 @@ from . import (
 
 
 __all__ = [
-    "builder_agent",
     "design_agent",
     "explain",
     "fix_agent",
