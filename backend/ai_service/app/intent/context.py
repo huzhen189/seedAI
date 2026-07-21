@@ -71,46 +71,96 @@ def run_context(messages: list[dict], conversation_id: int | None = None,
     return ContextResult()
 
 
+# 话题 → 关键词(打分制聚合, 零 LLM)。覆盖全部行业 + 主要意图。
+_TOPIC_KEYWORDS: dict[str, list[str]] = {
+    "网站制作": ["网站", "官网", "建站", "主页", "首页", "落地页", "门户", "门户站", "作品集", "portfolio"],
+    "页面制作": ["页面", "单页", "网页", "html", "着陆页", "静态页", "h5"],
+    "前端开发": ["前端", "组件", "css", "样式", "布局", "导航", "页脚", "响应式", "vue", "react", "javascript"],
+    "游戏开发": ["游戏", "小游戏", "互动游戏", "canvas", "贪吃蛇", "俄罗斯方块"],
+    "电商": ["电商", "商城", "购物", "商品", "订单", "支付", "店铺", "购物车"],
+    "餐饮建站": ["餐饮", "餐厅", "饭店", "美食", "外卖", "菜单", "菜品"],
+    "教育建站": ["教育", "课程", "培训", "学校", "学生", "课件"],
+    "医疗建站": ["医疗", "医院", "诊所", "医生", "挂号", "预约", "健康"],
+    "金融建站": ["金融", "银行", "保险", "理财", "证券", "基金"],
+    "政务建站": ["政务", "政府", "公安", "社保", "税务", "审批"],
+    "旅游建站": ["旅游", "酒店", "景点", "攻略", "机票", "民宿"],
+    "科技建站": ["科技", "saas", "ai", "人工智能", "芯片", "物联网"],
+    "媒体建站": ["媒体", "视频", "直播", "新闻", "博客", "公众号"],
+    "个人建站": ["个人", "简历", "博客", "作品集", "名片"],
+    "企业建站": ["企业", "公司", "官网", "品牌", "集团"],
+    "需求分析": ["需求", "方案", "规划", "功能清单", "用户画像", "竞品"],
+    "代码生成": ["代码", "函数", "脚本", "接口", "api", "类", "模块"],
+    "代码修复": ["修复", "报错", "bug", "error", "debug", "traceback", "异常", "崩溃"],
+    "代码重构": ["重构", "优化", "评审", "review", "性能", "慢", "卡"],
+    "文档": ["文档", "readme", "教程", "tutorial", "说明书", "设计文档"],
+    "翻译": ["翻译", "translate", "汉化", "本地化", "译文"],
+    "设计": ["配色", "ui", "ux", "设计稿", "原型", "视觉", "风格", "主题色", "图标"],
+    "搜索": ["搜索", "查资料", "搜一下", "上网查", "查一下"],
+    "教程讲解": ["教程", "概念", "原理", "区别", "对比", "为什么", "怎么", "如何"],
+    "天气": ["天气", "温度", "下雨", "湿度", "气温"],
+}
+
+
 def _summarize_context(text: str) -> str:
-    """从 assistant 回复提取简短主题摘要(关键词匹配, 不调LLM)。"""
-    t = text[:500].lower()
-    mapping = [
-        ("天气", "天气"), ("温度", "天气"), ("下雨", "天气"), ("湿度", "天气"),
-        ("网站", "网站制作"), ("网页", "网页制作"), ("html", "网页制作"),
-        ("编程", "编程"), ("代码", "代码"), ("翻译", "翻译"),
-        ("教程", "教程"), ("文档", "文档"), ("游戏", "游戏开发"),
-        ("商城", "电商"), ("商品", "电商"), ("订单", "电商"),
-        ("个人站", "个人网站"), ("博客", "博客"), ("简历", "简历"),
-        ("模板", "模板"), ("前端", "前端开发"),
-        ("颜色", "设计"), ("配色", "设计"), ("字体", "设计"),
-        ("布局", "页面布局"), ("导航", "导航设计"),
-        ("餐厅", "餐饮建站"), ("美食", "餐饮建站"), ("外卖", "餐饮建站"),
-        ("酒店", "旅游建站"), ("景点", "旅游建站"), ("攻略", "旅游建站"),
-        ("课程", "教育建站"), ("学生", "教育建站"),
-        ("诊所", "医疗建站"), ("预约", "医疗建站"),
-        ("需求", "需求分析"), ("方案", "需求分析"),
-        ("修复", "代码修复"), ("报错", "代码修复"), ("bug", "代码修复"),
-    ]
-    for kw, topic in mapping:
-        if kw in t:
-            return topic
-    return ""
+    """从上下文文本提取话题摘要(关键词打分聚合, 不调LLM)。
+
+    改进点(相对旧版):
+    - 打分制: 统计每个话题命中关键词数, 取最高, 不再受列表顺序影响(去首匹配偏差);
+    - 多话题合并: 当第二高话题与最高接近(差值≤1)时, 合并为 "A / B", 给分类器更丰富上下文;
+    - 窗口放大到 1200 字(Chroma 路径已拼接多消息, 旧版 500 会截断早期上下文);
+    - 词表覆盖全部 13 行业 + 主要意图(旧版大量常见意图无 topic)。
+    """
+    t = text[:1200].lower()
+    if not t:
+        return ""
+    scores: dict[str, int] = {}
+    for topic, kws in _TOPIC_KEYWORDS.items():
+        n = sum(1 for kw in kws if kw in t)
+        if n:
+            scores[topic] = n
+    if not scores:
+        return ""
+    ranked = sorted(scores.items(), key=lambda x: (-x[1], x[0]))
+    top_topic, top_n = ranked[0]
+    if len(ranked) > 1 and ranked[1][1] >= top_n - 1:
+        return f"{top_topic} / {ranked[1][0]}"
+    return top_topic
+
+
+# 话题 → 意图修正(供 _infer_correction)。覆盖 _TOPIC_KEYWORDS 主要话题。
+_CORRECTION_MAP: list[tuple[str, dict]] = [
+    ("网站制作", {"level1": "build", "level2": "site", "reason": "上条在讨论建站"}),
+    ("页面制作", {"level1": "build", "level2": "page", "reason": "上条在讨论网页"}),
+    ("前端开发", {"level1": "build", "level2": "site", "reason": "上条在讨论前端"}),
+    ("游戏开发", {"level1": "build", "level2": "game", "reason": "上条在讨论游戏"}),
+    ("电商", {"level1": "build", "level2": "site", "reason": "上条在讨论电商"}),
+    ("餐饮建站", {"level1": "build", "level2": "site", "reason": "上条在讨论餐饮"}),
+    ("教育建站", {"level1": "build", "level2": "site", "reason": "上条在讨论教育"}),
+    ("医疗建站", {"level1": "build", "level2": "site", "reason": "上条在讨论医疗"}),
+    ("金融建站", {"level1": "build", "level2": "site", "reason": "上条在讨论金融"}),
+    ("政务建站", {"level1": "build", "level2": "site", "reason": "上条在讨论政务"}),
+    ("旅游建站", {"level1": "build", "level2": "site", "reason": "上条在讨论旅游"}),
+    ("科技建站", {"level1": "build", "level2": "site", "reason": "上条在讨论科技"}),
+    ("媒体建站", {"level1": "build", "level2": "site", "reason": "上条在讨论媒体"}),
+    ("个人建站", {"level1": "build", "level2": "site", "reason": "上条在讨论个人站"}),
+    ("企业建站", {"level1": "build", "level2": "site", "reason": "上条在讨论企业站"}),
+    ("需求分析", {"level1": "build", "level2": "requirement", "reason": "上条在讨论需求"}),
+    ("代码生成", {"level1": "code", "level2": "snippet", "reason": "上条在讨论写代码"}),
+    ("代码修复", {"level1": "code", "level2": "fix", "reason": "上条在讨论修复"}),
+    ("代码重构", {"level1": "code", "level2": "refactor", "reason": "上条在讨论重构"}),
+    ("文档", {"level1": "doc", "level2": "readme", "reason": "上条在讨论文档"}),
+    ("翻译", {"level1": "translate", "level2": "text", "reason": "上条在讨论翻译"}),
+    ("设计", {"level1": "learn", "level2": "design", "reason": "上条在讨论设计"}),
+    ("搜索", {"level1": "learn", "level2": "search", "reason": "上条在讨论搜索查资料"}),
+    ("教程讲解", {"level1": "learn", "level2": "explain", "reason": "上条在讨论讲解"}),
+]
 
 
 def _infer_correction(hint: str) -> dict | None:
-    """从上下文摘要推测意图修正。"""
+    """从上下文摘要推测意图修正(支持多话题, 取最具体的匹配)。"""
     if not hint:
         return None
-    correction_map = {
-        "网站制作": {"level1": "build", "level2": "site", "reason": "上条在讨论建站"},
-        "网页制作": {"level1": "build", "level2": "page", "reason": "上条在讨论网页"},
-        "前端开发": {"level1": "build", "level2": "site", "reason": "上条在讨论前端"},
-        "电商": {"level1": "build", "level2": "site", "reason": "上条在讨论电商"},
-        "餐饮建站": {"level1": "build", "level2": "site", "reason": "上条在讨论餐饮"},
-        "需求分析": {"level1": "build", "level2": "requirement", "reason": "上条在讨论需求"},
-        "代码修复": {"level1": "code", "level2": "fix", "reason": "上条在讨论修复"},
-    }
-    for topic, correction in correction_map.items():
+    for topic, correction in _CORRECTION_MAP:
         if topic in hint:
             return correction
     return None

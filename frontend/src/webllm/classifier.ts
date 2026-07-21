@@ -23,6 +23,8 @@ build: page(单页)|site(完整站)|modify(修改)|game(小游戏)
 doc: readme|tutorial|plan(方案)
 translate: text
 
+industry(13选1, build/doc 必填, 其他 none): restaurant|ecommerce|gov|edu|health|finance|game|personal|corp|tech|media|travel|other
+
 用户: `
 
 /** 本地意图分类 */

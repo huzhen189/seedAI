@@ -17,7 +17,8 @@ VALID_LEVEL2 = frozenset({
 })
 VALID_INDUSTRIES = frozenset({
     "restaurant", "ecommerce", "gov", "edu", "health",
-    "finance", "game", "personal", "corp", "tech", "media", "other", "none",
+    "finance", "game", "personal", "corp", "tech", "media",
+    "travel", "other", "none",
 })
 
 # 旧版意图名 → 新版 (level1, level2)
@@ -50,27 +51,52 @@ def normalize_industry(v: str | None) -> str:
 
 
 # ── 安全层共享关键词(单一来源, run_safety 引用; 防与 INTENT_SYSTEM 漂移, Tier 3) ──
-# 注意: 关键词含中文(大小写无关)与英文小写(匹配前已对输入 lower())。
+# 注意:
+#  - 中文关键词大小写无关(匹配前未 lower, 但中文无大小写);
+#  - 英文关键词一律小写(匹配前已对输入 lower());
+#  - 尽量用「多字短语/英文单词」而非单字, 降低误拦(例如不单独放"删除",
+#    而是"清空数据库"这类明确危险短语); 既有单字(删除/支付)为历史行为, 暂保留。
 SAFETY_CRITICAL_KEYWORDS = frozenset({
+    # ── 破坏性 / 数据丢失 ──
     "删除", "清空", "drop", "rm ", "remove", "del ", "delete",
+    "清空数据库", "清库", "drop table", "delete from",
+    "格式化", "format", "mkfs", "fdisk", "truncate",
+    "重置所有", "恢复出厂", "rm -rf", "sudo rm", "shutdown", "关机", "kill -9", "pkill",
+    # ── 凭证 / 身份 / 资金(外泄或滥用) ──
     "支付", "付款", "充值", "订单", "交易", "转账",
     "密码", "密钥", "token", "api_key", "secret",
+    "银行卡", "信用卡", "credit card", "身份证", "ssn", "私钥", "凭证", "credential",
+    # ── 注入 / 越权 / 滥用 ──
+    "sql注入", "注入攻击", "xss", "越权", "提权", "exploit", "pwn",
+    "绕过验证", "bypass", "爬取数据", "抓取数据", "爬虫",
 })
 
 SAFETY_HIGH_KEYWORDS = frozenset({
+    # ── 发布 / 部署(既有) ──
     "发布", "上线", "deploy", "publish",
     "管理", "admin", "后台",
     "修改权限", "更改角色",
+    # ── 数据迁移 / 配置变更(新增) ──
+    "导出", "export", "备份", "backup", "迁移", "migrate",
+    "升级", "upgrade", "重启", "restart", "停止服务", "stop",
+    "提交", "commit", "合并", "merge",
+    "封禁", "ban", "删除用户", "移除用户", "改密码", "重置密码",
+    "grant", "revoke", "权限", "用户管理",
 })
 
 SAFETY_MEDIUM_KEYWORDS = frozenset({
     "修改", "改", "modify", "update", "更新",
     "新增", "添加", "add", "create",
+    # ── 编辑 / 配置类(新增) ──
+    "调整", "微调", "编辑", "edit", "配置", "config",
+    "重命名", "rename", "设置", "改色", "换色", "排版", "布局调整",
 })
 
 # INTENT_SYSTEM 中"unsupported"判据(分类器与规则层共享同一句描述, Tier 3)
 UNSUPPORTED_HINT = (
-    "(注意: 后端开发/数据库/App/游戏引擎/运维部署等非网页前端需求 → unsupported)"
+    "(注意: 仅处理「网页前端」需求; 以下一律 → unsupported: "
+    "后端开发/服务端/数据库/API服务/App/小程序原生/游戏引擎/桌面应用/嵌入式/"
+    "运维部署/DevOps/爬虫/自动化脚本/微信生态开发/数据抓取/AI模型训练 等非网页前端需求)"
 )
 
 
