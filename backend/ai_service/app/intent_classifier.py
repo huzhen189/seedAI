@@ -124,7 +124,7 @@ def detect_context(messages: list[dict], conversation_id: int | None = None,
 
 def classify(messages: list[dict], model_id: str = "deepseek", checkpoint_info: dict | None = None,
              context_hint: str = "") -> dict:
-    """纯分类(上下文已在外部检测好)。返回 {level1, level2, confidence, industry, checkpoint_relation}。"""
+    """同步分类(被 async wrapper 调用)。返回 {level1, level2, confidence, industry, checkpoint_relation}。"""
     last = ""
     for m in reversed(messages):
         if m.get("role") == "user":
@@ -134,14 +134,12 @@ def classify(messages: list[dict], model_id: str = "deepseek", checkpoint_info: 
         logger.info("[分类] [1/3] 无有效用户输入 → 返回默认值")
         return _default()
 
-    # 注入上下文
     if context_hint:
         logger.info("[分类] [1/3] 注入上下文 hint=%.60s", context_hint)
         last = f"用户输入: {last}\n上下文: {context_hint}"
     else:
         logger.info("[分类] [1/3] 无上下文,直接分类 input=%.80s", last)
 
-    # 构建 prompt
     sys_prompt = INTENT_SYSTEM
     if checkpoint_info:
         ck = checkpoint_info
@@ -152,7 +150,6 @@ def classify(messages: list[dict], model_id: str = "deepseek", checkpoint_info: 
         )
         logger.info("[分类] [1/3] 检测到断点 stage=%s pct=%s%%", ck.get('stage','?'), ck.get('pct',0))
 
-    # LLM 分类
     logger.info("[分类] [2/3] 调用LLM分类 model=%s len=%d", model_id, len(last))
     t0 = time.time()
     order = resolve_fallback_order(model_id)
@@ -197,6 +194,76 @@ def classify(messages: list[dict], model_id: str = "deepseek", checkpoint_info: 
     logger.info("[分类] [3/3] LLM失败,降级关键词匹配 input=%.120s", last)
     result = _keyword_fallback(last)
     logger.info("[分类] [3/3] 关键词结果 一级:%s 二级:%s 行业:%s 置信度:70%%",
+               result["level1"], result["level2"], result.get("industry"))
+    return result
+
+
+async def classify_async(messages: list[dict], model_id: str = "deepseek",
+                         checkpoint_info: dict | None = None,
+                         context_hint: str = "") -> dict:
+    """异步分类:使用 ainvoke, 支持 asyncio.wait_for 中断。"""
+    last = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last = m.get("content", "") or ""
+            break
+    if not last.strip():
+        return _default()
+
+    if context_hint:
+        last = f"用户输入: {last}\n上下文: {context_hint}"
+
+    sys_prompt = INTENT_SYSTEM
+    if checkpoint_info:
+        ck = checkpoint_info
+        sys_prompt = INTENT_SYSTEM.replace(
+            "用户输入: ",
+            f"断点: 阶段={ck.get('stage','?')} 进度={ck.get('pct',0)}% 标题=\"{ck.get('title','')}\"\n"
+            f"用户输入: ",
+        )
+
+    logger.info("[分类] [2/3] 调用LLM(异步) model=%s len=%d", model_id, len(last))
+    t0 = time.time()
+    order = resolve_fallback_order(model_id)
+    for mid in order:
+        try:
+            chat = get_chat_model(mid, streaming=False)
+            resp = await chat.ainvoke([
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": last[:500]},
+            ])
+            raw = (resp.content or "").strip()
+            elapsed = (time.time() - t0) * 1000
+            logger.info("[分类] [2/3] LLM返回 model=%s 耗时=%.0fms raw=%.200s", mid, elapsed, raw)
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            data = json.loads(m.group(0)) if m else {}
+            l1 = data.get("level1", data.get("intent", ""))
+            l2 = data.get("level2", "")
+            confidence = float(data.get("confidence", 0.5))
+            industry = data.get("industry", "none") or "none"
+            ck_rel = data.get("checkpoint_relation", "none") or "none"
+
+            if industry not in VALID_INDUSTRIES:
+                industry = "other"
+            if ck_rel not in ("resume", "correct", "override", "unrelated", "unclear", "none"):
+                ck_rel = "none"
+            if l1 in VALID_LEVEL1 and l2 in VALID_LEVEL2:
+                logger.info("[分类] [3/3] LLM分类成功 一级=%s 二级=%s 置信度=%.0f%% 行业=%s",
+                           l1, l2, confidence * 100, industry)
+                return {"level1": l1, "level2": l2, "confidence": confidence, "industry": industry, "checkpoint_relation": ck_rel}
+            old_intent = data.get("intent", "")
+            if old_intent in OLD_TO_LEVELS:
+                l1, l2 = OLD_TO_LEVELS[old_intent]
+                logger.info("[分类] [3/3] 旧格式转换 %s→%s/%s", old_intent, l1, l2)
+                return {"level1": l1, "level2": l2, "confidence": confidence, "industry": industry, "checkpoint_relation": ck_rel}
+            break
+        except Exception as e:
+            logger.warning("[分类] [2/3] 模型%s调用失败: %s", mid, e)
+            continue
+
+    logger.info("[分类] [3/3] LLM失败,降级关键词匹配 input=%.120s", last)
+    result = _keyword_fallback(last)
+    logger.info("[分类] [3/3] 关键词结果 一级:%s 二级:%s 行业:%s",
                result["level1"], result["level2"], result.get("industry"))
     return result
 

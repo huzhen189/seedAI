@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional
 
 from .config import settings
 from .events import TERMINAL_EVENTS
-from .router import detect_intent, skill_for
+from .router import detect_intent, detect_intent_async, skill_for
 from .runner import run_skill
 
 
@@ -350,12 +350,12 @@ async def worker_loop(concurrency: int = 1):
                         break
                 logger.info("[Worker] [3/6] 上下文检测 输入=\"%.80s\" ctx_hint=%.40s summary=%.40s",
                            user_text, ctx_hint[:40] if ctx_hint else "无", summary[:40] if summary else "无")
-                # 意图分类包裹在子线程中执行(防 LLM 调用阻塞事件循环)
+                # 意图分类异步执行(支持 wait_for 真中断)
                 try:
                     intent = await asyncio.wait_for(
-                        asyncio.to_thread(detect_intent, messages, model_id,
-                                         conversation_id=conversation_id,
-                                         context_hint=ctx_hint),
+                        detect_intent_async(messages, model_id,
+                                           conversation_id=conversation_id,
+                                           context_hint=ctx_hint),
                         timeout=35.0,
                     )
                 except asyncio.TimeoutError:

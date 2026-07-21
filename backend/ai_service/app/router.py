@@ -13,7 +13,7 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from .intent_classifier import classify
+from .intent_classifier import classify, classify_async
 from .registry import SkillRegistry
 
 
@@ -100,6 +100,30 @@ def detect_intent(messages: list[dict], model_id: str = "deepseek",
         result.get("industry", "none"),
         elapsed,
     )
+    result["label"] = f"{label1} · {label2}"
+    result["level1_label"] = label1
+    result["level2_label"] = label2
+    result["industry"] = result.get("industry", "other") or "other"
+    return result
+
+
+async def detect_intent_async(messages: list[dict], model_id: str = "deepseek",
+                              checkpoint_info: dict | None = None,
+                              conversation_id: int | None = None,
+                              context_hint: str = "") -> dict:
+    """异步版意图识别: 上下文检测 + 异步 LLM 分类, 支持 asyncio.wait_for 中断。"""
+    t0 = time.time()
+    from .intent_classifier import detect_context
+    ctx = detect_context(messages, conversation_id=conversation_id, frontend_hint=context_hint)
+    result = await classify_async(messages, model_id, checkpoint_info=checkpoint_info, context_hint=ctx)
+    l1 = result["level1"]
+    l2 = result["level2"]
+    elapsed = time.time() - t0
+    label1 = LEVEL1_LABELS.get(l1, l1)
+    label2 = LEVEL2_LABELS.get(l2, l2)
+    logger.info("[意图] 识别: %s → %s | 置信度 %s | 行业 %s | 耗时 %.1fs",
+                label1, label2, result.get("confidence", "?"),
+                result.get("industry", "none"), elapsed)
     result["label"] = f"{label1} · {label2}"
     result["level1_label"] = label1
     result["level2_label"] = label2
