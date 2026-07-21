@@ -123,8 +123,7 @@ async def builder_agent_handler(
     AGENT_LOG.info("[builder] [5/5] 建站完成 trace=%s HTML=%d字节 有预览:%s", trace_id, len(html), bool(url))
 
 
-register_skill(
-    name="builder_agent",
+register_skill(name="builder_agent", display_name="建站小胡", avatar="⚡", role="代码生成",
     intent_tags=["建站", "生成", "网站", "网页", "页面", "做", "开发"],
     handler=builder_agent_handler,
     is_graph=False,

@@ -39,4 +39,4 @@ register_skill(
     is_graph=False,
     description="设计顾问: 配色/布局/字体/动效建议",
 )
-register_skill(name="design_agent",intent_tags=["设计","配色","布局","字体","动效","颜色","样式","主题","排版"],handler=design_agent_handler,is_graph=False,description="设计顾问: 配色/布局/字体/动效建议")
+register_skill(name="design_agent", display_name="设计小胡", avatar="🎨", role="设计顾问",intent_tags=["设计","配色","布局","字体","动效","颜色","样式","主题","排版"],handler=design_agent_handler,is_graph=False,description="设计顾问: 配色/布局/字体/动效建议")

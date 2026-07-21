@@ -40,4 +40,4 @@ register_skill(
     is_graph=False,
     description="代码评审: 性能/SEO/可访问性/代码质量",
 )
-register_skill(name="review_agent",intent_tags=["优化","评审","review","建议","检查","看看","帮忙看","能不能更好"],handler=review_agent_handler,is_graph=False,description="代码评审: 性能/SEO/可访问性/代码质量")
+register_skill(name="review_agent", display_name="评审小胡", avatar="🔍", role="代码评审",intent_tags=["优化","评审","review","建议","检查","看看","帮忙看","能不能更好"],handler=review_agent_handler,is_graph=False,description="代码评审: 性能/SEO/可访问性/代码质量")

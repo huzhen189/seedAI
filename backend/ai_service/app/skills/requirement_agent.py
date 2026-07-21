@@ -142,6 +142,7 @@ async def requirement_agent_handler(
 
 register_skill(
     name="requirement_agent",
+    display_name="需求小胡", avatar="📋", role="需求分析师",
     intent_tags=["需求", "建站", "规划"],
     handler=requirement_agent_handler,
     is_graph=False,

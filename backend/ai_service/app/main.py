@@ -22,8 +22,7 @@ from .config import settings
 from .events import to_sse
 from .logging_config import setup_logging
 from .providers import list_providers
-from .queue import get_queue, worker_loop
-from .registries import bootstrap
+from .core.queue import get_queue, worker_loop
 from .registry import SkillRegistry, ToolRegistry
 
 
@@ -45,7 +44,12 @@ def _exception_handler(loop, context):
 asyncio.get_event_loop().set_exception_handler(_exception_handler)
 
 # 引导注册(导入 skills + tools 包,完成全部注册)
-_REGISTRY = bootstrap()
+import app.skills  # noqa: F401 - 触发 @register_skill 装饰器
+import app.tools    # noqa: F401 - 触发 @tool 装饰器
+_REGISTRY = {
+    "skills": SkillRegistry.names(),
+    "tools": ToolRegistry.names(),
+}
 
 # Worker 后台任务句柄
 _worker_task = None
@@ -98,8 +102,7 @@ async def models():
 
 @app.get("/agents")
 async def list_agents():
-    from .agents import AGENTS
-    return AGENTS
+    return SkillRegistry.list_agents() if hasattr(SkillRegistry, 'list_agents') else []
 
 
 @app.get("/skills")

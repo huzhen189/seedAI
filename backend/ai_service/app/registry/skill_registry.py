@@ -22,6 +22,18 @@ class SkillEntry:
     handler: Callable[..., Any]
     is_graph: bool = False
     description: str = ""
+    display_name: str = ""   # 前端显示名
+    avatar: str = ""          # 头像 emoji
+    role: str = ""            # 角色标签
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.name,
+            "name": self.display_name or self.name,
+            "avatar": self.avatar,
+            "role": self.role,
+            "description": self.description,
+        }
 
 
 class SkillRegistry:
@@ -48,6 +60,11 @@ class SkillRegistry:
         return list(cls._entries.keys())
 
     @classmethod
+    def list_agents(cls) -> list[dict]:
+        """动态生成 Agent 列表(替代原 agents.py 手工维护)。"""
+        return [e.to_dict() for e in cls._entries.values()]
+
+    @classmethod
     def match(cls, text: str) -> SkillEntry | None:
         """轻量规则匹配:在 intent_tags 中做子串命中(生产可由 Router 小模型判定后按 name 取)。"""
         if not text:
@@ -66,14 +83,20 @@ def register_skill(
     handler: Callable[..., Any],
     is_graph: bool = False,
     description: str = "",
+    display_name: str = "",
+    avatar: str = "",
+    role: str = "",
 ) -> SkillEntry:
-    """便捷注册函数(§5.8「如何引入一个新 Skill」)。"""
+    """便捷注册函数。"""
     entry = SkillEntry(
         name=name,
         intent_tags=intent_tags,
         handler=handler,
         is_graph=is_graph,
         description=description,
+        display_name=display_name,
+        avatar=avatar,
+        role=role,
     )
     SkillRegistry.register(entry)
     return entry

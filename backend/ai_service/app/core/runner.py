@@ -8,8 +8,8 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any, Callable, Dict, Optional
 
-from .events import ev
-from .registry import SkillRegistry
+from ..events import ev
+from ..registry import SkillRegistry
 
 
 logger = logging.getLogger("ai_service.runner")

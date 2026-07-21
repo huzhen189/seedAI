@@ -105,8 +105,7 @@ async def explain_skill(
         ) from e
 
 
-register_skill(
-    name="explain",
+register_skill(name="explain", display_name="小胡", avatar="🤖", role="智能助手",
     intent_tags=["解释", "问答", "问", "debug", "对比", "翻译"],
     handler=explain_skill,
     is_graph=False,

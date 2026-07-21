@@ -21,9 +21,9 @@ from collections.abc import AsyncGenerator
 from contextlib import suppress
 from typing import Any, Dict, Optional
 
-from .config import settings
-from .events import TERMINAL_EVENTS
-from .router import detect_intent, detect_intent_async, skill_for
+from ..config import settings
+from ..events import TERMINAL_EVENTS
+from .router import detect_intent_v2, skill_for
 from .runner import run_skill
 
 
@@ -319,7 +319,7 @@ async def worker_loop(concurrency: int = 1):
 
             # ── [2/6] Chroma 向量索引 ──
             if conversation_id:
-                from .rag import index_message
+                from ..knowledge.chroma import index_message
                 logger.info("[Worker] [2/6] Chroma向量索引 conv=%d msgs=%d 开始...",
                            conversation_id, len(messages))
                 indexed = 0
@@ -350,18 +350,20 @@ async def worker_loop(concurrency: int = 1):
                         break
                 logger.info("[Worker] [3/6] 上下文检测 输入=\"%.80s\" ctx_hint=%.40s summary=%.40s",
                            user_text, ctx_hint[:40] if ctx_hint else "无", summary[:40] if summary else "无")
-                # 意图分类异步执行(支持 wait_for 真中断)
+                # 意图分类 v2(5模块并行, 35s超时)
                 try:
                     intent = await asyncio.wait_for(
-                        detect_intent_async(messages, model_id,
-                                           conversation_id=conversation_id,
-                                           context_hint=ctx_hint),
+                        detect_intent_v2(messages, model_id,
+                                         conversation_id=conversation_id,
+                                         context_hint=ctx_hint,
+                                         project_status=proj_status),
                         timeout=35.0,
                     )
                 except asyncio.TimeoutError:
-                    logger.error("[Worker] [3/6] 意图分类超时(35s) → 降级关键词匹配")
+                    logger.error("[Worker] [3/6] 意图分类超时(35s) → 降级")
                     intent = {"level1": "learn", "level2": "casual", "confidence": 0.3,
-                              "industry": "other", "checkpoint_relation": "none"}
+                              "industry": "other", "checkpoint_relation": "none",
+                              "selected_skill": "explain", "decision": "fallback"}
                 ctx_result = ctx_hint or "检测完成"
                 logger.info("[Worker] [3/6] 上下文结果 ctx=%.60s", ctx_result)
 

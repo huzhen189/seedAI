@@ -29,7 +29,7 @@ from ..providers import (
     get_chat_model,
     resolve_fallback_order,
 )
-from ..rag import build_rag_context, save_memory
+from ..knowledge.chroma import build_rag_context, save_memory
 from ..registry import register_skill
 
 

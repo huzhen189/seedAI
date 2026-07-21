@@ -39,4 +39,4 @@ register_skill(
     is_graph=False,
     description="Bug修复: 错误排查 + 代码级修复方案",
 )
-register_skill(name="fix_agent",intent_tags=["修复","报错","bug","不生效","改改","出错","error","fix","修","改一下","改下"],handler=fix_agent_handler,is_graph=False,description="Bug修复: 错误排查 + 代码级修复方案")
+register_skill(name="fix_agent", display_name="修复小胡", avatar="🔧", role="BUG修复",intent_tags=["修复","报错","bug","不生效","改改","出错","error","fix","修","改一下","改下"],handler=fix_agent_handler,is_graph=False,description="Bug修复: 错误排查 + 代码级修复方案")

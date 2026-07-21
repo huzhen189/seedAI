@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from .config import settings
+from ..config import settings
 
 
 logger = logging.getLogger("ai_service.rag")
