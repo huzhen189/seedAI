@@ -51,32 +51,46 @@ def normalize_industry(v: str | None) -> str:
 
 
 # ── 安全层共享关键词(单一来源, run_safety 引用; 防与 INTENT_SYSTEM 漂移, Tier 3) ──
-# 注意:
-#  - 中文关键词大小写无关(匹配前未 lower, 但中文无大小写);
-#  - 英文关键词一律小写(匹配前已对输入 lower());
-#  - 尽量用「多字短语/英文单词」而非单字, 降低误拦(例如不单独放"删除",
-#    而是"清空数据库"这类明确危险短语); 既有单字(删除/支付)为历史行为, 暂保留。
-SAFETY_CRITICAL_KEYWORDS = frozenset({
-    # ── 破坏性 / 数据丢失 ──
-    "删除", "清空", "drop", "rm ", "remove", "del ", "delete",
-    "清空数据库", "清库", "drop table", "delete from",
-    "格式化", "format", "mkfs", "fdisk", "truncate",
-    "重置所有", "恢复出厂", "rm -rf", "sudo rm", "shutdown", "关机", "kill -9", "pkill",
-    # ── 凭证 / 身份 / 资金(外泄或滥用) ──
-    "支付", "付款", "充值", "订单", "交易", "转账",
-    "密码", "密钥", "token", "api_key", "secret",
-    "银行卡", "信用卡", "credit card", "身份证", "ssn", "私钥", "凭证", "credential",
+# 两类:
+#  1) HARD  关键词: 命中即危险, 不受建设性语境中和(破坏性/滥用短语)。始终 critical 拦截。
+#  2) SOFT  关键词: 可能出现在正常建站需求(如"支付页面""密码输入框""导出按钮"),
+#     需结合「建设性前导 / UI 语境」判断; 命中语境则中和(降级为无风险, 不拦截)。
+# 分层(soft_critical/high/medium)对应原 CRITICAL/HIGH/MEDIUM 的严重度。
+#
+# 英文关键词一律小写(匹配前已对输入 lower()); 中文无大小写。
+# 注意: SOFT critical 里的裸词(如"删除")若同时是某 SOFT high 短语(如"删除用户")
+# 的子串, 会被 run_safety 重叠降级到 high, 避免误升 critical(v0.8.3)。
+
+# HARD: 真正的破坏性/滥用短语, 几乎只出现在危险语境, 永远拦截
+SAFETY_HARD_KEYWORDS = frozenset({
+    # ── 破坏性 / 数据丢失(短语级) ──
+    "清空数据库", "清库", "删除数据库", "删库", "drop table", "drop database",
+    "delete from", "truncate", "truncate table",
+    "导出数据库", "export database", "备份数据库", "删除所有", "删除全部",
+    "rm -rf", "sudo rm", "kill -9", "pkill", "fdisk", "mkfs",
+    "格式化", "format", "恢复出厂", "重置所有",
     # ── 注入 / 越权 / 滥用 ──
     "sql注入", "注入攻击", "xss", "越权", "提权", "exploit", "pwn",
     "绕过验证", "bypass", "爬取数据", "抓取数据", "爬虫",
+    # ── 系统级危险 ──
+    "关机", "shutdown",
 })
 
-SAFETY_HIGH_KEYWORDS = frozenset({
-    # ── 发布 / 部署(既有) ──
+# SOFT critical: 出现在"做X功能/页面"语境中是正常建站, 否则视为风险
+SAFETY_SOFT_CRITICAL = frozenset({
+    "删除", "支付", "付款", "充值", "订单", "交易", "转账",
+    "密码", "密钥", "token", "api_key", "secret",
+    "银行卡", "信用卡", "credit card", "身份证", "ssn", "私钥", "凭证", "credential",
+    "rm", "remove", "del", "delete",
+})
+
+# SOFT high
+SAFETY_SOFT_HIGH = frozenset({
+    # ── 发布 / 部署 ──
     "发布", "上线", "deploy", "publish",
     "管理", "admin", "后台",
     "修改权限", "更改角色",
-    # ── 数据迁移 / 配置变更(新增) ──
+    # ── 数据迁移 / 配置变更 ──
     "导出", "export", "备份", "backup", "迁移", "migrate",
     "升级", "upgrade", "重启", "restart", "停止服务", "stop",
     "提交", "commit", "合并", "merge",
@@ -84,13 +98,36 @@ SAFETY_HIGH_KEYWORDS = frozenset({
     "grant", "revoke", "权限", "用户管理",
 })
 
-SAFETY_MEDIUM_KEYWORDS = frozenset({
+# SOFT medium
+SAFETY_SOFT_MEDIUM = frozenset({
     "修改", "改", "modify", "update", "更新",
     "新增", "添加", "add", "create",
-    # ── 编辑 / 配置类(新增) ──
+    # ── 编辑 / 配置类 ──
     "调整", "微调", "编辑", "edit", "配置", "config",
     "重命名", "rename", "设置", "改色", "换色", "排版", "布局调整",
 })
+
+# 建设性前导(verb-ish): 出现在 SOFT 关键词之前(窗口内), 表示"让我做一个X"(前导词)
+#  - CONSTRUCTIVE_LEADS: 完整集(含"帮我/请帮我"等通用请求语), 用于 critical/medium 中和。
+#  - STRICT_LEADS: 仅"做功能/页面"类强前导, 用于 high(避免"帮我删除用户"被误中和)。
+CONSTRUCTIVE_LEADS = (
+    "帮我", "帮我做", "帮我写", "帮我加", "帮我生成", "帮我创建", "帮我设计",
+    "帮我开发", "帮我实现", "做一个", "开发一个", "加一个", "添加一个", "实现一个",
+    "生成", "创建", "设计", "写", "加", "做", "开发", "实现",
+    "需要", "想要", "我想", "请帮我", "请", "帮我把", "给我做",
+)
+STRICT_LEADS = (
+    "帮我做", "帮我写", "帮我加", "帮我生成", "帮我创建", "帮我设计",
+    "帮我开发", "帮我实现", "做一个", "开发一个", "加一个", "添加一个", "实现一个",
+    "生成", "创建", "设计", "写", "加", "做", "开发", "实现",
+)
+
+# UI / 代码语境词(noun-ish): 出现在 SOFT 关键词附近, 表示"这是一个界面/代码元素"(附近词)
+SAFETY_UI_CONTEXT = (
+    "页面", "组件", "表单", "按钮", "输入框", "输入", "模块", "功能", "界面",
+    "框", "栏", "卡片", "弹窗", "菜单", "列表", "表格",
+    "注释", "代码", "文件", "函数", "变量", "样式", "文案", "字段", "区域",
+)
 
 # INTENT_SYSTEM 中"unsupported"判据(分类器与规则层共享同一句描述, Tier 3)
 UNSUPPORTED_HINT = (
