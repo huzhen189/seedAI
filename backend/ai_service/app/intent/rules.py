@@ -49,9 +49,11 @@ def run_rules(messages: list[dict]) -> RuleResult:
             last = m.get("content", "") or ""
             break
     if not last.strip():
+        logger.info("[规则] 输入为空→跳过")
         return RuleResult()
 
     t = last.lower()
+    logger.info("[规则] 检测 input=%.60s", last)
 
     # 行业探测
     industry = "other"
@@ -92,23 +94,17 @@ def run_rules(messages: list[dict]) -> RuleResult:
                ]
 
     if any(w in t for w in build_kw):
-        keywords.extend([w for w in build_kw if w in t])
-        if any(w in t for w in ("修改", "改", "modify")):
-            return RuleResult(keywords=keywords, pattern="build", confidence=0.7, industry=industry)
+        keywords = [w for w in build_kw if w in t]
+        logger.info("[规则] 命中: build 关键词=%s industry=%s conf=0.7", keywords[:5], industry)
         return RuleResult(keywords=keywords, pattern="build", confidence=0.7, industry=industry)
-
     if any(w in t for w in code_kw):
-        keywords.extend([w for w in code_kw if w in t])
-        if any(w in t for w in ("修复", "bug", "报错", "error", "fix")):
-            return RuleResult(keywords=keywords, pattern="code", confidence=0.7, industry=industry)
+        keywords = [w for w in code_kw if w in t]
+        logger.info("[规则] 命中: code 关键词=%s industry=%s conf=0.7", keywords[:5], industry)
         return RuleResult(keywords=keywords, pattern="code", confidence=0.7, industry=industry)
-
     if any(w in t for w in learn_kw):
-        keywords.extend([w for w in learn_kw if w in t])
+        keywords = [w for w in learn_kw if w in t]
+        logger.info("[规则] 命中: learn 关键词=%s industry=%s conf=0.7", keywords[:5], industry)
         return RuleResult(keywords=keywords, pattern="learn", confidence=0.7, industry=industry)
 
-    if any(w in t for w in ("翻译", "translate")):
-        keywords.append("翻译")
-        return RuleResult(keywords=keywords, pattern="translate", confidence=0.7, industry=industry)
-
-    return RuleResult(keywords=keywords, pattern="learn", confidence=0.5, industry=industry)
+    logger.info("[规则] 未命中关键词→默认learn conf=0.5")
+    return RuleResult(keywords=[], pattern="learn", confidence=0.5, industry=industry)

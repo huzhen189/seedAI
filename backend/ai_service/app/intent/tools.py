@@ -1,13 +1,15 @@
-"""工具模块: 根据意图+置信度匹配可用技能, 按置信度排序。
+"""工具模块: 意图→技能映射 + 状态路由 + 置信度排序。
 
 输出 ToolResult {skills[], fallback}
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
-# (level1, level2) → skill_name
+logger = logging.getLogger("ai_service.intent.tools")
+
 INTENT_SKILL_MAP: dict[tuple[str, str], str] = {
     ("learn", "explain"): "explain",
     ("learn", "debug"): "explain",
@@ -53,30 +55,29 @@ def run_tools(level1: str, level2: str, confidence: float,
     """工具模块入口: 意图→技能映射 + 状态路由。"""
     skill_name = INTENT_SKILL_MAP.get((level1, level2))
     if not skill_name:
+        logger.info("[工具] 无匹配技能 intent=%s/%s → 降级explain", level1, level2)
         return ToolResult(fallback="explain")
 
-    # 状态路由: draft/planning → requirement_agent
+    # 状态路由
     if skill_name == "builder_agent" and project_status in ("draft", "planning"):
+        logger.info("[工具] 状态路由 builder→requirement (status=%s)", project_status)
         skill_name = "requirement_agent"
 
-    # 根据置信度生成候选列表
     if confidence >= 0.8:
+        logger.info("[工具] 技能=%s conf=%.0f%% → 直接路由", skill_name, confidence * 100)
         return ToolResult(
             skills=[SkillCandidate(name=skill_name, confidence=confidence,
-                                   reason=f"意图匹配: {level1}/{level2}")],
-            fallback="explain",
-        )
+                                   reason=f"意图: {level1}/{level2}")],
+            fallback="explain")
     elif confidence >= 0.5:
-        # 中等置信度: 路由 + 标记低置信
+        logger.info("[工具] 技能=%s conf=%.0f%% → 路由(中置信)", skill_name, confidence * 100)
         return ToolResult(
             skills=[SkillCandidate(name=skill_name, confidence=confidence,
-                                   reason=f"意图匹配: {level1}/{level2} (置信度偏低)")],
-            fallback="explain",
-        )
+                                   reason=f"意图: {level1}/{level2} (中置信)")],
+            fallback="explain")
     else:
-        # 低置信度: 返回多候选(供汇总器出 options)
+        logger.info("[工具] 低置信 conf=%.0f%% → 出多选项", confidence * 100)
         return ToolResult(
-            skills=[SkillCandidate(name=skill_name, confidence=confidence, reason="低置信度"),
+            skills=[SkillCandidate(name=skill_name, confidence=confidence, reason="低置信"),
                     SkillCandidate(name="explain", confidence=0.5, reason="兜底")],
-            fallback="explain",
-        )
+            fallback="explain")

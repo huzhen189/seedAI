@@ -61,11 +61,4 @@ async def search_agent_handler(
             yield {"type": "token", "data": text}
     AGENT_LOG.info("[search] 完成 chars=%d", len("".join(full)))
 
-register_skill(
-    name="search_agent",
-    intent_tags=["搜索", "查", "搜", "search", "找一下", "帮我查", "最新", "最近有什么"],
-    handler=search_agent_handler,
-    is_graph=False,
-    description="联网搜索: 查资料/最新资讯",
-)
-register_skill(name="search_agent", display_name="搜索小胡", avatar="🔎", role="联网搜索",intent_tags=["搜索","查","搜","search","找一下","帮我查","最新","最近有什么"],handler=search_agent_handler,is_graph=False,description="联网搜索: 查资料/最新资讯")
+register_skill(name="search_agent", display_name="搜索小胡", avatar="🔎", role="联网搜索", intent_tags=["搜索","查","搜","search","找一下","帮我查","最新","最近有什么"], handler=search_agent_handler, is_graph=False, description="联网搜索: 查资料/最新资讯")

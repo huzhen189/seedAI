@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
-# 风险关键词表
+logger = logging.getLogger("ai_service.intent.safety")
+
 CRITICAL_KEYWORDS = {
     "删除", "清空", "drop", "rm ", "remove", "del ", "delete",
     "支付", "付款", "充值", "订单", "交易", "转账",
@@ -28,7 +30,7 @@ MEDIUM_KEYWORDS = {
 
 @dataclass
 class SafetyResult:
-    risk_level: str = "low"          # "low"|"medium"|"high"|"critical"
+    risk_level: str = "low"
     requires_confirm: bool = False
     permissions_ok: bool = True
     block_reason: str = ""
@@ -36,7 +38,7 @@ class SafetyResult:
 
 
 def run_safety(messages: list[dict]) -> SafetyResult:
-    """安全模块入口: 检测用户输入中的风险。"""
+    """安全模块入口: 检测风险。"""
     last = ""
     for m in reversed(messages):
         if m.get("role") == "user":
@@ -47,39 +49,32 @@ def run_safety(messages: list[dict]) -> SafetyResult:
 
     t = last.lower()
     risk_tags = []
-    risk_level = "low"
 
-    # critical 检测
     for kw in CRITICAL_KEYWORDS:
         if kw in t:
             risk_tags.append(kw)
     if risk_tags:
-        return SafetyResult(
-            risk_level="critical",
-            requires_confirm=True,
-            permissions_ok=False,
-            block_reason=f"检测到高风险关键词: {', '.join(risk_tags)}",
-            risk_tags=risk_tags,
-        )
+        logger.warning("[安全] 🔴 critical 关键词=%s → 拦截", risk_tags)
+        return SafetyResult(risk_level="critical", requires_confirm=True,
+                           permissions_ok=False,
+                           block_reason=f"高风险: {', '.join(risk_tags)}",
+                           risk_tags=risk_tags)
 
-    # high 检测
     for kw in HIGH_KEYWORDS:
         if kw in t:
             risk_tags.append(kw)
     if risk_tags:
-        return SafetyResult(
-            risk_level="high",
-            requires_confirm=True,
-            permissions_ok=True,
-            block_reason=f"需要二次确认: {', '.join(risk_tags)}",
-            risk_tags=risk_tags,
-        )
+        logger.info("[安全] 🟡 high 关键词=%s → 需二次确认", risk_tags)
+        return SafetyResult(risk_level="high", requires_confirm=True,
+                           block_reason=f"需确认: {', '.join(risk_tags)}",
+                           risk_tags=risk_tags)
 
-    # medium 检测
     for kw in MEDIUM_KEYWORDS:
         if kw in t:
             risk_tags.append(kw)
     if risk_tags:
+        logger.info("[安全] 🟠 medium 关键词=%s", risk_tags)
         return SafetyResult(risk_level="medium", risk_tags=risk_tags)
 
+    logger.info("[安全] 🟢 low 无风险")
     return SafetyResult()

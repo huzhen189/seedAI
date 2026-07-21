@@ -46,14 +46,16 @@ async def classify_v2(
     时序优化: LLM 语义模块先发射(asyncio.create_task),
     4 个同步规则模块在 LLM 飞行期间完成(0延迟)。
     """
-    logger.info("[管道] 开始 5模块并行 %d条消息 model=%s", len(messages), model_id)
+    logger.info("[管道] [1/5] 开始 %d条消息 model=%s project=%s", len(messages), model_id, project_status)
 
     # ── 发射语义任务(LLM, 异步) ──
+    logger.info("[管道] [2/5] 发射语义模块(LLM异步)...")
     semantic_task = asyncio.create_task(
         run_semantic(messages, model_id, context_hint=context_hint, checkpoint_info=checkpoint_info)
     )
 
-    # ── 4 个同步规则模块(0ms) ──
+    # ── [3/5] 4 个同步规则模块(0ms) ──
+    logger.info("[管道] [3/5] 执行4个规则模块(同步)...")
     rule_result: RuleResult = RuleResult()
     context_result: ContextResult = ContextResult()
     safety_result: SafetyResult = SafetyResult()
@@ -62,10 +64,14 @@ async def classify_v2(
         rule_result = run_rules(messages)
         context_result = run_context(messages, conversation_id=conversation_id, frontend_hint=context_hint)
         safety_result = run_safety(messages)
+        logger.info("[管道] [3/5] 规则完成 rule=%s/%s ctx=%s safety=%s",
+                   rule_result.pattern, rule_result.confidence,
+                   context_result.source, safety_result.risk_level)
     except Exception as e:
-        logger.warning("[管道] 规则模块异常: %s", e)
+        logger.warning("[管道] [3/5] 规则模块异常: %s", e)
 
-    # ── 等语义模块完成 ──
+    # ── [4/5] 等语义模块完成 ──
+    logger.info("[管道] [4/5] 等待语义模块(LLM)...")
     semantic_result: SemanticResult
     try:
         semantic_result = await asyncio.wait_for(semantic_task, timeout=35.0)
@@ -83,7 +89,11 @@ async def classify_v2(
             industry=rule_result.industry or "other",
         )
 
-    # ── 汇总器 ──
+    # ── [5/5] 汇总器 ──
+    logger.info("[管道] [5/5] 汇总决策 语义=%s/%s(%.0f%%) 规则=%s 安全=%s",
+               semantic_result.level1, semantic_result.level2,
+               semantic_result.confidence * 100,
+               rule_result.pattern, safety_result.risk_level)
     return _aggregate(rule_result, semantic_result, context_result, safety_result, project_status)
 
 
@@ -180,6 +190,10 @@ def _aggregate(
 
     # 正常路由
     selected = tools.skills[0].name
+    logger.info("[汇总] 证据 summary: rule=%s/%.0f%% sem=%s/%s/%.0f%% ctx=%s safety=%s skill=%s",
+               rule.pattern, rule.confidence * 100,
+               semantic.level1, semantic.level2, semantic.confidence * 100,
+               context.source, safety.risk_level, selected)
     logger.info("[汇总] 决策完成 intent=%s/%s conf=%.0f%% skill=%s",
                final_l1, final_l2, confidence * 100, selected)
     return PipelineResult(
