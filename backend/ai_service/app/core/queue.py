@@ -442,6 +442,74 @@ async def worker_loop(concurrency: int = 1):
                     await q.publish(trace_id, {"event": "done", "data": {}})
                     continue
 
+                # 4.5) 多意图编排: 走 Orchestrator(子任务 DAG 调度 + 合并)
+                if decision == "split":
+                    sub_tasks_raw = intent.get("sub_tasks") or []
+                    if not sub_tasks_raw:
+                        logger.warning("[Worker] [5/6] split 决策但无 sub_tasks → 退化为单 skill")
+                        skill_name = intent.get("selected_skill") or "explain"
+                    else:
+                        from ..core.orchestrator import Orchestrator
+                        from ..core.models import SharedContext, SubTask
+
+                        def _dict_to_subtask(d: dict) -> SubTask:
+                            valid = {k: v for k, v in d.items() if k in SubTask.__dataclass_fields__}
+                            return SubTask(**valid)
+
+                        sub_tasks = [_dict_to_subtask(d) for d in sub_tasks_raw]
+                        confirmed_subtasks = set(job.get("confirmed_subtasks") or [])
+                        shared_ctx = SharedContext(
+                            requirement_doc=doc,
+                            project_status={"status": proj_status},
+                            conversation_summary=summary,
+                            conversation_history=messages,
+                        )
+                        orch = Orchestrator()
+                        logger.info("[Worker] [5/6] 多意图编排 sub_tasks=%d confirmed=%s",
+                                    len(sub_tasks), confirmed_subtasks)
+                        event_cnt = 0
+                        qc_user_text = user_text
+                        qc_assistant_buf = []
+                        done_event = None
+                        async for event in orch.execute(
+                            sub_tasks, model_id, messages,
+                            trace_id=trace_id, is_cancelled=_cancelled,
+                            confirmed_subtasks=confirmed_subtasks,
+                            shared_ctx=shared_ctx,
+                            original_query=user_text,
+                            project_system_prompt=proj_prompt,
+                            project_constraints=proj_constraints,
+                        ):
+                            if event.get("event") == "done":
+                                done_event = event
+                                continue
+                            if event.get("event") == "token":
+                                data = event.get("data", "")
+                                if isinstance(data, str):
+                                    qc_assistant_buf.append(data)
+                            await q.publish(trace_id, event)
+                            event_cnt += 1
+                        # 后置 QC(合并文本)
+                        qc_assistant_text = "".join(qc_assistant_buf)
+                        if qc_assistant_text.strip() and done_event is not None:
+                            try:
+                                from ..qc import run_qc
+                                from .safety import run_safety
+                                safety_risk = run_safety(messages, project_constraints).risk_level
+                                qc_result = await asyncio.wait_for(
+                                    run_qc(qc_user_text, qc_assistant_text,
+                                           project_constraints=project_constraints,
+                                           safety_risk=safety_risk),
+                                    timeout=60.0,
+                                )
+                                await q.publish(trace_id, {"event": "qc", "data": qc_result})
+                            except Exception as qc_err:  # noqa: BLE001
+                                logger.warning("[Worker] [6/6] 编排 QC 失败(跳过) trace=%s: %s", trace_id, qc_err)
+                        if done_event is not None:
+                            await q.publish(trace_id, done_event)
+                        logger.info("[Worker] [6/6] 编排执行完毕 trace=%s 共%d事件", trace_id, event_cnt)
+                        continue
+
                 # 5) 正常路由 / fallback / 已确认 / 已选项 → 直接执行
                 logger.info("[Worker] [5/6] 路由执行 skill=%s decision=%s doc=%s status=%s confirmed=%s",
                            skill_name, decision, "有" if doc else "无", proj_status, confirmed)

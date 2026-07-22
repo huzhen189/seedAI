@@ -546,6 +546,11 @@ async def chat(
     if confirmed in ("1", "true", "True"):
         payload["confirmed"] = True
         logger.info("[chat] 二次确认已通过, 跳过安全拦截")
+    # 多意图编排: 前端回传已确认的中风险子任务 id(逗号分隔)
+    confirmed_subtasks = request.query_params.get("confirmed_subtasks")
+    if confirmed_subtasks:
+        payload["confirmed_subtasks"] = [s.strip() for s in confirmed_subtasks.split(",") if s.strip()]
+        logger.info("[chat] 已确认中风险子任务: %s", payload["confirmed_subtasks"])
     # 前端上下文检测 + Redis 对话摘要
     ctx = request.query_params.get("context_hint")
     if ctx:
