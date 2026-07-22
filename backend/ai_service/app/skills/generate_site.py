@@ -66,9 +66,13 @@ SYS_CODER_GAME = (
 )
 SYS_REVIEWER = (
     "你是严格的代码评审。检查给定 HTML 是否:① 以 <html 开头且结构基本完整;② 标签基本闭合;"
-    "③ 不含明显会白屏的致命错误(eval / 未定义脚本、外部不可达资源)。"
-    "先给结论 passed=true/false,再给一句中文修改建议(若未通过)。用 JSON 回复:"
-    '{"passed": true/false, "comment": "..."}'
+    "③ 不含明显会白屏的致命错误(eval / 未定义脚本、外部不可达资源);"
+    "④ 颜色/布局/可访问性有无问题。\\n"
+    "输出 JSON(不要代码块围栏):\\n"
+    '{"passed": true/false, "comment": "..., 最多60字", '
+    '"scores": {"correctness": 1-10, "completeness": 1-10, "readability": 1-10, '
+    '"compliance": 1-10, "efficiency": 1-10}, '
+    '"issues": ["问题1", "问题2"]}'  # passed=false 时列出具体问题
 )
 
 # 行业→设计约束(注入 Planner)
@@ -159,26 +163,35 @@ def _parse_plan(raw: str) -> dict:
 
 
 async def _review(model_id: str, html: str) -> Dict:
-    """3-C: 静态分析 + LLM 自审。"""
+    """3-C: 静态分析 + LLM 自审(v0.9.0: 扩展为6维自评)。"""
     # 静态分析(快速硬规则)
     low = html.lower()
     if "<html" not in low or len(html) < 50:
-        return {"passed": False, "comment": "缺少 <html 根标签或内容过短"}
+        return {"passed": False, "comment": "缺少 <html 根标签或内容过短",
+                "scores": {"correctness": 0, "completeness": 0, "readability": 0,
+                           "compliance": 5, "efficiency": 5}, "issues": ["缺少<html根标签"]}
     if low.count("<script") > low.count("</script") or low.count("<style") > low.count("</style>"):
-        return {"passed": False, "comment": "标签未闭合(<script>/<style>)"}
+        return {"passed": False, "comment": "标签未闭合(<script>/<style>)",
+                "scores": {"correctness": 2, "completeness": 5, "readability": 5,
+                           "compliance": 5, "efficiency": 5}, "issues": ["标签未闭合"]}
     # LLM 自审(给 JSON 结论,失败则按静态结果放过)
     try:
         out = await asyncio.to_thread(_chat, model_id, SYS_REVIEWER, [{"role": "user", "content": html[:6000]}])
-        import json
-        import re
-
         m = re.search(r"\{.*\}", out, re.DOTALL)
         if m:
             data = json.loads(m.group(0))
-            return {"passed": bool(data.get("passed")), "comment": data.get("comment", "")}
+            return {
+                "passed": bool(data.get("passed")),
+                "comment": data.get("comment", ""),
+                "scores": {k: max(1, min(10, int(data.get("scores", {}).get(k, 5))))
+                          for k in ["correctness", "completeness", "readability", "compliance", "efficiency"]},
+                "issues": data.get("issues", []),
+            }
     except Exception:
         pass
-    return {"passed": True, "comment": "静态检查通过"}
+    return {"passed": True, "comment": "静态检查通过",
+            "scores": {"correctness": 7, "completeness": 7, "readability": 7,
+                       "compliance": 8, "efficiency": 7}, "issues": []}
 
 
 def _deliver(html: str, trace_id: str) -> Optional[str]:

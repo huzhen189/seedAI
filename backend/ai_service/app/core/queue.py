@@ -52,6 +52,26 @@ async def _commit_after_done(trace_id: str, skill_name: str, user_text: str) -> 
             logger.warning("[Worker] §8 git 提交失败(跳过) trace=%s: %s", trace_id, e)
 
 
+async def _refine_assistant_dialog(raw_text: str, model_id: str = "deepseek-chat") -> str:
+    """L2 对话精炼(v0.9.0): done 后 LLM 去冗余→保留完整信息→结构清晰。失败返回原文。"""
+    if not raw_text.strip():
+        return raw_text
+    try:
+        from ..providers import get_chat_model
+        prompt = (
+            "重写以下 AI 回复,去掉重复/口头语/冗余,保留完整信息,语气连贯自然,≤300字。\\n"
+            f"原始回复:\\n{raw_text[:2000]}"
+        )
+        chat = get_chat_model(model_id, streaming=False)
+        msgs = [{"role": "user", "content": prompt}]
+        resp = await chat.ainvoke(msgs)
+        refined = resp.content if hasattr(resp, "content") else str(resp)
+        return refined.strip() or raw_text
+    except Exception as e:
+        logger.debug("[L2精炼] 失败, 回退原文: %s", e)
+        return raw_text
+
+
 def _skill_label(name: str) -> str:
     """取 skill 的前端展示名(用于多选项弹框标题)。"""
     try:
@@ -637,6 +657,15 @@ async def worker_loop(concurrency: int = 1):
                                        trace_id, qc_err)
                 if done_event is not None:
                     await q.publish(trace_id, done_event)
+                # L2 对话精炼(v0.9.0): done 后 LLM 去冗余 → 改写 Message.content(仅建站类)
+                if skill_name in ("generate_site", "write_code", "orchestrator") and qc_assistant_text.strip():
+                    try:
+                        refined = await _refine_assistant_dialog(qc_assistant_text)
+                        await q.publish(trace_id, {"event": "refined", "data": refined[:500]})
+                        logger.info("[Worker] L2 精炼完成 trace=%s len_before=%d len_after=%d",
+                                   trace_id, len(qc_assistant_text), len(refined))
+                    except Exception as _le:  # noqa: BLE001
+                        logger.debug("[Worker] L2 精炼失败: %s", _le)
                 logger.info("[Worker] [6/6] 执行完毕 trace=%s skill=%s 共发出%d个事件 总耗时%.0fms",
                            trace_id, skill_name, event_cnt, (time.time() - t_job) * 1000)
                 await _commit_after_done(trace_id, skill_name, qc_user_text)
