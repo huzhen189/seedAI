@@ -11,6 +11,11 @@
 - aborted   : 主动取消确认(C1)
 - degraded  : 模型降级标记(2-C)
 - preview   : 预览直链就绪(url + fallback,供前端打开iframe预览);取代 node(stage=preview)
+- orchestration: 多意图编排开始(总览:total/tasks[{id,goal,skill,risk,status}]/strategy);sub_task_id 贯穿后续事件
+- subtask_start: 单个子任务开始(sub_task_id/goal/skill)
+- subtask_done : 单个子任务完成(sub_task_id/result_summary)
+- subtask_fail : 单个子任务失败(sub_task_id/reason/recoverable)
+- merge     : 结果合并(sub_task_id贯穿的多个子任务结果 → 一段连贯中文回复);含 success_count/fail_count/failed_tasks
 - retry     : 主模型不可用,携带可选替代模型列表(failed/suggested),前端弹框待用户选择后重发
               (替代原自动降级;收到后同 done/error 一样结束 SSE,由前端重新发起请求)
 

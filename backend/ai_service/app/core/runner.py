@@ -51,6 +51,8 @@ async def run_skill(
             requires_confirm=intent_info.get("requires_confirm"),
             selected_skill=intent_info.get("selected_skill"),
             plan=intent_info.get("plan"),
+            sub_tasks=intent_info.get("sub_tasks"),
+            split_reason=intent_info.get("split_reason", ""),
             agent_id=skill_name,
         )
 

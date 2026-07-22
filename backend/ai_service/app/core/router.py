@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import logging
 import time
@@ -74,6 +75,9 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
         "requires_confirm": result.risk.requires_confirm,
         "evidence": result.evidence,
         "plan": result.plan,
+        # 多意图编排(§多意图 v1.0): 拆分结果透传给 worker / 前端
+        "sub_tasks": [dataclasses.asdict(s) for s in result.sub_tasks],
+        "split_reason": result.split_reason,
     }
 
 

@@ -16,7 +16,9 @@ from .context import ContextResult, run_context
 from .rules import RuleResult, run_rules
 from .safety import SafetyResult, run_safety
 from .semantic import SemanticResult, run_semantic
+from .splitter import maybe_split
 from .tools import SkillCandidate, ToolResult, run_tools
+from ..core.models import SubTask
 
 logger = logging.getLogger("ai_service.intent.pipeline")
 
@@ -28,8 +30,10 @@ class PipelineResult:
     risk: SafetyResult = field(default_factory=SafetyResult)
     tools: ToolResult = field(default_factory=ToolResult)
     evidence: dict = field(default_factory=dict)
-    decision: str = "route"  # "route"|"block"|"confirm"|"options"|"fallback"
+    decision: str = "route"  # "route"|"block"|"confirm"|"options"|"fallback"|"split"
     selected_skill: str = "explain"
+    sub_tasks: list = field(default_factory=list)   # 多意图: list[SubTask]
+    split_reason: str = ""                            # 拆分原因(供统计/前端展示)
 
 
 async def classify_v2(
@@ -97,8 +101,25 @@ async def classify_v2(
                semantic_result.level1, semantic_result.level2,
                semantic_result.confidence * 100,
                rule_result.pattern, safety_result.risk_level)
-    return _aggregate(rule_result, semantic_result, context_result, safety_result,
-                     project_status, project_constraints)
+    result = _aggregate(rule_result, semantic_result, context_result, safety_result,
+                      project_status, project_constraints)
+
+    # ── [6/6] 多意图拆分门控(轻量规则先行, 命中才调 LLM 深拆) ──
+    if result.decision == "route":
+        try:
+            split = await maybe_split(
+                messages, model_id,
+                base_industry=result.intent.get("industry", "other"),
+            )
+            if split.is_multi and split.sub_tasks:
+                result.decision = "split"
+                result.sub_tasks = split.sub_tasks
+                result.split_reason = split.split_reason
+                logger.info("[管道] 多意图拆分 decision=split tasks=%d", len(split.sub_tasks))
+        except Exception as e:
+            logger.warning("[管道] 多意图拆分异常, 降级单意图: %s", e)
+
+    return result
 
 
 def _aggregate(
