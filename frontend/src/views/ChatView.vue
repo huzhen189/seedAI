@@ -122,8 +122,9 @@ async function abortPaused() {
 // 意图识别(由 AI intent 事件设置; 控制右侧面板显示)
 const currentIntent = ref<{ level1: string; level2: string }>({ level1: '', level2: '' })
 const rightCollapsed = ref(false)
-// 方案确认: Planner 产出后暂停等待用户确认
-const confirmPlan = ref<{ title: string; goal: string; steps: string[] } | null>(null)
+// 方案确认(改文字回复驱动, 不再弹模态框): Planner 产出后暂停等待用户以文字回复续跑
+const awaitingConfirm = ref(false)
+const awaitPlan = ref<{ title: string; goal: string; steps: string[] } | null>(null)
 
 // 方案选择(options 事件): 前端弹出单选框, 选中后记录, 下次 send 时一起发送
 const showOptionsModal = ref(false)
@@ -171,24 +172,31 @@ function cancelOptions() {
   optionsData.value = null
 }
 
-function doConfirmPlan() {
-  if (!confirmPlan.value) return
-  confirmPlan.value = null
+// 文字回复驱动续跑: 复用当前 trace_id, 把用户文字作为改进意见/确认一并带入后端
+// (业务代理会把 q 追加到 checkpoint messages, 无需再弹确认模态框)。
+function resumeFromPlan(text: string) {
+  awaitingConfirm.value = false
   resetGenState()
   generating.value = true
+  const cid = convStore.currentConvId!
+  setActiveGen(cid, traceId.value)
+  // 本地乐观追加用户回复 + 空 assistant 占位(后端以 checkpoint messages 为准)
+  convStore.messages.push({
+    role: 'user', content: text, conversation_id: cid, id: 0, created_at: '', model_id: model.value,
+  } as any)
+  convStore.messages.push({
+    role: 'assistant', content: '', conversation_id: cid, id: 0, created_at: '', model_id: model.value,
+  } as any)
+  const assistantIdx = convStore.messages.length - 1
+  lastSentText.value = text
   esRef.value = startChat({
     model: model.value,
     traceId: traceId.value,
-    conversationId: convStore.currentConvId!,
+    conversationId: cid,
     resume: true,
-    cb: makeCallbacks(convStore.messages.length),
+    q: text,
+    cb: makeCallbacks(assistantIdx),
   })
-}
-
-function cancelConfirmPlan() {
-  confirmPlan.value = null
-  generating.value = false
-  finished.value = true
 }
 
 // 二次确认通过后: 带 confirmed 标记重发(Worker 据此跳过安全拦截, 执行 selected_skill)
@@ -286,10 +294,46 @@ async function loadArtifacts() {
 }
 const traceId = ref('')
 const esRef = ref<EventSource | null>(null)
+// 右侧预览面板实例(ChatView 通过它联动选中文件并打开预览)
+const rightPanel = ref<InstanceType<typeof RightPanel> | null>(null)
 // 后置 QC 三裁判结果 / 用户评价, 均按 trace_id 索引(气泡内展示, v0.8.5 M1)
 const qcMap = reactive<Record<string, QcResult>>({})
 const ratedMap = reactive<Record<string, { rating: number; dims: RatingDims; comment: string }>>({})
 const projectArtifacts = ref<Artifact[]>([])
+
+// ---- 文字产物链接(替代确认模态框): 需求文档 + 所有生成文件, 点击联动右侧预览 ----
+function iconForFile(name: string) {
+  const map: Record<string, string> = {
+    html: '🌐', css: '🎨', js: '⚡', json: '📋', svg: '🖼️',
+    png: '🖼️', jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', webp: '🖼️',
+    md: '📝', txt: '📄', py: '🐍', ts: '🔷', zip: '📦',
+  }
+  const i = name.lastIndexOf('.')
+  const e = i > 0 ? name.slice(i + 1).toLowerCase() : ''
+  return map[e] || '📄'
+}
+
+// 与右侧 req-tree / file-tree 保持一致的产物清单(需求文档 + 全部文件)
+const artifactLinks = computed(() => {
+  const links: { name: string; icon: string; kind: 'requirement' | 'file' }[] = []
+  if (requirementDoc.value) {
+    links.push({ name: requirementDoc.value.brand?.name || '需求文档', icon: '📄', kind: 'requirement' })
+  }
+  for (const a of projectArtifacts.value) {
+    if (!a.files) continue
+    for (const name of Object.keys(a.files)) {
+      links.push({ name, icon: iconForFile(name), kind: 'file' })
+    }
+  }
+  return links
+})
+
+// 点击文字产物链接: 展开右侧面板并联动选中对应文件 + 打开预览
+function openArtifact(name: string, kind: 'requirement' | 'file') {
+  if (rightCollapsed.value) rightCollapsed.value = false
+  const target = kind === 'requirement' ? '__requirement_doc__' : name
+  nextTick(() => rightPanel.value?.selectFile(target))
+}
 
 const pendingSend = ref(false)
 const pendingRetry = ref<{ suggested: string[]; message: string } | null>(null)
@@ -430,6 +474,8 @@ function resetGenState() {
   finished.value = false
   currentIntent.value = { level1: '', level2: '' }
   pendingRetry.value = null
+  awaitingConfirm.value = false
+  awaitPlan.value = null
 }
 
 function upsertStep(stage: string, status: ThoughtStep['status'], customLabel?: string) {
@@ -506,12 +552,17 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     onRequirement: (d) => {
       console.log('[SSE] 收到需求文档:', (d.data as any)?.brand?.name)
       requirementDoc.value = (d.data as Record<string, any>) || null
+      // 主动在预览页展示需求文档(若面板折叠则先展开)
+      if (rightCollapsed.value) rightCollapsed.value = false
+      nextTick(() => rightPanel.value?.selectFile('__requirement_doc__'))
     },
     onDone: () => {
       generating.value = false
       finished.value = true
       thoughtSteps.value = []
       planNodes.value = []
+      awaitingConfirm.value = false
+      awaitPlan.value = null
       clearActiveGen()
       clearDraft()
       loadArtifacts()
@@ -526,6 +577,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       thoughtSteps.value = []
       planNodes.value = []
+      awaitingConfirm.value = false
+      awaitPlan.value = null
       errorMsg.value = '已取消'
       clearActiveGen()
       if (projectStore.currentProjectId) {
@@ -575,11 +628,15 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     onPaused: (d: any) => {
       if (d.stage === 'await_confirm') {
         generating.value = false
-        confirmPlan.value = {
+        finished.value = true
+        // 不再弹模态框: 标记为等待文字回复, 由产物链接卡片引导用户回复/改进
+        awaitingConfirm.value = true
+        awaitPlan.value = {
           title: d.plan_title || '',
           goal: d.plan_goal || '',
           steps: d.plan_steps || [],
         }
+        clearActiveGen()
       }
     },
     onError: (m) => {
@@ -587,6 +644,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       thoughtSteps.value = []
       planNodes.value = []
+      awaitingConfirm.value = false
+      awaitPlan.value = null
       errorMsg.value = m
       clearActiveGen()
     },
@@ -613,6 +672,12 @@ async function send() {
   if (!text) return
   // 生成中: 加入队列
   if (generating.value) { enqueue(text); return }
+  // 等待方案确认: 直接回复文字 = 续跑生成(可带改进意见, 也可直接"开始/确认")
+  if (awaitingConfirm.value) {
+    input.value = ''
+    await resumeFromPlan(text)
+    return
+  }
   // 鉴权
   if (!auth.user.value) { pendingSend.value = true; auth.openLogin(); return }
   input.value = ''
@@ -968,18 +1033,30 @@ watch(pendingRetry, (r) => {
           @stop="stop"
         />
         <div v-if="errorMsg" class="error">⚠ {{ errorMsg }}</div>
-        <!-- 方案确认对话框 -->
-        <div v-if="confirmPlan" class="confirm-plan">
-          <div class="cp-title">📋 AI 已生成方案，请确认后开始编写代码</div>
-          <div class="cp-body">
-            <div class="cp-goal">{{ confirmPlan.goal }}</div>
-            <ul class="cp-steps">
-              <li v-for="(s, i) in confirmPlan.steps" :key="i">{{ s }}</li>
-            </ul>
+        <!-- 方案已就绪: 文字产物链接(替代确认模态框) -->
+        <div v-if="awaitingConfirm" class="artifact-links-card">
+          <div class="alc-head">📦 需求方案已生成，预览已自动打开</div>
+          <div class="alc-hint">
+            💡 直接回复文字即可：说明改进方向（如「加个博客列表页」），或回复「开始 / 确认」立即生成代码。
           </div>
-          <div class="cp-actions">
-            <button class="cp-btn cp-confirm" @click="doConfirmPlan">✅ 确认生成</button>
-            <button class="cp-btn cp-cancel" @click="cancelConfirmPlan">取消</button>
+          <div class="alc-list">
+            <button
+              v-for="link in artifactLinks"
+              :key="link.name + link.kind"
+              class="alc-item"
+              @click="openArtifact(link.name, link.kind)"
+            >
+              <span class="alc-icon">{{ link.icon }}</span>
+              <span class="alc-name">{{ link.name }}</span>
+              <span class="alc-open">打开 ↗</span>
+            </button>
+          </div>
+          <div v-if="awaitPlan && awaitPlan.steps.length" class="alc-plan">
+            <div class="alc-plan-title">📋 {{ awaitPlan.title || '方案概览' }}</div>
+            <div class="alc-goal">{{ awaitPlan.goal }}</div>
+            <ol class="alc-steps">
+              <li v-for="(s, i) in awaitPlan.steps" :key="i">{{ s }}</li>
+            </ol>
           </div>
         </div>
         <!-- 方案选择弹窗(单选, 确认后记录, 下次 send 一起发送) -->
@@ -1055,6 +1132,7 @@ watch(pendingRetry, (r) => {
       </div>
       <div v-if="!rightCollapsed" class="right-body">
       <RightPanel
+        ref="rightPanel"
         :artifacts="projectArtifacts"
         :generating="generating"
         :previewUrl="previewUrl"
@@ -1222,6 +1300,43 @@ watch(pendingRetry, (r) => {
 .cp-confirm:hover { background: #0369a1; }
 .cp-cancel { background: #f1f5f9; color: #64748b; }
 .cp-cancel:hover { background: #e2e8f0; }
+
+/* ── 文字产物链接卡片(替代确认模态框) ── */
+.artifact-links-card {
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin: 8px 0;
+}
+.alc-head { font-weight: 600; font-size: 14px; color: #0369a1; margin-bottom: 6px; }
+.alc-hint {
+  font-size: 12px; color: #475569; line-height: 1.6;
+  background: #fff; border: 1px dashed #bae6fd; border-radius: 8px;
+  padding: 6px 10px; margin-bottom: 10px;
+}
+.alc-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.alc-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid #bae6fd; background: #fff; border-radius: 8px;
+  padding: 5px 10px; cursor: pointer; font-size: 12px; color: #0f172a;
+  transition: background .15s, transform .12s, box-shadow .15s;
+}
+.alc-item:hover {
+  background: #e0f2fe; transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(2,132,199,.18);
+}
+.alc-icon { font-size: 14px; }
+.alc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.alc-open { font-size: 11px; color: #0284c7; font-weight: 600; }
+.alc-plan {
+  margin-top: 10px; background: #fff; border: 1px solid #e0f2fe;
+  border-radius: 8px; padding: 8px 12px;
+}
+.alc-plan-title { font-size: 13px; font-weight: 600; color: #0f172a; margin-bottom: 4px; }
+.alc-goal { font-size: 12px; color: #475569; margin-bottom: 6px; }
+.alc-steps { margin: 0; padding-left: 18px; }
+.alc-steps li { font-size: 12px; color: #64748b; line-height: 1.7; }
 
 /* ── 方案选择弹窗 ── */
 .options-modal-backdrop {

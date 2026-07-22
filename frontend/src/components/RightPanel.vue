@@ -103,6 +103,9 @@ const mode = computed(() => {
   if (selectedFile.value === '__requirement_doc__') return 'requirement'
   return currentFile.value ? previewMode(currentFile.value.name) : 'none'
 })
+
+// 暴露给父组件(ChatView): 点击文字产物链接时, 联动右侧预览选中对应文件并打开。
+defineExpose({ selectFile })
 </script>
 
 <template>
