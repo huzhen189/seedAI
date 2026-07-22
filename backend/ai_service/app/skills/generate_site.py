@@ -19,6 +19,7 @@ from collections.abc import AsyncGenerator
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from contextlib import suppress
+import asyncio
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -157,7 +158,7 @@ def _parse_plan(raw: str) -> dict:
     return {"title": title, "goal": goal, "reasoning": reasoning, "steps": steps}
 
 
-def _review(model_id: str, html: str) -> Dict:
+async def _review(model_id: str, html: str) -> Dict:
     """3-C: 静态分析 + LLM 自审。"""
     # 静态分析(快速硬规则)
     low = html.lower()
@@ -167,7 +168,7 @@ def _review(model_id: str, html: str) -> Dict:
         return {"passed": False, "comment": "标签未闭合(<script>/<style>)"}
     # LLM 自审(给 JSON 结论,失败则按静态结果放过)
     try:
-        out = _chat(model_id, SYS_REVIEWER, [{"role": "user", "content": html[:6000]}])
+        out = await asyncio.to_thread(_chat, model_id, SYS_REVIEWER, [{"role": "user", "content": html[:6000]}])
         import json
         import re
 
@@ -256,7 +257,7 @@ async def generate_stream(
             # 进 Reviewer r1
             for attempt in range(3):
                 yield ev("node", stage="enter_reviewer", attempt=attempt + 1)
-                review = _review(model_id, html)
+                review = await _review(model_id, html)
                 GEN_LOG.info("[gen] Reviewer 第%s轮(恢复) trace=%s passed=%s", attempt + 1, trace_id, review["passed"])
                 yield ev("think", stage="reviewer", passed=review["passed"], comment=review["comment"])
                 if review["passed"]: break
@@ -278,7 +279,7 @@ async def generate_stream(
                 attempt = int(stage[-1])
             for a in range(attempt, 3):
                 yield ev("node", stage="enter_reviewer", attempt=a + 1)
-                review = _review(model_id, html)
+                review = await _review(model_id, html)
                 if review["passed"] or a >= 2:
                     yield ev("think", stage="reviewer", passed=review["passed"], comment=review.get("comment", ""))
                     break
@@ -298,7 +299,7 @@ async def generate_stream(
         url = _deliver(html, trace_id)
         yield ev("preview", url=url, fallback="srcdoc" if not url else None)
         with suppress(Exception):
-            save_memory(trace_id or "site", plan.get("title", "建站"), html[:1500], plan.get("steps", []))
+            await asyncio.to_thread(save_memory, trace_id or "site", plan.get("title", "建站"), html[:1500], plan.get("steps", []))
         yield ev("node", stage="done")
         return
 
@@ -335,7 +336,7 @@ async def generate_stream(
             planner_msgs.append(
                 {"role": "user", "content": f"【行业设计约束: {industry}】\n{design_hint}"}
             )
-        spec = _chat(model_id, build_skill_sys(SYS_PLANNER, project_system_prompt), planner_msgs)
+        spec = await asyncio.to_thread(_chat, model_id, build_skill_sys(SYS_PLANNER, project_system_prompt), planner_msgs)
         plan = _parse_plan(spec)
         GEN_LOG.info(
             "[gen] Planner 完成 trace=%s title=%s steps=%s",
@@ -403,7 +404,7 @@ async def generate_stream(
         # 3) Reviewer + Reflexion(≤3 轮)
         for attempt in range(3):
             yield ev("node", stage="enter_reviewer", attempt=attempt + 1)
-            review = _review(model_id, html)
+            review = await _review(model_id, html)
             GEN_LOG.info(
                 "[gen] Reviewer 第%s轮 trace=%s passed=%s",
                 attempt + 1, trace_id, review["passed"],
@@ -447,7 +448,8 @@ async def generate_stream(
 
         # ②-a 记忆闭环:生成成功后回写 memory 集合(供未来检索增强)
         with suppress(Exception):
-            save_memory(
+            await asyncio.to_thread(
+                save_memory,
                 trace_id or "site",
                 plan.get("title", "建站"),
                 html[:1500],

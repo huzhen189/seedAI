@@ -5,11 +5,13 @@ import time
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from .admin import router as admin_router
 from .auth import router as auth_router
 from .config import settings
-from .db import init_db
+from .cache import get_redis
+from .db import engine, init_db
 from .logging_config import setup_logging
 from .metrics import record_request
 from .analytics import record_api_latency, record_api_call
@@ -65,6 +67,49 @@ async def on_startup():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/healthz")
+async def healthz():
+    """存活探针(liveness):仅检查进程是否可响应,不依赖任何外部资源。
+
+    用于 k8s/docker 的 livenessProbe —— 只要进程没死就返回 200,OOM/死锁时
+    由编排层重启容器。刻意**不**碰 MySQL/Redis,避免存活探针因外部抖动误杀。
+    """
+    return {"status": "ok", "service": "business", "ts": int(time.time())}
+
+
+@app.get("/ready")
+async def ready():
+    """就绪探针(readiness):检查核心外部依赖是否可用(MySQL + Redis)。
+
+    用于 k8s/docker 的 readinessProbe —— 依赖未就绪时返回 503,编排层暂不转发
+    流量但**不**杀容器,等依赖恢复后自动重新接入。本地直跑时同样可用
+    `curl localhost:7101/ready` 验证链路连通性。
+    """
+    checks: dict = {}
+    # 1) MySQL: 复用已有异步引擎跑一条轻量 SELECT 1
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        checks["mysql"] = "ok"
+    except Exception as e:  # 捕获所有异常(连接/超时/鉴权),不让探针自身 500
+        checks["mysql"] = f"fail: {type(e).__name__}: {e}"
+    # 2) Redis: 复用 cache 池 ping
+    try:
+        r = await get_redis()
+        pong = await r.ping()
+        checks["redis"] = "ok" if pong else "fail: ping=false"
+    except Exception as e:
+        checks["redis"] = f"fail: {type(e).__name__}: {e}"
+
+    all_ok = all(v == "ok" for v in checks.values())
+    return {
+        "status": "ok" if all_ok else "degraded",
+        "service": "business",
+        "ts": int(time.time()),
+        "checks": checks,
+    }, 200 if all_ok else 503
 
 
 # 路由装配

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -89,7 +90,7 @@ async def requirement_agent_handler(
 
     t0 = time.time()
     chat = get_chat_model(model_id, streaming=False)
-    resp = chat.invoke([{"role": "system", "content": full_sys}, *req_msgs])
+    resp = await asyncio.to_thread(chat.invoke, [{"role": "system", "content": full_sys}, *req_msgs])
     raw = (resp.content or "").strip()
     AGENT_LOG.info("[需求] [2/4] LLM完成 耗时=%.0fms 输出长度=%d", (time.time() - t0) * 1000, len(raw))
 

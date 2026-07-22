@@ -37,7 +37,7 @@ from .cache import cache_get, cache_set, ck_delete, ck_get, ck_set, enqueue_writ
 from .config import settings
 from .db import get_db
 from .metrics import consume_daily_quota, record_model_usage, record_unsupported
-from .models import Artifact, Conversation, Message, Project, User
+from .models import Artifact, Conversation, Message, Project, Trace, User
 from .repos.business_repos import conv_repo, message_repo
 from .repos.trace_repos import feedback_repo, qc_score_repo, trace_repo
 from .schemas import FeedbackReq
@@ -957,8 +957,12 @@ async def post_feedback(
 
 
 @router.post("/cancel")
-async def cancel(request: Request):
-    """级联取消(C1):转发到 AI 服务的 /cancel。"""
+async def cancel(
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """级联取消(C1):转发到 AI 服务的 /cancel。需登录且为 trace 所有者(防越权取消他人生成)。"""
     try:
         body = await request.json()
     except Exception:
@@ -966,6 +970,15 @@ async def cancel(request: Request):
     trace_id = body.get("trace_id") or (await request.body()).decode("utf-8", "ignore")
     if not trace_id:
         raise HTTPException(status_code=400, detail="missing trace_id")
+    # 归属校验:trace_id 必须属于当前用户,否则 403。
+    # 用 traces 表(user_id + trace_id 是规范的归属记录);若该 trace 尚未落库
+    # (极端竞态),owner_id 为 None → 放行(不误杀),避免取消不了自己的生成。
+    from sqlmodel import select as _select
+    owner_id = (await db.execute(
+        _select(Trace.user_id).where(Trace.trace_id == trace_id).limit(1)
+    )).scalar_one_or_none()
+    if owner_id is not None and owner_id != user.id:
+        raise HTTPException(status_code=403, detail="not owner of this trace")
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.post(f"{settings.ai_service_url}/cancel", json={"trace_id": trace_id})
         return r.json()

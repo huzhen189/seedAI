@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -64,8 +65,9 @@ async def builder_agent_handler(
             break
     t0 = time.time()
     chat = get_chat_model(model_id, streaming=False)
-    plan_resp = chat.invoke([{"role": "system", "content": SYS_PLANNER},
-                              {"role": "user", "content": f"{plan_prompt}\n\n用户消息: {user_input}"}])
+    plan_resp = await asyncio.to_thread(
+        chat.invoke, [{"role": "system", "content": SYS_PLANNER},
+                      {"role": "user", "content": f"{plan_prompt}\n\n用户消息: {user_input}"}])
     plan_raw = (plan_resp.content or "").strip()
     m = __import__("re").search(r"\{[\s\S]*\}", plan_raw)
     plan = json.loads(m.group(0)) if m else {}

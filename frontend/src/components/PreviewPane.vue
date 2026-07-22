@@ -15,7 +15,7 @@ defineProps<{ html: string; url: string | null; loading: boolean }>()
       class="frame"
       :src="url || undefined"
       :srcdoc="url ? undefined : html"
-      sandbox="allow-scripts allow-same-origin allow-forms"
+      sandbox="allow-scripts allow-forms"
       title="site-preview"
     ></iframe>
   </div>

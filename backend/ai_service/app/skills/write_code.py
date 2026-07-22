@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -34,7 +35,7 @@ async def write_code_skill(
     t0 = time.time()
     try:
         chat = get_chat_model(model_id, streaming=False)
-        resp = chat.invoke([{"role": "system", "content": sys_prompt}, *messages])
+        resp = await asyncio.to_thread(chat.invoke, [{"role": "system", "content": sys_prompt}, *messages])
         result = resp.content
         elapsed = time.time() - t0
         SKILL_LOG.info("[code] 编程完成 trace=%s chars=%s 耗时 %.1fs", trace_id, len(result), elapsed)

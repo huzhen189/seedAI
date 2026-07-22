@@ -29,12 +29,27 @@ from .router import detect_intent_v2, skill_for
 from .runner import run_skill
 from ..registry import SkillRegistry
 from ..intent.selection import set_pending_options
+from .git_site import commit_site_for_trace
 
 
 _JOB_QUEUE = "queue:generate"
 _STREAM_PREFIX = "gen:stream:"  # + trace_id -> Redis Stream(可回放进度)
 
 logger = logging.getLogger(__name__)
+
+
+async def _commit_after_done(trace_id: str, skill_name: str, user_text: str) -> None:
+    """§8: 每轮生成(up to done)完成后,把站点目录就地提交为一次 git 版本。
+
+    仅对产出站点/代码的 skill 提交(generate_site / write_code / orchestrator),
+    explain 等纯文本 skill 不生成站点,跳过。
+    失败仅告警(版本控制故障不能阻断主链路,与 QC 同策略)。
+    """
+    if skill_name in ("generate_site", "write_code", "orchestrator"):
+        try:
+            await asyncio.to_thread(commit_site_for_trace, trace_id, skill_name, user_text)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[Worker] §8 git 提交失败(跳过) trace=%s: %s", trace_id, e)
 
 
 def _skill_label(name: str) -> str:
@@ -343,7 +358,7 @@ async def worker_loop(concurrency: int = 1):
                 for i, msg in enumerate(messages):
                     idx = msg.get("_msg_id") or (conversation_id * 1000 + i)
                     try:
-                        index_message(idx, conversation_id, msg.get("role", "user"), msg.get("content", ""))
+                        await asyncio.to_thread(index_message, idx, conversation_id, msg.get("role", "user"), msg.get("content", ""))
                         msg["_msg_id"] = idx  # 回写, 修复上下文模块 Chroma 死代码
                         indexed += 1
                     except Exception:
@@ -562,6 +577,7 @@ async def worker_loop(concurrency: int = 1):
                         if done_event is not None:
                             await q.publish(trace_id, done_event)
                         logger.info("[Worker] [6/6] 编排执行完毕 trace=%s 共%d事件", trace_id, event_cnt)
+                        await _commit_after_done(trace_id, "orchestrator", user_text)
                         continue
 
                 # 5) 正常路由 / fallback / 已确认 / 已选项 → 直接执行
@@ -620,6 +636,7 @@ async def worker_loop(concurrency: int = 1):
                     await q.publish(trace_id, done_event)
                 logger.info("[Worker] [6/6] 执行完毕 trace=%s skill=%s 共发出%d个事件 总耗时%.0fms",
                            trace_id, skill_name, event_cnt, (time.time() - t_job) * 1000)
+                await _commit_after_done(trace_id, skill_name, qc_user_text)
             except Exception as e:
                 logger.error("[Worker] 执行异常 trace=%s skill=%s 错误=%s: %s",
                             trace_id, skill_name, type(e).__name__, e)

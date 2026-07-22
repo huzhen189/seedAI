@@ -192,7 +192,7 @@ defineExpose({ selectFile })
         class="pv-frame"
         :src="currentFile.url || undefined"
         :srcdoc="currentFile.url ? undefined : ((currentFile.artifact?.files?.[currentFile.name || ''] as any)?.content || '')"
-        sandbox="allow-scripts allow-same-origin allow-forms"
+        sandbox="allow-scripts allow-forms"
         title="preview"
       ></iframe>
 
