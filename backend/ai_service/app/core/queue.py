@@ -72,6 +72,53 @@ async def _refine_assistant_dialog(raw_text: str, model_id: str = "deepseek-chat
         return raw_text
 
 
+async def _distill_memories(trace_id: str, user_id: int | None, project_id: int | None,
+                            refined_text: str, skill_name: str) -> None:
+    """L2+ 蒸馏(v0.9.0 P3): done 后从精炼对话抽取结构化项目记忆+用户偏好→写 Chroma。
+    仅建站类 skill 触发; 失败仅 warn。"""
+    if skill_name not in ("generate_site", "write_code", "orchestrator"):
+        return
+    if not (user_id or project_id) or not refined_text.strip():
+        return
+    try:
+        from ..providers import get_chat_model
+        from ..knowledge.chroma import upsert_project_memory, upsert_user_preference
+        prompt = (
+            "从以下对话中抽取关键信息,用 JSON 返回(不要代码块围栏):\\n"
+            '{"project_memories":[{"type":"decision|constraint|requirement|artifact|fact",'
+            '"content":"...","importance":1-5}],'
+            '"user_prefs":[{"type":"style|constraint|habit","content":"...","importance":1-5}]}\\n'
+            f"对话:\\n{refined_text[:2000]}"
+        )
+        chat = get_chat_model("deepseek-chat", streaming=False)
+        resp = await chat.ainvoke([{"role": "user", "content": prompt}])
+        raw = resp.content if hasattr(resp, "content") else str(resp)
+        import json, re
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            data = json.loads(m.group(0))
+            # 写项目记忆
+            for pm in data.get("project_memories", []):
+                if project_id and user_id and pm.get("content"):
+                    upsert_project_memory(
+                        project_id, user_id, pm.get("type", "fact"),
+                        pm["content"], int(pm.get("importance", 3)),
+                    )
+            # 写用户偏好
+            for up in data.get("user_prefs", []):
+                if user_id and up.get("content"):
+                    upsert_user_preference(
+                        user_id, up.get("type", "style"),
+                        up["content"], int(up.get("importance", 3)), "distill",
+                    )
+            logger.info("[蒸馏] done trace=%s proj=%s user=%s proj_mems=%d user_prefs=%d",
+                       trace_id, project_id, user_id,
+                       len(data.get("project_memories", [])),
+                       len(data.get("user_prefs", [])))
+    except Exception as e:
+        logger.debug("[蒸馏] 失败(跳过): %s", e)
+
+
 def _skill_label(name: str) -> str:
     """取 skill 的前端展示名(用于多选项弹框标题)。"""
     try:
@@ -584,6 +631,7 @@ async def worker_loop(concurrency: int = 1):
                         # 后置 QC(合并文本)
                         qc_assistant_text = "".join(qc_assistant_buf)
                         if qc_assistant_text.strip() and done_event is not None:
+                            qc_result = None
                             try:
                                 from ..qc import run_qc
                                 from .safety import run_safety
@@ -638,6 +686,7 @@ async def worker_loop(concurrency: int = 1):
                 # ── [6/6] 后置 QC 三裁判(默认全量, v0.8.5 M1) ──
                 qc_assistant_text = "".join(qc_assistant_buf)
                 if qc_assistant_text.strip() and done_event is not None:
+                    qc_result = None
                     try:
                         from ..qc import run_qc
                         from .safety import run_safety
@@ -655,6 +704,28 @@ async def worker_loop(concurrency: int = 1):
                     except Exception as qc_err:  # noqa: BLE001
                         logger.warning("[Worker] [6/6] QC 执行失败(已跳过, 不影响主流程) trace=%s: %s",
                                        trace_id, qc_err)
+                # Phase D(v0.9.0): 闲聊低分→1轮轻量重答
+                _qc_ok = qc_result is not None  # qc_result 仅 QC 成功时赋值
+                if skill_name == "explain" and qc_assistant_text.strip() and _qc_ok:
+                    try:
+                        qc_overall = qc_result.get("overall", 10)
+                        qc_needs = qc_result.get("needs_review", False)
+                        if qc_overall < 5.0 or qc_needs:
+                            logger.info("[闲聊重答] QC低分(%.1f)→触发1轮重答 trace=%s", qc_overall, trace_id)
+                            from ..providers import get_chat_model
+                            retry_prompt = (
+                                "上一轮回答质量不佳,请重新回答。注意: 补充遗漏信息、修正事实错误、"
+                                "语气自然流畅。\\n原始问题: " + qc_user_text
+                            )
+                            chat_r = get_chat_model(model_id, streaming=False)
+                            resp_r = await chat_r.ainvoke([{"role": "user", "content": retry_prompt}])
+                            retry_text = resp_r.content if hasattr(resp_r, "content") else str(resp_r)
+                            if retry_text.strip():
+                                qc_assistant_text = retry_text
+                                done_event = {"event": "done", "data": {"content": retry_text}}
+                                logger.info("[闲聊重答] 重答完成 len=%d", len(retry_text))
+                    except Exception as _re:  # noqa: BLE001
+                        logger.debug("[闲聊重答] 失败: %s", _re)
                 if done_event is not None:
                     await q.publish(trace_id, done_event)
                 # L2 对话精炼(v0.9.0): done 后 LLM 去冗余 → 改写 Message.content(仅建站类)
@@ -666,6 +737,14 @@ async def worker_loop(concurrency: int = 1):
                                    trace_id, len(qc_assistant_text), len(refined))
                     except Exception as _le:  # noqa: BLE001
                         logger.debug("[Worker] L2 精炼失败: %s", _le)
+                # L2+ 蒸馏(v0.9.0 P3): 从精炼对话抽取项目记忆+用户偏好→写 Chroma
+                _user_id_job = job.get("user_id"); _project_id_job = job.get("project_id")
+                if _user_id_job or _project_id_job:
+                    try:
+                        await _distill_memories(trace_id, _user_id_job, _project_id_job,
+                                               qc_assistant_text, skill_name)
+                    except Exception as _de:  # noqa: BLE001
+                        logger.debug("[Worker] 蒸馏失败: %s", _de)
                 logger.info("[Worker] [6/6] 执行完毕 trace=%s skill=%s 共发出%d个事件 总耗时%.0fms",
                            trace_id, skill_name, event_cnt, (time.time() - t_job) * 1000)
                 await _commit_after_done(trace_id, skill_name, qc_user_text)
