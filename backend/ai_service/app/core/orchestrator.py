@@ -45,12 +45,14 @@ def build_layers(sub_tasks: list[SubTask]) -> list[list[SubTask]]:
     placed: set[str] = set()
     remaining = list(sub_tasks)
     layers: list[list[SubTask]] = []
+    # guard 防死循环: 正常 DAG 最多 len(sub_tasks) 轮即可排空, +5 留余量防御异常
     guard = 0
     while remaining and guard < len(sub_tasks) + 5:
         guard += 1
         layer = [s for s in remaining if all(d in placed for d in s.dependencies)]
         if not layer:
-            # 环或悬空依赖 → 兜底: 把剩余全部放进当前层(避免死循环)
+            # 兜底: 出现环依赖或依赖指向不存在的子任务时, 没有任何子任务满足
+            # "依赖均已放置", 若不处理会无限空转 → 把剩余全部并入当前层, 保证一定能结束
             layer = remaining[:]
         layers.append(layer)
         for s in layer:
@@ -104,9 +106,14 @@ class Orchestrator:
         )
 
         layers = build_layers(sub_tasks)
+        logger.info("[编排] 开始执行 策略=%s 层数=%d 子任务=%d",
+                    strategy, len(layers), len(sub_tasks))
         results: list[SubTaskResult] = []
 
         for layer_idx, layer in enumerate(layers):
+            # 层内并行; 记录本层范围便于排查卡层/慢子任务
+            logger.info("[编排] 执行层 #%d/%d 并行=%d: %s",
+                        layer_idx + 1, len(layers), len(layer), [s.id for s in layer])
             # 层中每个子任务发 start
             for st in layer:
                 st.status = SUB_RUNNING
@@ -131,6 +138,10 @@ class Orchestrator:
                 for st in layer
             ]
 
+            # 并发归并模式: 把「队列取事件协程(getter)」与「本层所有子任务协程」一起交给
+            # asyncio.wait(FIRST_COMPLETED)。任一子任务通过 sink(q.put) 产出的事件会被
+            # getter 立即取出并 yield, 前端因而能实时看到各子任务的流式进度(而非整层跑完
+            # 才吐出)。所有子任务结束后 getter 不再有产出 → 被取消, 退出循环。
             pending = set(tasks)
             while pending:
                 getter = asyncio.ensure_future(q.get())
@@ -144,7 +155,7 @@ class Orchestrator:
                     yield item
                 else:
                     getter.cancel()
-            # 确保任务结束 + 排空队列
+            # 子任务全部结束 → 收尾各协程的 SubTaskResult(供最终合并), 并排空队列残留事件
             for t in tasks:
                 r = await t
                 results.append(r)
@@ -201,12 +212,15 @@ class Orchestrator:
         t0 = time.time()
 
         # ── 风险门控(兜底 5: 风险分级) ──
+        # HIGH: 死红线, 系统直接拒绝, 即便用户后续确认也不可绕过(返回 SUB_BLOCKED)
         if st.risk_level == RISK_HIGH:
             sink(ev("subtask_fail", sub_task_id=st.id, reason="高风险操作不予执行(系统拒绝)", recoverable=False))
             return SubTaskResult(
                 id=st.id, status=SUB_BLOCKED, skill=st.selected_skill, goal=st.goal,
                 error="高风险拦截", risk_level=st.risk_level,
             )
+        # MEDIUM: 需用户二次确认; 未确认则跳过(返回 SUB_SKIPPED)并等前端回传,
+        #         confirmed_subtasks 携带已确认 id 重发时, 此处放行执行
         if st.risk_level == RISK_MEDIUM and st.id not in confirmed_subtasks:
             sink(ev("subtask_fail", sub_task_id=st.id,
                     reason="中风险操作需用户确认(回复确认后重发)",

@@ -41,6 +41,7 @@ P_FEEDBACK = "an:feedback"    # 用户评价(v0.8.5): 提交/均分/含六维子
 P_API_CALLS = "an:api:calls"  # 业务接口调用(STAT-2): 总次数/成功/失败/状态码分段
 P_ORCH = "an:orch"            # AI 核心编排统计(STAT-1, 由 ai_service 写入同 Redis)
 P_SUB = "an:subtask"          # AI 核心子任务统计(STAT-1)
+P_GEN = "an:generate"         # AI 核心总生成请求数(STAT, 由 ai_service 写入同 Redis)
 
 
 async def record_intent_result(level1: str, level2: str, matched: bool) -> None:
@@ -307,7 +308,13 @@ async def analytics_snapshot() -> dict:
 
         # AI 核心编排统计(STAT-1, 由 ai_service 写入同 Redis, 此处只读聚合)
         orch_total = int((await r.hget(f"{P_ORCH}:total", "count")) or 0)
-        orchestration: dict = {"total": orch_total, "available": orch_total > 0}
+        # 后端核心总生成请求数(独立于编排统计, 反映 AI 核心真实负载)
+        gen_total = int((await r.hget(f"{P_GEN}:total", "count")) or 0)
+        orchestration: dict = {
+            "total": orch_total,
+            "available": orch_total > 0,
+            "ai_core_requests": gen_total,
+        }
         if orch_total > 0:
             strategy_raw = await r.hgetall(f"{P_ORCH}:strategy")
             orchestration["strategy_dist"] = {k: int(v) for k, v in strategy_raw.items()}

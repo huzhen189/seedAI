@@ -1,5 +1,6 @@
 """业务服务入口(唯一对外)。装配鉴权 / 生成代理 / 管理监控。"""
 
+import logging
 import time
 
 from fastapi import FastAPI, Request
@@ -19,6 +20,8 @@ from .reconciler import start_reconciler
 
 app = FastAPI(title="SeedAI Business API")
 
+logger = logging.getLogger("business.main")
+
 # 初始化日志:控制台 + 本地按日期滚动文件(backend/business/logs/business.log)。
 # 必须在路由装配前调用,确保启动期日志也能落盘。
 setup_logging("business")
@@ -37,9 +40,19 @@ async def metrics_middleware(request: Request, call_next):
     start = time.time()
     response = await call_next(request)
     elapsed = (time.time() - start) * 1000
-    await record_request(request.url.path, response.status_code, elapsed)
-    await record_api_latency(request.url.path, elapsed)
-    await record_api_call(request.url.path, response.status_code)
+    path = request.url.path
+    # 统计: 请求量 / 延迟 / 状态码分段(供管理后台「系统分析」)
+    await record_request(path, response.status_code, elapsed)
+    await record_api_latency(path, elapsed)
+    await record_api_call(path, response.status_code)
+    # 访问日志: /health 等探活请求降为 DEBUG 避免刷屏, 其余 INFO
+    if path == "/health":
+        logger.debug("[req] %s %s %d %.1fms", request.method, path, response.status_code, elapsed)
+    else:
+        logger.info("[req] %s %s %d %.1fms", request.method, path, response.status_code, elapsed)
+    # 5xx 服务端错误额外告警, 便于快速定位故障
+    if response.status_code >= 500:
+        logger.error("[req] 服务端错误 %s %s %d %.1fms", request.method, path, response.status_code, elapsed)
     return response
 
 

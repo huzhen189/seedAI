@@ -26,6 +26,7 @@ logger = logging.getLogger("ai_service.analytics")
 LATENCY_MAX = 500
 P_ORCH = "an:orch"
 P_SUB = "an:subtask"
+P_GEN = "an:generate"  # 后端核心总生成请求数(单意图 + 多意图), 独立于编排统计
 
 # 模块级懒加载 Redis 客户端(与 queue.py 同源, 共享同一 Redis db)
 _redis_client = None
@@ -74,6 +75,21 @@ async def record_orchestration(
         await r.zremrangebyrank(f"{P_ORCH}:duration", 0, -(LATENCY_MAX + 1))
     except Exception as e:  # noqa: BLE001
         logger.warning("AI analytics record_orchestration failed: %s", e)
+
+
+async def record_generate_request() -> None:
+    """AI 核心收到的总生成请求数(含单意图 + 多意图), 独立于编排统计(an:orch)。
+
+    反映 AI 核心真实负载(编排统计仅覆盖 split 决策)。业务端 analytics_snapshot
+    读取该键并入 orchestration 块展示。
+    """
+    try:
+        r = _get_redis()
+        if r is None:
+            return
+        await r.hincrby(f"{P_GEN}:total", "count", 1)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("AI analytics record_generate_request failed: %s", e)
 
 
 async def record_sub_task(

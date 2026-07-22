@@ -22,6 +22,7 @@ from .config import settings
 from .events import to_sse
 from .logging_config import setup_logging
 from .providers import list_providers
+from .analytics import record_generate_request
 from .core.queue import get_queue, worker_loop
 from .registry import SkillRegistry, ToolRegistry
 
@@ -143,6 +144,7 @@ async def generate(req: GenerateReq, after: str | None = None):
     """SSE 生成端点:入队 → 订阅进度流 → 透传事件流(§3.7 / 1-C)。"""
     q = get_queue()
     trace_id = req.trace_id or uuid.uuid4().hex
+    await record_generate_request()  # 后端核心负载计数(独立于编排统计 an:orch)
     user_input = ""
     for m in req.messages:
         if m.get("role") == "user":
@@ -193,7 +195,9 @@ async def cancel(req: Request):
     trace_id = body.get("trace_id")
     if trace_id:
         await get_queue().set_cancel(trace_id)
+        logger.info("[cancel] 标记取消 trace=%s", trace_id)
         return {"ok": True, "trace_id": trace_id}
+    logger.warning("[cancel] 缺少 trace_id, 忽略")
     return {"ok": False, "error": "missing trace_id"}
 
 
@@ -207,6 +211,7 @@ async def retry_upload(req: Request):
     trace_id = body.get("trace_id")
     if not trace_id:
         return {"ok": False, "error": "missing trace_id"}
+    logger.info("[retry-upload] 收到重传请求 trace=%s", trace_id)
     art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
     idx = art_dir / "anon" / trace_id / "index.html"
     if not idx.exists():
@@ -216,9 +221,12 @@ async def retry_upload(req: Request):
         cos_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/anon/{trace_id}/index.html"
         res = cos_upload(str(idx), cos_key)
         if res.get("ok"):
+            logger.info("[retry-upload] 上传成功 trace=%s url=%s", trace_id, res["url"])
             return {"ok": True, "url": res["url"]}
+        logger.warning("[retry-upload] COS 上传失败 trace=%s err=%s", trace_id, res.get("error", "COS 上传失败"))
         return {"ok": False, "error": res.get("error", "COS 上传失败")}
     except Exception as e:
+        logger.error("[retry-upload] 异常 trace=%s: %s", trace_id, e)
         return {"ok": False, "error": str(e)}
 
 

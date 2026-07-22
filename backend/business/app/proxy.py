@@ -114,7 +114,10 @@ async def _resolve_user(request: Request, response: Response | None = None) -> C
     若 response 传入且 token 剩余 <10min, 自动续期 Cookie(滑动过期)。
     """
     token = request.cookies.get(ACCESS_COOKIE)
-    logger.info("[auth] token from cookie: %s", "FOUND" if token else "NONE, cookies=%s", list(request.cookies.keys()))
+    # 仅记录 cookie 名(不记录值), 避免泄露 token 明文; 仅用于排查鉴权链路
+    cookie_keys = list(request.cookies.keys())
+    logger.info("[auth] cookie 内 token: %s | cookie 名=%s",
+                "FOUND" if token else "NONE", cookie_keys)
     if not token:
         try:
             creds = await _bearer(request)
