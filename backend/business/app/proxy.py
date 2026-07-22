@@ -916,6 +916,16 @@ async def _persist_conversation(
     conv.updated_at = datetime.utcnow()
     await db.commit()
     logger.info("[chat] 消息落库成功 conv=%s", conv.id)
+    # 失效消息历史缓存(含 cursor 分页的所有变体), 使下一轮对话从 MySQL 重取最新上下文。
+    # 否则 Redis 旧缓存(600s TTL)会让后续消息不可见, AI 上下文永远停留在首条消息。
+    try:
+        r = await get_redis()
+        keys = await r.keys(f"chat:msgs:{conversation_id}:*")
+        if keys:
+            await r.delete(*keys)
+            logger.info("[chat] 消息历史缓存已失效 conv=%s keys=%d", conversation_id, len(keys))
+    except Exception as e:
+        logger.warning("[chat] 失效消息缓存失败 conv=%s: %s", conversation_id, e)
 
 
 @router.post("/feedback")
