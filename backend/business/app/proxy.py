@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .analytics import record_error, record_intent_result, record_model_detail, record_skill_outcome, record_user_active, record_intent_decision
 from .analytics import record_agent_usage, record_context_detection, record_requirement_doc, record_project_status_transition
+from .analytics import record_qc, record_feedback
 from .cache import cache_get, cache_set, ck_delete, ck_get, ck_set, enqueue_write_error, get_redis
 from .config import settings
 from .db import get_db
@@ -419,6 +420,8 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
                             s, tid, model, conversation_id, qc_result)
                         logger.info("[chat] QC 已落库 trace=%s overall=%s",
                                     tid, qc_result.get("overall"))
+                        # 同步写入统计系统(满足"新增功能必接统计"约定): 计数/均分/复核率/每维
+                        await record_qc(qc_result)
                     except Exception as qc_e:  # noqa: BLE001
                         logger.warning("[chat] QC 落库失败(跳过) trace=%s: %s", tid, qc_e)
                 # 流结束(done/aborted/error)清理 Redis checkpoint; paused 保留供恢复
@@ -921,10 +924,15 @@ async def post_feedback(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """用户提交评价(气泡内星级 + 六维子星)。落库并写入统计系统。"""
     fb = await feedback_repo.upsert(
         db, user.id, req.trace_id, req.conversation_id, req.rating, req.comment,
         dimensions=req.dimensions,
     )
+    logger.info("[chat] 收到用户评价 user=%s trace=%s rating=%s 含维度=%s",
+                user.id, req.trace_id, req.rating, bool(req.dimensions))
+    # 同步统计: 提交次数 / 平均评分 / 含六维子星占比
+    await record_feedback(req.rating, bool(req.dimensions))
     return {"ok": True, "rating": fb.rating}
 
 

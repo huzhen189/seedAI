@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from .providers import get_chat_model
@@ -177,7 +178,13 @@ async def run_qc(
     默认三裁判全量并行(deepseek / qwen / hy3); 超时由调用方 asyncio.wait_for 控制。
     project_constraints 预留(当前地板仅用 safety_risk, 后续可扩展约束命中检测)。
     """
+    logger.info("[QC] 开始三裁判评分 judges=%s safety_risk=%s", QC_JUDGES, safety_risk)
+    t0 = time.monotonic()
     judges = await asyncio.gather(*[
         _judge_one(mid, user_text, assistant_text) for mid in QC_JUDGES
     ])
-    return _aggregate(judges, safety_risk=safety_risk)
+    result = _aggregate(judges, safety_risk=safety_risk)
+    logger.info("[QC] 评分完成 耗时=%.2fs overall=%.2f needs_review=%s partial=%s",
+                time.monotonic() - t0, result.get("overall", 0),
+                result.get("needs_review"), result.get("partial"))
+    return result

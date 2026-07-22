@@ -274,6 +274,18 @@ interface AnalyticsSnapshot {
     by_skill: Record<string, number>
     by_risk: Record<string, number>
   }
+  qc?: {
+    count: number
+    overall_avg: number | null
+    review_rate: number
+    per_dim_avg: Record<string, number>
+    safety_dist: Record<string, number>
+  }
+  feedback?: {
+    count: number
+    avg_rating: number | null
+    with_dims_rate: number
+  }
   error?: string
 }
 const al = ref<AnalyticsSnapshot | null>(null)
@@ -682,6 +694,33 @@ onUnmounted(() => {
             <div class="card"><div class="k">活跃用户</div><div class="v">{{ al.user_stats.active_users }}</div></div>
             <div class="card"><div class="k">总生成</div><div class="v">{{ al.user_stats.total_generations }}</div></div>
             <div class="card"><div class="k">人均生成</div><div class="v">{{ al.user_stats.avg_per_user }}</div></div>
+          </div>
+        </div>
+        <!-- 后置三裁判 QC(v0.8.5) -->
+        <div v-if="al.qc && al.qc.count" class="block">
+          <h4>后置三裁判质检 (QC)</h4>
+          <div class="card-row">
+            <div class="card"><div class="k">触发次数</div><div class="v">{{ al.qc.count }}</div></div>
+            <div class="card"><div class="k">整体均分</div><div class="v">{{ al.qc.overall_avg ?? '-' }}</div></div>
+            <div class="card"><div class="k">需复核率</div><div class="v">{{ (al.qc.review_rate * 100).toFixed(1) }}%</div></div>
+          </div>
+          <table class="atable">
+            <thead><tr><th>维度</th><th>均分</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.qc.per_dim_avg" :key="k"><td>{{ qcLabel(k) }}</td><td>{{ v }}</td></tr>
+            </tbody>
+          </table>
+          <p v-if="al.qc.safety_dist && Object.keys(al.qc.safety_dist).length" class="muted">
+            安全风险分布: <span v-for="(v, k) in al.qc.safety_dist" :key="k">{{ k }} {{ v }} · </span>
+          </p>
+        </div>
+        <!-- 用户评价(v0.8.5, 含六维子星) -->
+        <div v-if="al.feedback && al.feedback.count" class="block">
+          <h4>用户评价</h4>
+          <div class="card-row">
+            <div class="card"><div class="k">提交数</div><div class="v">{{ al.feedback.count }}</div></div>
+            <div class="card"><div class="k">平均评分</div><div class="v">{{ al.feedback.avg_rating ?? '-' }}</div></div>
+            <div class="card"><div class="k">含多维占比</div><div class="v">{{ (al.feedback.with_dims_rate * 100).toFixed(0) }}%</div></div>
           </div>
         </div>
       </template>

@@ -36,6 +36,8 @@ P_ERROR = "an:error"
 P_USER = "an:user:dau"
 P_MODEL = "an:model"
 P_INTENT_DECISION = "an:intent:decision"  # 意图管道决策结果分布(block/confirm/options/route/fallback/unsupported)
+P_QC = "an:qc"                # 后置三裁判质检(v0.8.5): 触发/均分/需复核/每维/风险
+P_FEEDBACK = "an:feedback"    # 用户评价(v0.8.5): 提交/均分/含六维子星占比
 
 
 async def record_intent_result(level1: str, level2: str, matched: bool) -> None:
@@ -316,6 +318,30 @@ async def analytics_snapshot() -> dict:
         decision_risk_stats = {k.decode() if isinstance(k, bytes) else k: int(v)
                                for k, v in (decision_risk_raw or {}).items()}
 
+        # 后置三裁判 QC(v0.8.5)
+        qc_count = int((await r.hget(P_QC, "count")) or 0)
+        qc_overall_sum = float((await r.hget(f"{P_QC}:overall", "sum")) or 0)
+        qc_overall_cnt = int((await r.hget(f"{P_QC}:overall", "count")) or 0)
+        qc_overall_avg = round(qc_overall_sum / qc_overall_cnt, 2) if qc_overall_cnt else None
+        qc_review = int((await r.hget(P_QC, "review")) or 0)
+        qc_review_rate = round(qc_review / max(qc_count, 1), 3) if qc_count else 0.0
+        qc_safety_raw = await r.hgetall(f"{P_QC}:safety")
+        qc_safety = {k.decode() if isinstance(k, bytes) else k: int(v)
+                     for k, v in (qc_safety_raw or {}).items()}
+        qc_per_dim: dict = {}
+        for d in QC_DIMS:
+            s = float((await r.hget(f"{P_QC}:dim:{d}", "sum")) or 0)
+            c = int((await r.hget(f"{P_QC}:dim:{d}", "count")) or 0)
+            qc_per_dim[d] = round(s / c, 2) if c else 0.0
+
+        # 用户评价(v0.8.5, 含六维子星)
+        fb_count = int((await r.hget(P_FEEDBACK, "count")) or 0)
+        fb_rating_sum = int((await r.hget(P_FEEDBACK, "rating_sum")) or 0)
+        fb_rating_cnt = int((await r.hget(P_FEEDBACK, "rating_count")) or 0)
+        fb_avg = round(fb_rating_sum / fb_rating_cnt, 2) if fb_rating_cnt else None
+        fb_with_dims = int((await r.hget(P_FEEDBACK, "with_dims")) or 0)
+        fb_dims_rate = round(fb_with_dims / max(fb_count, 1), 3) if fb_count else 0.0
+
         return {
             "intent_stats": intent_stats,
             "skill_outcomes": skills,
@@ -343,6 +369,19 @@ async def analytics_snapshot() -> dict:
                 "active_users": active_users,
                 "total_generations": total_gens,
                 "avg_per_user": avg_gens,
+            },
+            # v0.8.5 新增: 后置三裁判 QC + 用户评价
+            "qc": {
+                "count": qc_count,
+                "overall_avg": qc_overall_avg,
+                "review_rate": qc_review_rate,
+                "per_dim_avg": qc_per_dim,
+                "safety_dist": qc_safety,
+            },
+            "feedback": {
+                "count": fb_count,
+                "avg_rating": fb_avg,
+                "with_dims_rate": fb_dims_rate,
             },
         }
     except Exception as e:
@@ -434,3 +473,51 @@ async def record_webllm_usage(action: str, ok: bool, elapsed_ms: float = 0) -> N
             await r.zremrangebyrank(zkey, 0, -(LATENCY_MAX_SAMPLES + 1))
     except Exception as e:
         logger.warning("analytics record_webllm_usage failed: %s", e)
+
+
+# ---- v0.8.5 新增统计维度: 后置三裁判 QC + 用户评价 ----
+QC_DIMS = ("correctness", "completeness", "compliance", "efficiency", "readability", "safety")
+
+
+async def record_qc(result: dict) -> None:
+    """后置三裁判 QC 统计: 触发次数 / 整体均分 / 需复核率 / 每维均分 / 安全风险分布。
+
+    result 即 ai_service qc.py 的聚合输出(dict), 字段:
+      overall(float) / needs_review(bool) / safety_risk(str) / dimensions(dict[d][mean])。
+    供管理后台「系统分析」标签页量化 QC 覆盖与质量趋势(满足"新增功能必接统计"约定)。"""
+    try:
+        r = await get_redis()
+        await r.hincrby(P_QC, "count", 1)
+        overall = result.get("overall")
+        if overall is not None:
+            await r.hincrbyfloat(f"{P_QC}:overall", "sum", float(overall))
+            await r.hincrby(f"{P_QC}:overall", "count", 1)
+        if result.get("needs_review"):
+            await r.hincrby(P_QC, "review", 1)
+        risk = result.get("safety_risk") or "low"
+        await r.hincrby(f"{P_QC}:safety", risk, 1)
+        dims = result.get("dimensions") or {}
+        for d in QC_DIMS:
+            dv = dims.get(d) or {}
+            mean = dv.get("mean")
+            if mean is not None and mean > 0:
+                await r.hincrbyfloat(f"{P_QC}:dim:{d}", "sum", float(mean))
+                await r.hincrby(f"{P_QC}:dim:{d}", "count", 1)
+    except Exception as e:
+        logger.warning("analytics record_qc failed: %s", e)
+
+
+async def record_feedback(rating: int, has_dimensions: bool = False) -> None:
+    """用户评价统计: 提交次数 / 平均评分 / 含六维子星占比。
+
+    rating: 1-10 总评; has_dimensions: 是否携带六维子星(气泡内展开评价)。"""
+    try:
+        r = await get_redis()
+        await r.hincrby(P_FEEDBACK, "count", 1)
+        if rating is not None:
+            await r.hincrby(P_FEEDBACK, "rating_sum", int(rating))
+            await r.hincrby(P_FEEDBACK, "rating_count", 1)
+        if has_dimensions:
+            await r.hincrby(P_FEEDBACK, "with_dims", 1)
+    except Exception as e:
+        logger.warning("analytics record_feedback failed: %s", e)
