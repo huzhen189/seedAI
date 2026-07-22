@@ -24,9 +24,11 @@ from typing import Any, Dict, Optional
 
 from ..config import settings
 from ..events import TERMINAL_EVENTS
+from ..logging_config import set_trace
 from .router import detect_intent_v2, skill_for
 from .runner import run_skill
 from ..registry import SkillRegistry
+from ..intent.selection import set_pending_options
 
 
 _JOB_QUEUE = "queue:generate"
@@ -319,12 +321,14 @@ async def worker_loop(concurrency: int = 1):
         while True:
             try:
                 job = await q.dequeue()
+                t_job = time.time()
                 logger.info("[Worker] [1/6] 从队列取出任务 trace=%s", job.get("trace_id"))
             except Exception as e:
                 logger.warning("[Worker] 取任务失败,1秒后重试: %s", e)
                 await asyncio.sleep(1)
                 continue
             trace_id = job.get("trace_id")
+            set_trace(trace_id)  # 链路追踪:本 Job 处理期间所有日志带 trace=..
             model_id = job.get("model_id")
             messages = job.get("messages", [])
             skill = job.get("skill")
@@ -344,7 +348,8 @@ async def worker_loop(concurrency: int = 1):
                         indexed += 1
                     except Exception:
                         pass
-                logger.info("[Worker] [2/6] Chroma索引完成 成功=%d/%d", indexed, len(messages))
+                logger.info("[Worker] [2/6] Chroma索引完成 成功=%d/%d (+%.0fms)", indexed, len(messages),
+                           (time.time() - t_job) * 1000)
             else:
                 logger.info("[Worker] [2/6] 跳过Chroma索引(无conversation_id)")
 
@@ -365,8 +370,9 @@ async def worker_loop(concurrency: int = 1):
                     if msg.get("role") == "user":
                         user_text = (msg.get("content", "") or "")[:100]
                         break
-                logger.info("[Worker] [3/6] 上下文检测 输入=\"%.80s\" ctx_hint=%.40s summary=%.40s",
-                           user_text, ctx_hint[:40] if ctx_hint else "无", summary[:40] if summary else "无")
+                logger.info("[Worker] [3/6] 上下文检测 输入=\"%.80s\" ctx_hint=%.40s summary=%.40s (+%.0fms)",
+                           user_text, ctx_hint[:40] if ctx_hint else "无", summary[:40] if summary else "无",
+                           (time.time() - t_job) * 1000)
                 # 意图分类 v2(5模块并行, 35s超时)
                 try:
                     intent = await asyncio.wait_for(
@@ -383,15 +389,17 @@ async def worker_loop(concurrency: int = 1):
                               "industry": "other", "checkpoint_relation": "none",
                               "selected_skill": "explain", "decision": "fallback"}
                 ctx_result = ctx_hint or "检测完成"
-                logger.info("[Worker] [3/6] 上下文结果 ctx=%.60s", ctx_result)
+                logger.info("[Worker] [3/6] 上下文结果 ctx=%.60s (+%.0fms, 含意图分类)", ctx_result,
+                           (time.time() - t_job) * 1000)
 
                 # ── [4/6] 意图分类(汇总器已算好最终 skill, 单一来源) ──
                 decision = intent.get("decision", "route")
                 confirmed = bool(job.get("confirmed", False))
                 skill_name = skill or intent.get("selected_skill") or skill_for(intent["level1"], intent["level2"]) or "explain"
-                logger.info("[Worker] [4/6] 决策 decision=%s risk=%s 汇总skill=%s 最终skill=%s conf=%.0f%%",
+                logger.info("[Worker] [4/6] 决策 decision=%s risk=%s 汇总skill=%s 最终skill=%s conf=%.0f%% (+%.0fms)",
                            decision, intent.get("risk_level", "?"), intent.get("selected_skill"),
-                           skill_name, intent.get("confidence", 0) * 100)
+                           skill_name, intent.get("confidence", 0) * 100,
+                           (time.time() - t_job) * 1000)
 
                 # ── [5/6] 决策分流(switch on decision) ──
                 # 1) 高危拦截: 死红线, 即便用户确认也不可绕过
@@ -429,19 +437,23 @@ async def worker_loop(concurrency: int = 1):
                     await q.publish(trace_id, {"event": "done", "data": {}})
                     continue
 
-                # 4) 多选项(options): 用户未选则发 options 事件; 已带 skill 参数则直接执行
-                if decision == "options" and not confirmed and not job.get("skill"):
-                    plan = intent.get("plan") or []
-                    skill_list = []
-                    for p in plan:
-                        if p.get("action") == "options":
-                            skill_list = p.get("skills", [])
-                    choices = [{"id": s, "title": _skill_label(s), "desc": ""} for s in skill_list]
-                    logger.info("[Worker] [5/6] 多选项 候选=%s", skill_list)
-                    await q.publish(trace_id, {"event": "options", "data": {
-                        "question": "请选择处理方式", "choices": choices, "mode": "skill"}})
-                    await q.publish(trace_id, {"event": "done", "data": {}})
-                    continue
+                # 4) 多选项 → 改为非阻塞提示(系统已自己决定 top-1,不再阻塞用户)
+                #    出 alternatives 事件供前端展示"已选 X,可切换 Y";随后照常执行 selected_skill。
+                _alts_plan = next((p for p in (intent.get("plan") or [])
+                                   if p.get("action") == "alternatives"), None)
+                if decision == "options" or _alts_plan is not None:
+                    alts = (_alts_plan or {}).get("skills", [])
+                    hint = (_alts_plan or {}).get("hint", "")
+                    logger.info("[Worker] [5/6] 非阻塞提示 alternatives=%s (系统已选 %s,不阻塞用户)", alts, skill_name)
+                    if alts:
+                        await q.publish(trace_id, {"event": "alternatives", "data": {
+                            "selected": skill_name, "skills": alts, "hint": hint}})
+                        if conversation_id:
+                            # 存"完整有序候选列表"(top1 在前), 这样用户说 "B" → 第 2 个候选
+                            # (仅 alts 不含 top1 会导致 "B" 越界); idx 0 = 已选 top1(无操作)。
+                            set_pending_options(conversation_id, [skill_name, *alts])
+                            logger.info("[Worker] [5/6] 已登记待选项供用户后续切换 conv=%s full=%s", conversation_id, [skill_name, *alts])
+                    # 关键:不 continue,继续向下执行 selected_skill(决策自治)
 
                 # 4.5) 多意图编排: 走 Orchestrator(子任务 DAG 调度 + 合并)
                 if decision == "split":
@@ -553,8 +565,9 @@ async def worker_loop(concurrency: int = 1):
                         continue
 
                 # 5) 正常路由 / fallback / 已确认 / 已选项 → 直接执行
-                logger.info("[Worker] [5/6] 路由执行 skill=%s decision=%s doc=%s status=%s confirmed=%s",
-                           skill_name, decision, "有" if doc else "无", proj_status, confirmed)
+                logger.info("[Worker] [5/6] 路由执行 skill=%s decision=%s doc=%s status=%s confirmed=%s (+%.0fms)",
+                           skill_name, decision, "有" if doc else "无", proj_status, confirmed,
+                           (time.time() - t_job) * 1000)
                 event_cnt = 0
                 qc_user_text = ""
                 for m in messages:
@@ -605,8 +618,8 @@ async def worker_loop(concurrency: int = 1):
                                        trace_id, qc_err)
                 if done_event is not None:
                     await q.publish(trace_id, done_event)
-                logger.info("[Worker] [6/6] 执行完毕 trace=%s skill=%s 共发出%d个事件",
-                           trace_id, skill_name, event_cnt)
+                logger.info("[Worker] [6/6] 执行完毕 trace=%s skill=%s 共发出%d个事件 总耗时%.0fms",
+                           trace_id, skill_name, event_cnt, (time.time() - t_job) * 1000)
             except Exception as e:
                 logger.error("[Worker] 执行异常 trace=%s skill=%s 错误=%s: %s",
                             trace_id, skill_name, type(e).__name__, e)

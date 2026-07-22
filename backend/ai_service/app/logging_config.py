@@ -20,9 +20,40 @@
 uvicorn --reload 重复 import 时 handler 叠加导致日志重复输出。
 """
 
+import contextvars
 import logging
+from contextlib import contextmanager
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+
+
+# ── 链路追踪:用 contextvars 把 trace_id 注入每条日志(§端到端日志) ──
+# 说明:Worker 在独立 asyncio 任务中运行,/generate 处理器里设置的 ContextVar
+# 不会自动传播到 Worker 任务,因此必须在两处分别 set_trace(见 main.py / queue.py)。
+trace_var: contextvars.ContextVar[str] = contextvars.ContextVar("ai_trace_id", default="-")
+
+
+class TraceIdFilter(logging.Filter):
+    """给每条日志记录补上 trace_id(取自 contextvars,缺省 '-'),供 grep 全链路。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.trace_id = trace_var.get()
+        return True
+
+
+def set_trace(trace_id: str) -> None:
+    """在当前 asyncio 任务上下文设置 trace_id(请求/Job 处理起点调用)。"""
+    trace_var.set(trace_id)
+
+
+@contextmanager
+def trace_context(trace_id: str):
+    """上下文管理器版:进入设置、退出复位(用于单任务内整段作用域)。"""
+    token = trace_var.set(trace_id)
+    try:
+        yield
+    finally:
+        trace_var.reset(token)
 
 # 日志目录固定放在本服务包的上一级(backend/ai_service/logs),
 # 不受进程启动 CWD 影响,保证本地直跑与 docker 内路径一致。
@@ -49,7 +80,7 @@ def setup_logging(service_name: str, *, level: int = logging.INFO) -> None:
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     fmt = logging.Formatter(
-        fmt="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+        fmt="%(asctime)s %(levelname)-8s [%(name)s] [trace=%(trace_id)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
@@ -64,10 +95,12 @@ def setup_logging(service_name: str, *, level: int = logging.INFO) -> None:
     )
     file_handler.setFormatter(fmt)
     file_handler.setLevel(level)
+    file_handler.addFilter(TraceIdFilter())  # 每条日志注入 trace_id
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(fmt)
     console_handler.setLevel(level)
+    console_handler.addFilter(TraceIdFilter())  # 每条日志注入 trace_id
 
     root.setLevel(level)
     root.addHandler(file_handler)

@@ -1,4 +1,4 @@
-import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent, QcResult, RatingDims, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent } from '../types'
+import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent, QcResult, RatingDims, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent } from '../types'
 import { notifyAuthRequired } from '../stores/auth'
 import { post, publicGet } from './client'
 
@@ -21,6 +21,8 @@ export interface ChatCallbacks {
   onIntent?: (data: IntentEvent) => void
   /** 多方案选择(requirement_agent 出方案),前端弹出单选框 */
   onOptions?: (data: OptionEvent) => void
+  /** 非阻塞候选提示(管道级工具路由已自决 top-1, 列出可切换候选) */
+  onAlternatives?: (data: AlternativesEvent) => void
   /** 不支持的功能提示(意图不属于已知范围) */
   onUnsupported?: (data: UnsupportedEvent) => void
   /** 高危拦截(安全 critical, 不可绕过) */
@@ -92,6 +94,7 @@ export function startChat(opts: StartChatOptions): EventSource {
   es.addEventListener('plan', (e) => opts.cb.onPlan?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('intent', (e) => opts.cb.onIntent?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('options', (e) => opts.cb.onOptions?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('alternatives', (e) => opts.cb.onAlternatives?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('unsupported', (e) => opts.cb.onUnsupported?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('block', (e) => opts.cb.onBlock?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('confirm', (e) => opts.cb.onConfirm?.(safeParse((e as MessageEvent).data)))

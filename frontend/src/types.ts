@@ -170,6 +170,16 @@ export interface OptionEvent {
   mode?: string
 }
 
+/** 非阻塞候选项提示: 系统已自行决定 top-1, 同时给出可切换的候选(用户可说"用 X"/"B"切换)。 */
+export interface AlternativesEvent {
+  /** 系统已选的 skill 名 */
+  selected: string
+  /** 可切换的候选 skill 名列表 */
+  skills: string[]
+  /** 提示文案 */
+  hint?: string
+}
+
 export interface Conversation {
   id: number
   project_id: number

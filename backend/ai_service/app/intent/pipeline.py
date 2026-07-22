@@ -18,6 +18,7 @@ from .safety import SafetyResult, run_safety
 from .semantic import SemanticResult, run_semantic
 from .splitter import maybe_split
 from .tools import SkillCandidate, ToolResult, run_tools
+from .selection import resolve_selection, set_pending_options, clear_pending_options
 from ..core.models import SubTask
 
 logger = logging.getLogger("ai_service.intent.pipeline")
@@ -54,6 +55,27 @@ async def classify_v2(
     消除同步阶段的等待开销。各模块均为纯函数, 不共享可变状态, 无内存污染。
     """
     logger.info("[管道] [1/5] 开始 %d条消息 model=%s project=%s", len(messages), model_id, project_status)
+
+    # ── [0/5] 选项选择短路:用户在回复待选项 / 显式指定 skill → 直接路由(不重分类) ──
+    from ..registry import SkillRegistry
+    _sel = resolve_selection(
+        messages, conversation_id,
+        skill_exists=lambda n: SkillRegistry.get(n) is not None,
+        known_skills=set(SkillRegistry.names()),
+    )
+    if _sel is not None:
+        _chosen, _cands = _sel
+        logger.info("[管道] [0/5] 命中选项选择 → 短路路由 skill=%s (候选=%s,不重跑LLM)", _chosen, _cands)
+        clear_pending_options(conversation_id)  # 消费后清除,避免陈旧状态
+        return PipelineResult(
+            intent={"level1": "learn", "level2": "casual", "confidence": 1.0, "industry": "other"},
+            plan=[{"action": "route", "skill": _chosen, "confidence": 1.0, "from_selection": True}],
+            risk=SafetyResult(),
+            tools=ToolResult(skills=[SkillCandidate(name=_chosen, confidence=1.0, reason="用户选择/指定")]),
+            evidence={"selection": {"chosen": _chosen, "candidates": _cands}},
+            decision="route",
+            selected_skill=_chosen,
+        )
 
     # ── 发射语义任务(LLM, 异步) ──
     logger.info("[管道] [2/5] 发射语义模块(LLM异步, 同步模块在其等待期重叠执行)...")
@@ -210,17 +232,28 @@ def _aggregate(
             selected_skill=selected,
         )
 
-    # ── Step 5: 低置信度 → 出多选项(候选含正确 skill 名) ──
+    # ── Step 5: 低置信度 → 系统自己决定(top-1),不再阻塞用户 ──
+    # 设计原则:工具路由不该让用户判断。AI 直接选 tools.skills[0](最具体/最高置信),
+    # 把其余候选作为非阻塞 alternatives 提示(前端可展示"已选 X,也可说'用 Y'切换")。
+    # 仅当真正需要用户拍板的业务级决策(如 requirement_agent 方案多选)才由对应 skill 内部出选项。
     if confidence < 0.5 or tools.skills[0].confidence < 0.5:
-        logger.info("[汇总] 低置信度(意图%.0f%%/工具%.0f%%) → 出多选项",
-                   confidence * 100, tools.skills[0].confidence * 100)
+        alts = [s.name for s in tools.skills[1:]]  # 去掉已选的 top-1
+        logger.info("[汇总] 低置信度(意图%.0f%%/工具%.0f%%) → 系统决定选 top1=%s, 其余作为 alternatives=%s",
+                   confidence * 100, tools.skills[0].confidence * 100, selected, alts)
+        plan = [
+            {"action": "classify", "result": f"{final_l1}/{final_l2}", "confidence": confidence},
+            {"action": "route", "skill": selected, "confidence": tools.skills[0].confidence},
+        ]
+        if alts:
+            plan.append({"action": "alternatives", "skills": alts,
+                         "hint": f"已选 {selected},如需切换可说'用 {alts[0]}'等"})
         return PipelineResult(
             intent={"level1": final_l1, "level2": final_l2, "confidence": confidence, "industry": industry},
-            plan=[{"action": "options", "skills": [s.name for s in tools.skills]}],
+            plan=plan,
             risk=safety,
             tools=tools,
             evidence=evidence,
-            decision="options",
+            decision="route",  # 关键:不再 options 阻塞,直接路由
             selected_skill=selected,
         )
 

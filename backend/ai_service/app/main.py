@@ -20,7 +20,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from .config import settings
 from .events import to_sse
-from .logging_config import setup_logging
+from .logging_config import setup_logging, set_trace
 from .providers import list_providers
 from .analytics import record_generate_request
 from .core.queue import get_queue, worker_loop
@@ -144,6 +144,7 @@ async def generate(req: GenerateReq, after: str | None = None):
     """SSE 生成端点:入队 → 订阅进度流 → 透传事件流(§3.7 / 1-C)。"""
     q = get_queue()
     trace_id = req.trace_id or uuid.uuid4().hex
+    set_trace(trace_id)  # 链路追踪:本请求处理期间所有日志带 trace=..
     await record_generate_request()  # 后端核心负载计数(独立于编排统计 an:orch)
     user_input = ""
     for m in req.messages:
@@ -181,10 +182,11 @@ async def generate(req: GenerateReq, after: str | None = None):
     event_count = 0
     async def stream():
         nonlocal event_count
+        set_trace(trace_id)  # SSE 流在同一任务内续写,确保出口日志也带 trace
         async for event in q.subscribe(trace_id, after):
             event_count += 1
             yield to_sse(event)
-        logger.info("[3/3] SSE流结束 trace=%s 共推送%d个事件", trace_id, event_count)
+        logger.info("[3/3] SSE流结束 trace=%s 共推送%d个事件 入口到出口全链路完成", trace_id, event_count)
     return EventSourceResponse(stream())
 
 

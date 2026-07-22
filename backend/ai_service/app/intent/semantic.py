@@ -41,6 +41,12 @@ INTENT_SYSTEM = (
     "- unrelated: 说另一件事,和断点无关\n"
     "- unclear: 无法判断\n"
     "- none: 不存在断点或不需要判断\n\n"
+    "裁决规则(你必须自行决断, 不要把选择推给用户 —— 下游系统会自动选最具体的技能):\n"
+    "1. build 但不确定 page/site/modify 时: 默认选 'site'(完整站); 仅当用户明确说'单页/一个页面'才选 page, '改一下/修改已有'才选 modify, '小游戏/游戏'才选 game。\n"
+    "2. learn 但不确定子类时: 默认选 'explain'(解释说明); 仅当明确是报错排查才 debug, 技术对比才 compare, UI设计才 design, 搜索查资料才 search。\n"
+    "3. 需求/方案类('帮我做网站''做什么功能''规划一下''需求')→ build/requirement(状态路由会先走需求分析); 单纯概念解释 → learn/explain。\n"
+    "4. 不要并列输出多个 level2 让系统二选一; 只选一个最贴切的。\n"
+    "5. 置信度: 只要你给出了合理 level1/level2, 置信度给 >=0.6; 只有完全无法归类时才给 low 并 level1=unsupported。\n\n"
     "用户输入: "
 )
 

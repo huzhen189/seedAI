@@ -24,7 +24,7 @@ import { listArtifacts, renameProject, patch } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { Artifact, Message, ModelInfo, OptionEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent, QcResult, RatingDims, SubTaskView, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, FailedSubTask } from '../types'
+import type { Artifact, Message, ModelInfo, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent, QcResult, RatingDims, SubTaskView, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, FailedSubTask } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
   enter_router: '意图路由 — 识别你的需求类型，匹配最合适的处理流程',
@@ -133,6 +133,27 @@ const showOptionsModal = ref(false)
 const optionsData = ref<OptionEvent | null>(null)
 const selectedOption = ref('')  // radio 单选绑定
 const pendingOptionsText = ref('')  // 已确认但未发送的选项文本
+// 非阻塞候选提示(管道级 alternatives 事件): 系统已自行决定 top-1, 列出可切换候选
+const alternativesData = ref<AlternativesEvent | null>(null)
+
+// 把用户输入解析为候选项索引(A-H / 1-9 / 中文数字 / 选X / 用X / 切换X / 第X个);
+// 不是选择则返 null。对齐后端 intent/selection.parse_selection。
+const _SELECT_RE = /^\s*(?:([A-Ha-h])\s*|([1-9])\s*|([一二两三四五六七八九十])\s*|(?:选|用|切换|改成|改为)\s*([A-Ha-h1-9一二两三四五六七八九十])\s*|第\s*([一二两三四五六七八九十])\s*个)\s*$/
+const _CN_NUM: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 }
+function parseSelectionToken(text: string): number | null {
+  const m = _SELECT_RE.exec(text.trim())
+  if (!m) return null
+  const [, letter, digit, cn, pick, nth] = m
+  if (letter) return letter.toUpperCase().charCodeAt(0) - 65
+  if (digit) return parseInt(digit, 10) - 1
+  if (cn) return _CN_NUM[cn] - 1
+  if (pick) return /[A-Ha-h]/.test(pick) ? pick.toUpperCase().charCodeAt(0) - 65 : _CN_NUM[pick] - 1
+  if (nth) return _CN_NUM[nth] - 1
+  return null
+}
+function clearAlternatives() {
+  alternativesData.value = null
+}
 // 二次确认弹框(安全 high)
 const pendingConfirm = ref<{ reason: string; skill: string } | null>(null)
 const showConfirmModal = ref(false)
@@ -510,6 +531,8 @@ function resetGenState() {
   isMultiIntent.value = false
   subTasks.value = []
   mergeResult.value = null
+  // 非阻塞候选提示(新请求时清除)
+  alternativesData.value = null
 }
 
 function upsertStep(stage: string, status: ThoughtStep['status'], customLabel?: string) {
@@ -656,6 +679,11 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       selectedOption.value = ''
       showOptionsModal.value = true
     },
+    onAlternatives: (d: AlternativesEvent) => {
+      // 非阻塞: 系统已自决 top-1 并继续生成; 仅记录候选供用户随时切换
+      alternativesData.value = d
+      console.log('[SSE] alternatives 已选=%s 可切换=%s', d.selected, d.skills)
+    },
     onUnsupported: () => {
       generating.value = false
       finished.value = true
@@ -764,6 +792,20 @@ async function send() {
     pendingOptionsText.value = ''
   }
   if (!text) return
+  // 非阻塞候选提示激活时, 若输入是选择 token(如 "B"/"2"/"选B") → 直接切换 skill
+  // 对齐后端 pending_options(完整候选列表: [已选top1, ...alts]); "A"=重新确认当前(忽略), "B"=alts[0]
+  if (alternativesData.value && alternativesData.value.skills.length) {
+    const full = [alternativesData.value.selected, ...alternativesData.value.skills]
+    const idx = parseSelectionToken(text)
+    if (idx !== null && idx > 0 && idx < full.length) {
+      const skill = full[idx]
+      input.value = ''
+      alternativesData.value = null
+      console.log('[发送] 命中候选切换 token=%s → skill=%s', text, skill)
+      resendWithSkill(skill)
+      return
+    }
+  }
   // 生成中: 加入队列
   if (generating.value) { enqueue(text); return }
   // 等待方案确认: 直接回复文字 = 续跑生成(可带改进意见, 也可直接"开始/确认")
@@ -1147,6 +1189,19 @@ watch(pendingRetry, (r) => {
           @stop="stop"
         />
         <div v-if="errorMsg" class="error">⚠ {{ errorMsg }}</div>
+        <!-- 非阻塞候选提示: 系统已自决 top1 并继续, 列出可切换候选(可点击或输入"用 X"/"B") -->
+        <div v-if="alternativesData && alternativesData.skills.length" class="alts-bar">
+          <span class="alts-label">已选 <b>{{ alternativesData.selected }}</b></span>
+          <span class="alts-sep">·</span>
+          <span class="alts-hint">可切换：</span>
+          <button
+            v-for="(sk, i) in alternativesData.skills"
+            :key="sk"
+            class="alts-chip"
+            @click="resendWithSkill(sk)"
+          >{{ String.fromCharCode(66 + i) }}. {{ sk }}</button>
+          <span class="alts-tip">（输入字母如「B」或「用 {{ alternativesData.skills[0] }}」也可切换）</span>
+        </div>
         <!-- 方案已就绪: 文字产物链接(替代确认模态框) -->
         <div v-if="awaitingConfirm" class="artifact-links-card">
           <div class="alc-head">📦 需求方案已生成，预览已自动打开</div>
@@ -1486,6 +1541,24 @@ watch(pendingRetry, (r) => {
 .om-confirm:not(:disabled):hover { background: #2563eb; }
 .om-cancel { background: #f1f5f9; color: #64748b; }
 .om-cancel:hover { background: #e2e8f0; }
+
+/* ── 非阻塞候选提示条 ── */
+.alts-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  padding: 8px 14px; margin: 0 16px 6px;
+  background: rgba(16,185,129,.08); border: 1px solid #6ee7b7;
+  border-radius: 10px; font-size: 13px; color: #047857;
+}
+.alts-label b { color: #065f46; }
+.alts-sep { color: #94a3b8; }
+.alts-hint { color: #059669; }
+.alts-chip {
+  border: 1px solid #6ee7b7; background: #fff; color: #047857;
+  border-radius: 999px; padding: 4px 12px; cursor: pointer;
+  font-size: 12px; font-weight: 600; transition: all .18s ease;
+}
+.alts-chip:hover { background: #10b981; color: #fff; transform: translateY(-1px); }
+.alts-tip { color: #94a3b8; font-size: 11px; }
 
 /* ── 待发送选项提示 ── */
 .pending-opt-badge {
