@@ -18,19 +18,23 @@ export default defineConfig({
     allowedHosts: true,
     proxy: {
       '/api': {
-        // 默认指向业务服务(7101);如需覆盖可用 VITE_API_TARGET 环境变量
-        target: process.env.VITE_API_TARGET || 'http://localhost:7101',
+        // 默认指向业务服务(7101);使用 127.0.0.1 而非 localhost,避免 Node.js DNS
+        // 优先解析 IPv6 ::1 导致连接失败(uvicorn 默认只监听 IPv4 0.0.0.0)。
+        target: process.env.VITE_API_TARGET || 'http://127.0.0.1:7101',
         changeOrigin: true,
+        ws: false, // /api 无需 WebSocket,禁用避免升级冲突
       },
       // 管理后台(§10):/admin/* 同样代理到业务服务(同源,Cookie 随请求自动携带)
       '/admin': {
-        target: process.env.VITE_API_TARGET || 'http://seedapi.huzhen.net.cn:7101',
+        target: process.env.VITE_API_TARGET || 'http://127.0.0.1:7101',
         changeOrigin: true,
+        ws: false,
       },
       // 登录/注册等鉴权接口也代理到业务服务(同源,Cookie 可随请求自动携带)
       '/auth': {
-        target: process.env.VITE_API_TARGET || 'http://seedapi.huzhen.net.cn:7101',
+        target: process.env.VITE_API_TARGET || 'http://127.0.0.1:7101',
         changeOrigin: true,
+        ws: false,
       },
     },
   },
