@@ -30,6 +30,9 @@ from .runner import run_skill
 from ..registry import SkillRegistry
 from ..intent.selection import set_pending_options
 from .git_site import commit_site_for_trace
+from ..analytics import (  # v0.9.0 新增功能统计
+    record_repair, record_distill, record_code_index, record_refine, record_chat_retry,
+)
 
 
 _JOB_QUEUE = "queue:generate"
@@ -115,6 +118,8 @@ async def _distill_memories(trace_id: str, user_id: int | None, project_id: int 
                        trace_id, project_id, user_id,
                        len(data.get("project_memories", [])),
                        len(data.get("user_prefs", [])))
+            record_distill(len(data.get("project_memories", [])),
+                          len(data.get("user_prefs", [])))  # v0.9.0 统计
     except Exception as e:
         logger.debug("[蒸馏] 失败(跳过): %s", e)
 
@@ -160,6 +165,7 @@ async def _index_project_code(trace_id: str, project_id: int | None, skill_name:
                        trace_id, project_id,
                        sum(1 for _ in site_dir.rglob("*") if _.suffix in (".html",".css",".js")),
                        sum(1 for _ in chunks if len(_.strip()) > 20))
+            record_code_index(sum(1 for _ in chunks if len(_.strip()) > 20))  # v0.9.0 统计
     except Exception as e:
         logger.debug("[代码索引] 失败(跳过): %s", e)
 
@@ -768,6 +774,7 @@ async def worker_loop(concurrency: int = 1):
                             if retry_text.strip():
                                 qc_assistant_text = retry_text
                                 done_event = {"event": "done", "data": {"content": retry_text}}
+                                record_chat_retry(True)  # v0.9.0 统计
                                 logger.info("[闲聊重答] 重答完成 len=%d", len(retry_text))
                     except Exception as _re:  # noqa: BLE001
                         logger.debug("[闲聊重答] 失败: %s", _re)
@@ -780,6 +787,7 @@ async def worker_loop(concurrency: int = 1):
                         await q.publish(trace_id, {"event": "refined", "data": refined[:500]})
                         logger.info("[Worker] L2 精炼完成 trace=%s len_before=%d len_after=%d",
                                    trace_id, len(qc_assistant_text), len(refined))
+                        record_refine(len(qc_assistant_text), len(refined))  # v0.9.0 统计
                     except Exception as _le:  # noqa: BLE001
                         logger.debug("[Worker] L2 精炼失败: %s", _le)
                 # L2+ 蒸馏(v0.9.0 P3): 从精炼对话抽取项目记忆+用户偏好→写 Chroma

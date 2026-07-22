@@ -3,14 +3,12 @@
 写共享 Redis(redis://redis:6379/0), 与业务端 analytics 同库。
 因此业务端 analytics_snapshot 可直接读取这些键, 汇总进管理后台「系统分析」标签页。
 
-统计维度(补充 6 要求 + 用户扩展的"后端核心"维度):
-- 编排: 总次数 / 策略分布(parallel|mixed) / 子任务数分布 / 成功率 / 总耗时
+统计维度:
+- 编排: 总次数 / 策略分布 / 子任务数分布 / 成功率 / 总耗时
 - 子任务: per-skill 成功/失败/拦截/跳过 + per-risk 分布 + 耗时 p50/p90/p99
+- v0.9.0 新增: 修复(repair) / 蒸馏(distill) / 代码索引(code_index) / 精炼(refine) / 闲聊重答(chat_retry)
 
-键前缀: an:orch:*  / an:subtask:*
-
-约定: 与 backend/business/app/analytics.py 保持一致——value 以 bytes 存储(不加 decode_responses),
-由读取方自行 decode, 复用其 _zset_percentiles 逻辑。
+键前缀: an:orch:* / an:subtask:* / an:v090:*
 """
 
 from __future__ import annotations
@@ -26,9 +24,10 @@ logger = logging.getLogger("ai_service.analytics")
 LATENCY_MAX = 500
 P_ORCH = "an:orch"
 P_SUB = "an:subtask"
-P_GEN = "an:generate"  # 后端核心总生成请求数(单意图 + 多意图), 独立于编排统计
+P_GEN = "an:generate"  # 后端核心总生成请求数
+P_V090 = "an:v090"      # v0.9.0 新增功能统计
 
-# 模块级懒加载 Redis 客户端(与 queue.py 同源, 共享同一 Redis db)
+# 模块级懒加载 Redis 客户端
 _redis_client = None
 
 
@@ -194,3 +193,85 @@ async def orchestration_stats() -> dict:
     except Exception as e:  # noqa: BLE001
         logger.warning("AI analytics orchestration_stats failed: %s", e)
         return {"total": 0, "available": True, "error": str(e)}
+
+
+# ---- v0.9.0 新增功能统计 ----
+
+async def _incr_v090(feature: str) -> None:
+    """通用增量计数器(按功能名)。"""
+    try:
+        r = _get_redis()
+        if r is None:
+            return
+        await r.hincrby(f"{P_V090}:total", "count", 1)
+        await r.hincrby(f"{P_V090}:feature", feature, 1)
+    except Exception:
+        pass
+
+
+async def record_repair(skill: str, rounds: int, success: bool) -> None:
+    """修复闭环统计。rounds=实际修复轮数, success=最终是否通过。"""
+    try:
+        r = _get_redis()
+        if r is None:
+            return
+        await _incr_v090("repair")
+        await r.hincrby(f"{P_V090}:repair:{skill}", "success" if success else "failed", 1)
+        await r.zadd(f"{P_V090}:repair:rounds", {uuid.uuid4().hex: rounds})
+        await r.zremrangebyrank(f"{P_V090}:repair:rounds", 0, -(LATENCY_MAX + 1))
+        logger.info("[统计] repair skill=%s rounds=%d success=%s", skill, rounds, success)
+    except Exception as e:
+        logger.debug("[统计] repair 失败: %s", e)
+
+
+async def record_distill(cnt_project_mems: int, cnt_user_prefs: int) -> None:
+    """蒸馏统计(每轮 done 触发一次)。"""
+    try:
+        await _incr_v090("distill")
+        r = _get_redis()
+        if r is None:
+            return
+        total = cnt_project_mems + cnt_user_prefs
+        await r.zadd(f"{P_V090}:distill:items", {uuid.uuid4().hex: total})
+        await r.zremrangebyrank(f"{P_V090}:distill:items", 0, -(LATENCY_MAX + 1))
+    except Exception as e:
+        logger.debug("[统计] distill 失败: %s", e)
+
+
+async def record_code_index(chunks: int) -> None:
+    """代码索引统计。"""
+    try:
+        await _incr_v090("code_index")
+        r = _get_redis()
+        if r is None:
+            return
+        await r.zadd(f"{P_V090}:code_index:chunks", {uuid.uuid4().hex: chunks})
+        await r.zremrangebyrank(f"{P_V090}:code_index:chunks", 0, -(LATENCY_MAX + 1))
+    except Exception as e:
+        logger.debug("[统计] code_index 失败: %s", e)
+
+
+async def record_refine(len_before: int, len_after: int) -> None:
+    """L2 对话精炼统计。"""
+    try:
+        await _incr_v090("refine")
+        r = _get_redis()
+        if r is None:
+            return
+        ratio = round(len_after / max(len_before, 1), 3)
+        await r.zadd(f"{P_V090}:refine:ratio", {uuid.uuid4().hex: ratio})
+        await r.zremrangebyrank(f"{P_V090}:refine:ratio", 0, -(LATENCY_MAX + 1))
+    except Exception as e:
+        logger.debug("[统计] refine 失败: %s", e)
+
+
+async def record_chat_retry(success: bool) -> None:
+    """闲聊重答统计(Phase D)。"""
+    try:
+        await _incr_v090("chat_retry")
+        r = _get_redis()
+        if r is None:
+            return
+        await r.hincrby(f"{P_V090}:chat_retry", "success" if success else "failed", 1)
+    except Exception as e:
+        logger.debug("[统计] chat_retry 失败: %s", e)

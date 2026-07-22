@@ -634,3 +634,16 @@ async def record_feedback(rating: int, has_dimensions: bool = False) -> None:
             await r.hincrby(P_FEEDBACK, "with_dims", 1)
     except Exception as e:
         logger.warning("analytics record_feedback failed: %s", e)
+
+
+# ---- v0.9.0 新增统计 ----
+
+async def record_summary_fallback(conversation_id: int) -> None:
+    """L1 摘要过期→MySQL 回退重压 次数(v0.9.0 P1)。"""
+    try:
+        r = await get_redis()
+        await r.hincrby("an:v090:summary_fallback", "count", 1)
+        await r.hincrby("an:v090:summary_fallback", f"conv:{conversation_id}", 1)
+        logger.info("[统计] summary_fallback conv=%s", conversation_id)
+    except Exception as e:
+        logger.debug("[统计] summary_fallback 失败: %s", e)

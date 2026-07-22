@@ -381,6 +381,8 @@ async def get_summary(conversation_id: int) -> str:
             r2 = await get_redis()
             await r2.setex(f"summary:{conversation_id}", 86400, new_summary[:1000])
             logger.info("[chat] 摘要过期回退重压 conv=%s len=%d", conversation_id, len(new_summary))
+            from .analytics import record_summary_fallback
+            await record_summary_fallback(conversation_id)  # v0.9.0 统计
             return new_summary
     except Exception as e:
         logger.debug("[chat] 摘要过期回退失败: %s", e)
