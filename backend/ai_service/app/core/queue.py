@@ -119,6 +119,51 @@ async def _distill_memories(trace_id: str, user_id: int | None, project_id: int 
         logger.debug("[蒸馏] 失败(跳过): %s", e)
 
 
+async def _index_project_code(trace_id: str, project_id: int | None, skill_name: str) -> None:
+    """P4(v0.9.0): 建站 done 后异步索引项目代码块到 Chroma project_code。
+    仅 generate_site skill 触发; 失败仅 warn。"""
+    if skill_name != "generate_site" or project_id is None:
+        return
+    try:
+        import re
+        from pathlib import Path
+        from ..knowledge.chroma import upsert_project_code
+        art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
+        site_dir = art_dir / "anon" / (trace_id or "site")
+        if not site_dir.exists():
+            return
+        for f in site_dir.rglob("*"):
+            if f.suffix not in (".html", ".css", ".js"):
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+            rel = str(f.relative_to(site_dir))
+            lang = f.suffix.lstrip(".")
+            # 简单按函数/区块切片(每300-800字一块)
+            chunks = []
+            if lang == "html":
+                # 按 <section>, <div class, <article 分块
+                for tag in re.finditer(r"<(section|article|div\s+class|nav|header|footer|main)\b[^>]*>.*?</\1>", text, re.DOTALL | re.IGNORECASE):
+                    chunks.append(tag.group()[:1500])
+                if not chunks:
+                    chunks = [text[:1500]]
+            else:
+                # CSS/JS 按 800 字分块
+                step = 800
+                for i in range(0, len(text), step):
+                    chunks.append(text[i:i + step][:1500])
+            for chunk in chunks:
+                if len(chunk.strip()) > 20:
+                    import hashlib
+                    h = hashlib.md5(chunk.encode()).hexdigest()[:16]
+                    upsert_project_code(project_id, rel, chunk, h, language=lang)
+            logger.info("[代码索引] done trace=%s proj=%s files=%d chunks=%d",
+                       trace_id, project_id,
+                       sum(1 for _ in site_dir.rglob("*") if _.suffix in (".html",".css",".js")),
+                       sum(1 for _ in chunks if len(_.strip()) > 20))
+    except Exception as e:
+        logger.debug("[代码索引] 失败(跳过): %s", e)
+
+
 def _skill_label(name: str) -> str:
     """取 skill 的前端展示名(用于多选项弹框标题)。"""
     try:
@@ -745,6 +790,12 @@ async def worker_loop(concurrency: int = 1):
                                                qc_assistant_text, skill_name)
                     except Exception as _de:  # noqa: BLE001
                         logger.debug("[Worker] 蒸馏失败: %s", _de)
+                # P4(v0.9.0): 项目代码索引(异步, 非阻塞)
+                if _project_id_job:
+                    try:
+                        await _index_project_code(trace_id, _project_id_job, skill_name)
+                    except Exception as _ie:  # noqa: BLE001
+                        logger.debug("[Worker] 代码索引失败: %s", _ie)
                 logger.info("[Worker] [6/6] 执行完毕 trace=%s skill=%s 共发出%d个事件 总耗时%.0fms",
                            trace_id, skill_name, event_cnt, (time.time() - t_job) * 1000)
                 await _commit_after_done(trace_id, skill_name, qc_user_text)
