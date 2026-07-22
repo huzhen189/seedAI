@@ -1,5 +1,11 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import dns from 'node:dns'
+
+// 强制 Node.js DNS 解析优先返回 IPv4。否则 localhost 可能被解析为 ::1,
+// 代理连接 uvicorn(仅监听 IPv4 0.0.0.0)时触发 ECONNREFUSED ::1:7101。
+// 与下方 proxy target 使用 127.0.0.1(字面 IPv4)形成双保险。
+dns.setDefaultResultOrder('ipv4first')
 
 // 前端在 :7100 开发;所有 /api 请求代理到业务服务(:7101)。
 // 生产由 nginx(同域)或业务服务托管静态产物,无需代理。
