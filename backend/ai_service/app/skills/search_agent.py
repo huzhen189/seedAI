@@ -7,6 +7,7 @@ import re
 from collections.abc import AsyncGenerator
 from typing import Dict
 
+from ..events import ev
 from ..providers import astream_with_fallback, get_chat_model
 from ..registry import register_skill
 
@@ -44,9 +45,9 @@ async def search_agent_handler(
             query = m.get("content", "") or ""
             break
     if not query:
-        yield {"type": "token", "data": "请输入要搜索的内容。"}
+        yield ev("token", data="请输入要搜索的内容。")
         return
-    yield {"type": "think", "data": f"正在搜索: {query[:50]}..."}
+    yield ev("think", data=f"正在搜索: {query[:50]}...")
     raw = _duckduckgo(query)
     if not raw:
         raw = "搜索暂无结果, 请换个关键词试试。"
@@ -58,7 +59,7 @@ async def search_agent_handler(
         text = getattr(chunk, "content", chunk)
         if text:
             full.append(text)
-            yield {"type": "token", "data": text}
+            yield ev("token", data=text)
     AGENT_LOG.info("[search] 完成 chars=%d", len("".join(full)))
 
 register_skill(name="search_agent", display_name="搜索小胡", avatar="🔎", role="联网搜索", intent_tags=["搜索","查","搜","search","找一下","帮我查","最新","最近有什么"], handler=search_agent_handler, is_graph=False, description="联网搜索: 查资料/最新资讯")

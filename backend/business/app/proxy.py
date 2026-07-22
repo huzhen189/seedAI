@@ -676,12 +676,14 @@ async def chat(
                                         except (json.JSONDecodeError, TypeError):
                                             text = data
                                         assistant_parts.append(text)
-                                    elif event in ("node", "think", "plan", "error", "aborted", "degraded"):
+                                    elif event in ("node", "think", "plan", "error", "aborted", "degraded", "preview"):
                                         if isinstance(payload_obj, dict) and event in ("node", "think"):
                                             stage = payload_obj.get("stage")
                                         if event == "node" and isinstance(payload_obj, dict):
                                             if payload_obj.get("stage") == "preview" and payload_obj.get("url"):
                                                 preview_url = payload_obj["url"]
+                                        if event == "preview" and isinstance(payload_obj, dict) and payload_obj.get("url"):
+                                            preview_url = payload_obj["url"]
                                         event_seq += 1
                                         # trace_event 暂存, 由 finally 批量写入
                                         if event == "aborted":

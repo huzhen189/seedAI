@@ -510,7 +510,6 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       } else {
         upsertStep(d.stage, 'active')
       }
-      if (d.stage === 'preview' && d.url) previewUrl.value = d.url as string
     },
     onThink: (d) => {
       // think 事件的阶段名不带 enter_ 前缀(planner / reviewer),

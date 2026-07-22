@@ -6,6 +6,7 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Dict
 
+from ..events import ev
 from ..providers import astream_with_fallback
 from ..registry import register_skill
 
@@ -29,7 +30,7 @@ async def fix_agent_handler(
         text = getattr(chunk, "content", chunk)
         if text:
             full.append(text)
-            yield {"type": "token", "data": text}
+            yield ev("token", data=text)
     AGENT_LOG.info("[fix] 完成 chars=%d", len("".join(full)))
 
 register_skill(name="fix_agent", display_name="修复小胡", avatar="🔧", role="BUG修复", intent_tags=["修复","报错","bug","不生效","改改","出错","error","fix","修","改一下","改下"], handler=fix_agent_handler, is_graph=False, description="Bug修复: 错误排查 + 代码级修复方案")

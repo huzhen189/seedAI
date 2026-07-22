@@ -10,6 +10,7 @@
 - done      : 结束(随后断连)
 - aborted   : 主动取消确认(C1)
 - degraded  : 模型降级标记(2-C)
+- preview   : 预览直链就绪(url + fallback,供前端打开iframe预览);取代 node(stage=preview)
 - retry     : 主模型不可用,携带可选替代模型列表(failed/suggested),前端弹框待用户选择后重发
               (替代原自动降级;收到后同 done/error 一样结束 SSE,由前端重新发起请求)
 

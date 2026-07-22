@@ -118,7 +118,7 @@ async def builder_agent_handler(
     AGENT_LOG.info("[builder] [4/5] 预览完成 url=%s fallback=srcdoc", url or "(无)")
 
     # ── [5/5] Done ──
-    yield ev("node", stage="preview", url=url, fallback="srcdoc" if not url else None, agent_id="builder_agent")
+    yield ev("preview", url=url, fallback="srcdoc" if not url else None, agent_id="builder_agent")
     yield ev("node", stage="done", agent_id="builder_agent")
     AGENT_LOG.info("[builder] [5/5] 建站完成 trace=%s HTML=%d字节 有预览:%s", trace_id, len(html), bool(url))
 

@@ -219,6 +219,17 @@ async def generate_stream(
     # 断点恢复入口(§7): 跳过已完成阶段
     if checkpoint:
         stage = checkpoint.get("stage", "")
+        # await_confirm 续接(来自 paused(await_confirm) 或 requirement_agent→generate_site 转换):
+        # 此时 checkpoint 仅含 title/goal/steps(无 stage 键), 需规整为 planner_done 形状再进入 Coder,
+        # 否则下方 int(stage[-1]) 会因空 stage 触发 IndexError。
+        if not stage or stage == "await_confirm":
+            stage = "planner_done"
+            if "plan" not in checkpoint:
+                checkpoint["plan"] = {
+                    "title": checkpoint.get("title", ""),
+                    "goal": checkpoint.get("goal", ""),
+                    "steps": checkpoint.get("steps", []),
+                }
         plan = checkpoint.get("plan", {})
         html = checkpoint.get("html", "")
         attempt = checkpoint.get("attempt", 0)
@@ -285,7 +296,7 @@ async def generate_stream(
         # 收尾
         yield ev("node", stage="previewing")
         url = _deliver(html, trace_id)
-        yield ev("node", stage="preview", url=url, fallback="srcdoc" if not url else None)
+        yield ev("preview", url=url, fallback="srcdoc" if not url else None)
         with suppress(Exception):
             save_memory(trace_id or "site", plan.get("title", "建站"), html[:1500], plan.get("steps", []))
         yield ev("node", stage="done")
@@ -432,7 +443,7 @@ async def generate_stream(
         yield ev("node", stage="previewing")
         url = _deliver(html, trace_id)
         GEN_LOG.info("[gen] 预览投递 trace=%s url=%s", trace_id, url or "无(srcdoc 兜底)")
-        yield ev("node", stage="preview", url=url, fallback="srcdoc" if not url else None)
+        yield ev("preview", url=url, fallback="srcdoc" if not url else None)
 
         # ②-a 记忆闭环:生成成功后回写 memory 集合(供未来检索增强)
         with suppress(Exception):
