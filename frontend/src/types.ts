@@ -290,3 +290,94 @@ export interface QcResult {
 
 /** 用户气泡内多维度评价(6 维各 1-10) */
 export type RatingDims = Partial<Record<QcDimension, number>>
+
+// ---------- 多意图编排(§多意图 v1.0) ----------
+// 事件形状须与 backend/ai_service/app/core/orchestrator.py 的 ev(...) 调用保持一致。
+
+/** 风险等级(与 safety.py / models.py 对齐) */
+export type RiskLevel = 'high' | 'medium' | 'low'
+
+/** 子任务状态(与 models.py SUB_* 常量对齐) */
+export type SubTaskStatus =
+  | 'pending'
+  | 'running'
+  | 'done'
+  | 'failed'
+  | 'blocked'
+  | 'skipped'
+
+/** 编排总览中的单个子任务元信息 */
+export interface SubTaskMeta {
+  id: string
+  goal: string
+  skill: string
+  risk: RiskLevel
+  status: SubTaskStatus
+  dependencies: string[]
+}
+
+/** 编排总览事件(orchestration):子任务清单 + 执行策略 */
+export interface OrchestrationEvent {
+  total: number
+  /** parallel = 全并行; mixed = 分层串行 + 层内并行 */
+  strategy: 'parallel' | 'mixed'
+  tasks: SubTaskMeta[]
+}
+
+/** 子任务开始进入执行层(subtask_start) */
+export interface SubTaskStartEvent {
+  sub_task_id: string
+  goal: string
+  skill: string
+  risk: RiskLevel
+  layer: number
+}
+
+/** 子任务完成(subtask_done) */
+export interface SubTaskDoneEvent {
+  sub_task_id: string
+  /** 产出摘要(截断 200 字) */
+  result_summary: string
+  /** 产物 URL 列表(如站点预览) */
+  artifacts: string[]
+}
+
+/** 子任务失败 / 拦截 / 跳过(subtask_fail) */
+export interface SubTaskFailEvent {
+  sub_task_id: string
+  reason: string
+  /** false = 高风险拦截不可恢复; true = 可重试 / 待确认 */
+  recoverable: boolean
+}
+
+/** 合并结果中的失败子任务条目 */
+export interface FailedSubTask {
+  id: string
+  goal: string
+  error: string
+}
+
+/** 结果合并完成(merge):最终连贯回复 + 部分失败清单 */
+export interface MergeEvent {
+  success_count: number
+  fail_count: number
+  failed_tasks: FailedSubTask[]
+  /** 合并后的完整中文回复(亦会作为 sub_task_id="__merge__" 的 token 流发送) */
+  text: string
+}
+
+/** 前端运行时子任务视图模型(由 orchestration 初始化, 经事件增量更新)。 */
+export interface SubTaskView extends SubTaskMeta {
+  /** 执行层(仅 mixed 策略有意义) */
+  layer?: number
+  /** 该子任务自身产出的流式 token 累积 */
+  tokens: string
+  /** 完成后的产出摘要 */
+  result_summary?: string
+  /** 产物 URL 列表 */
+  artifacts: string[]
+  /** 失败 / 拦截 / 跳过原因 */
+  fail_reason?: string
+  /** 是否可恢复(false=高风险拦截; true=可重试/待确认) */
+  recoverable?: boolean
+}

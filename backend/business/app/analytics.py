@@ -38,6 +38,9 @@ P_MODEL = "an:model"
 P_INTENT_DECISION = "an:intent:decision"  # 意图管道决策结果分布(block/confirm/options/route/fallback/unsupported)
 P_QC = "an:qc"                # 后置三裁判质检(v0.8.5): 触发/均分/需复核/每维/风险
 P_FEEDBACK = "an:feedback"    # 用户评价(v0.8.5): 提交/均分/含六维子星占比
+P_API_CALLS = "an:api:calls"  # 业务接口调用(STAT-2): 总次数/成功/失败/状态码分段
+P_ORCH = "an:orch"            # AI 核心编排统计(STAT-1, 由 ai_service 写入同 Redis)
+P_SUB = "an:subtask"          # AI 核心子任务统计(STAT-1)
 
 
 async def record_intent_result(level1: str, level2: str, matched: bool) -> None:
@@ -138,6 +141,27 @@ async def record_api_latency(path: str, elapsed_ms: float) -> None:
         logger.warning("analytics record_api_latency failed: %s", e)
 
 
+async def record_api_call(path: str, status_code: int) -> None:
+    """业务接口调用统计(STAT-2): 总次数 + 成功(2xx/3xx)/失败(>=4xx) + 状态码分段(2xx/3xx/4xx/5xx)。
+
+    供管理后台「系统分析」展示每个业务接口的调用量、成功率与延迟(与 record_api_latency 配合)。"""
+    try:
+        r = await get_redis()
+        p = path.rstrip("/") or path
+        await r.hincrby(f"{P_API_CALLS}:total", p, 1)
+        if status_code >= 400:
+            await r.hincrby(f"{P_API_CALLS}:fail", p, 1)
+        else:
+            await r.hincrby(f"{P_API_CALLS}:ok", p, 1)
+        bucket = f"{status_code // 100}xx"
+        await r.hincrby(f"{P_API_CALLS}:status:{p}", bucket, 1)
+        minute = int(time.time() // 60)
+        await r.hincrby(f"{P_API_CALLS}:rpm:{minute}", p, 1)
+        await r.expire(f"{P_API_CALLS}:rpm:{minute}", 900)
+    except Exception as e:
+        logger.warning("analytics record_api_call failed: %s", e)
+
+
 async def record_frontend_perf(metric: str, value_ms: float) -> None:
     try:
         r = await get_redis()
@@ -150,6 +174,24 @@ async def record_frontend_perf(metric: str, value_ms: float) -> None:
         await r.zremrangebyrank(zkey, 0, -(LATENCY_MAX_SAMPLES + 1))
     except Exception as e:
         logger.warning("analytics record_frontend_perf failed: %s", e)
+
+
+async def record_frontend_access(route: str) -> None:
+    """前端页面访问统计(STAT-3): 按路由累计访问次数。"""
+    try:
+        r = await get_redis()
+        await r.hincrby(f"{P_FRONTEND}:access", route or "unknown", 1)
+    except Exception as e:
+        logger.warning("analytics record_frontend_access failed: %s", e)
+
+
+async def record_frontend_click(label: str) -> None:
+    """前端点击统计(STAT-3): 按 data-track 标签累计点击次数。"""
+    try:
+        r = await get_redis()
+        await r.hincrby(f"{P_FRONTEND}:click", (label or "unknown")[:60], 1)
+    except Exception as e:
+        logger.warning("analytics record_frontend_click failed: %s", e)
 
 
 async def record_gen_stage(stage: str, elapsed_ms: float) -> None:
@@ -244,8 +286,68 @@ async def analytics_snapshot() -> dict:
             if cnt >= 3:
                 api_latency[path] = await _zset_percentiles(r, k)
 
+        # 业务接口调用统计(STAT-2): 调用量 / 成功率 / 延迟, 合并自 record_api_call + record_api_latency
+        api_calls: dict = {}
+        total_keys = await r.hgetall(f"{P_API_CALLS}:total")
+        ok_keys = await r.hgetall(f"{P_API_CALLS}:ok")
+        fail_keys = await r.hgetall(f"{P_API_CALLS}:fail")
+        for p in sorted(total_keys.keys()):
+            pt = int(total_keys.get(p, 0))
+            if pt < 3:  # 噪声过滤, 少于 3 次不展示
+                continue
+            po = int(ok_keys.get(p, 0))
+            pf = int(fail_keys.get(p, 0))
+            api_calls[p] = {
+                "total": pt,
+                "ok": po,
+                "fail": pf,
+                "success_rate": round(po / max(pt, 1), 3),
+                "latency": api_latency.get(p, {"p50": 0, "p90": 0, "p99": 0, "avg": 0, "samples": 0}),
+            }
+
+        # AI 核心编排统计(STAT-1, 由 ai_service 写入同 Redis, 此处只读聚合)
+        orch_total = int((await r.hget(f"{P_ORCH}:total", "count")) or 0)
+        orchestration: dict = {"total": orch_total, "available": orch_total > 0}
+        if orch_total > 0:
+            strategy_raw = await r.hgetall(f"{P_ORCH}:strategy")
+            orchestration["strategy_dist"] = {k: int(v) for k, v in strategy_raw.items()}
+            orchestration["split_count"] = await _zset_percentiles(r, f"{P_ORCH}:split_count")
+            orchestration["success_rate"] = await _zset_percentiles(r, f"{P_ORCH}:success_rate")
+            orchestration["duration_ms"] = await _zset_percentiles(r, f"{P_ORCH}:duration")
+            sub_total = int((await r.hget(f"{P_SUB}:total", "count")) or 0)
+            sub_status = {k: int(v) for k, v in (await r.hgetall(f"{P_SUB}:status") or {}).items()}
+            sub_risk = {k: int(v) for k, v in (await r.hgetall(f"{P_SUB}:risk") or {}).items()}
+            sub_skill: dict = {}
+            skill_keys = await r.keys(f"{P_SUB}:skill:*")
+            for sk in skill_keys:
+                sk_name = sk.decode() if isinstance(sk, bytes) else sk
+                sk_name = sk_name.replace(f"{P_SUB}:skill:", "")
+                sh = {kk: int(vv) for kk, vv in (await r.hgetall(sk) or {}).items()}
+                st = sum(sh.values())
+                if st > 0:
+                    sub_skill[sk_name] = {
+                        "total": st, "done": sh.get("done", 0), "failed": sh.get("failed", 0),
+                        "blocked": sh.get("blocked", 0), "skipped": sh.get("skipped", 0),
+                        "success_rate": round(sh.get("done", 0) / max(st, 1), 3),
+                    }
+            orchestration["sub_tasks"] = {
+                "total": sub_total,
+                "status_dist": sub_status,
+                "risk_dist": sub_risk,
+                "per_skill": sub_skill,
+                "duration_ms": await _zset_percentiles(r, f"{P_SUB}:duration"),
+            }
+
         # 前端性能
         fe_perf = {m: await _zset_percentiles(r, f"{P_FRONTEND}:{m}") for m in ("page_load", "ttfb", "dom_ready")}
+
+        # 前端访问 / 点击(STAT-3)
+        fe_access_raw = await r.hgetall(f"{P_FRONTEND}:access")
+        frontend_access = {k: int(v) for k, v in fe_access_raw.items()}
+        fe_click_raw = await r.hgetall(f"{P_FRONTEND}:click")
+        frontend_clicks = {
+            k: int(v) for k, v in sorted(fe_click_raw.items(), key=lambda x: int(x[1]), reverse=True)[:20]
+        }
 
         # DAU(今天 + 昨天)
         today = datetime.utcnow().strftime("%Y%m%d")
@@ -347,7 +449,11 @@ async def analytics_snapshot() -> dict:
             "skill_outcomes": skills,
             "gen_stages": gen_stages,
             "api_latency": api_latency,
+            "api_calls": api_calls,
+            "orchestration": orchestration,
             "frontend_perf": fe_perf,
+            "frontend_access": frontend_access,
+            "frontend_clicks": frontend_clicks,
             "generation_rate": {"total": total, "done": done, "rate": gen_rate},
             "error_stats": error_stats,
             "model_stats": model_stats,

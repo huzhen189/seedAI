@@ -46,12 +46,13 @@ function goSettings() {
   <header class="topnav">
     <div class="brand">🌱 SeedAI</div>
     <nav class="nav">
-      <RouterLink to="/" class="navlink">对话</RouterLink>
-      <RouterLink to="/projects" class="navlink">项目</RouterLink>
+      <RouterLink to="/" class="navlink" data-track="导航:对话">对话</RouterLink>
+      <RouterLink to="/projects" class="navlink" data-track="导航:项目">项目</RouterLink>
       <RouterLink
         v-if="user && (user.role === 'admin' || user.role === 'super_admin')"
         to="/admin"
         class="navlink"
+        data-track="导航:管理"
         >管理</RouterLink
       >
     </nav>

@@ -4,6 +4,7 @@ import ProjectsView from '../views/ProjectsView.vue'
 import SettingsView from '../views/SettingsView.vue'
 import AdminView from '../views/AdminView.vue'
 import { useAuthStore } from '../stores/auth'
+import { trackPageView } from '../composables/track'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -30,6 +31,11 @@ router.beforeEach((to, _from, next) => {
   } else {
     next()
   }
+})
+
+// 路由切换后上报页面访问(STAT-3: 前端访问统计)
+router.afterEach((to) => {
+  trackPageView(to.path)
 })
 
 export default router

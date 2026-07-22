@@ -75,6 +75,41 @@ async def report_frontend_perf(request: Request):
         return {"ack": False}
 
 
+@router.post("/analytics/track")
+async def track_frontend(request: Request):
+    """客户端上报前端访问 / 点击事件(STAT-3,不计鉴权,轻量上报)。
+
+    支持两种上报体:
+      - {"type": "page_view", "route": "/chat"}
+      - {"type": "click", "label": "发送"}
+    兼容 sendBeacon(application/json 或 text/plain)。"""
+    from .analytics import record_frontend_access, record_frontend_click
+
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        try:
+            import json as _json
+
+            raw = (await request.body()).decode("utf-8", "ignore")
+            if raw:
+                body = _json.loads(raw)
+        except Exception:
+            return {"ack": False}
+    try:
+        t = body.get("type")
+        if t == "page_view":
+            await record_frontend_access(body.get("route") or "unknown")
+        elif t == "click":
+            label = (body.get("label") or "").strip()
+            if label:
+                await record_frontend_click(label[:60])
+        return {"ack": True}
+    except Exception:
+        return {"ack": False}
+
+
 # ---------- 指标 SSE ----------
 @router.get("/metrics")
 async def metrics_stream(_=Depends(require_admin)):

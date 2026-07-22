@@ -11,7 +11,7 @@ from .config import settings
 from .db import init_db
 from .logging_config import setup_logging
 from .metrics import record_request
-from .analytics import record_api_latency
+from .analytics import record_api_latency, record_api_call
 from .projects import router as projects_router
 from .proxy import router as proxy_router
 from .reconciler import start_reconciler
@@ -39,6 +39,7 @@ async def metrics_middleware(request: Request, call_next):
     elapsed = (time.time() - start) * 1000
     await record_request(request.url.path, response.status_code, elapsed)
     await record_api_latency(request.url.path, elapsed)
+    await record_api_call(request.url.path, response.status_code)
     return response
 
 

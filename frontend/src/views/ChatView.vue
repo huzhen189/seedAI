@@ -17,12 +17,14 @@ import ThoughtTrail from '../components/ThoughtTrail.vue'
 import RightPanel from '../components/RightPanel.vue'
 import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
+import SubTaskTrack from '../components/SubTaskTrack.vue'
+import MergedResult from '../components/MergedResult.vue'
 import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
 import { listArtifacts, renameProject, patch } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { Artifact, Message, ModelInfo, OptionEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent, QcResult, RatingDims } from '../types'
+import type { Artifact, Message, ModelInfo, OptionEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent, QcResult, RatingDims, SubTaskView, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, FailedSubTask } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
   enter_router: '意图路由 — 识别你的需求类型，匹配最合适的处理流程',
@@ -236,6 +238,26 @@ function resendWithSkill(skillName: string) {
   })
 }
 
+// 多意图中风险子任务确认后重发:把该 id 加入已确认集合,以同一原始请求重跑(让 MEDIUM 子任务放行)。
+function confirmSubTask(subTaskId: string) {
+  if (!confirmedSubtaskIds.value.includes(subTaskId)) confirmedSubtaskIds.value.push(subTaskId)
+  // 清空上一轮 assistant 占位内容, 避免合并结果重复累积
+  const idx = findAssistantIdx()
+  if (idx >= 0) convStore.messages[idx].content = ''
+  resetGenState()
+  traceId.value = genTraceId()
+  const cid = convStore.currentConvId!
+  setActiveGen(cid, traceId.value)
+  generating.value = true
+  esRef.value = startChat({
+    model: model.value,
+    traceId: traceId.value,
+    conversationId: cid,
+    confirmedSubtasks: confirmedSubtaskIds.value,
+    cb: makeCallbacks(idx),
+  })
+}
+
 // ---- 上翻加载更早会话 ----
 const convRef = ref<HTMLElement | null>(null)
 const sentinel = ref<HTMLElement | null>(null)
@@ -338,6 +360,14 @@ function openArtifact(name: string, kind: 'requirement' | 'file') {
 const pendingSend = ref(false)
 const pendingRetry = ref<{ suggested: string[]; message: string } | null>(null)
 const lastSentText = ref('')
+
+// ---- 多意图编排(P3): 泳道进度 + 合并结果 ----
+const isMultiIntent = ref(false)
+const orchStrategy = ref<'parallel' | 'mixed'>('parallel')
+const subTasks = ref<SubTaskView[]>([])
+const mergeResult = ref<{ success_count: number; fail_count: number; failed_tasks: FailedSubTask[] } | null>(null)
+// 已确认放行的子任务 id(中风险确认后重发时带上, 跨重发保留)
+const confirmedSubtaskIds = ref<string[]>([])
 
 const auth = useAuth()
 const projectStore = useProjectStore()
@@ -476,6 +506,10 @@ function resetGenState() {
   pendingRetry.value = null
   awaitingConfirm.value = false
   awaitPlan.value = null
+  // 多意图编排状态(新请求时重置;confirmedSubtaskIds 在 doSend 单独清)
+  isMultiIntent.value = false
+  subTasks.value = []
+  mergeResult.value = null
 }
 
 function upsertStep(stage: string, status: ThoughtStep['status'], customLabel?: string) {
@@ -532,7 +566,24 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     onPlan: (d) => {
       planNodes.value.push({ title: d.title, goal: d.goal, steps: d.steps })
     },
-    onToken: (t) => {
+    onToken: (t, subTaskId) => {
+      // 多意图: 合并结果(__merge__)进入主气泡; 子任务自身 token 进入对应泳道流式预览
+      if (subTaskId === '__merge__') {
+        const m = convStore.messages[assistantIdx]
+        if (m) {
+          m.content += t
+          if (m.content.length % 40 === 0) saveDraft(convStore.currentConvId!)
+        }
+        return
+      }
+      if (subTaskId) {
+        const st = subTasks.value.find((s) => s.id === subTaskId)
+        if (st) {
+          st.tokens += t
+          return
+        }
+      }
+      // 单意图遗留路径(无 sub_task_id): 同原行为
       // 仅 builder_agent 的 token 才是生成的 HTML 代码
       if (currentIntent.value.level1 === 'build') generatedHtml.value += t
       const m = convStore.messages[assistantIdx]
@@ -652,6 +703,50 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       // 后置 QC 三裁判结果:按当前 trace_id 存入 qcMap, 气泡徽标读取
       if (traceId.value) qcMap[traceId.value] = data
     },
+    // ---- 多意图编排事件(P3) ----
+    onOrchestration: (d: OrchestrationEvent) => {
+      isMultiIntent.value = true
+      orchStrategy.value = d.strategy
+      subTasks.value = d.tasks.map((t) => ({ ...t, tokens: '', artifacts: [] }))
+      mergeResult.value = null
+    },
+    onSubtaskStart: (d: SubTaskStartEvent) => {
+      const st = subTasks.value.find((s) => s.id === d.sub_task_id)
+      if (st) {
+        st.status = 'running'
+        st.layer = d.layer
+        st.goal = d.goal
+        st.skill = d.skill
+        st.risk = d.risk
+      }
+    },
+    onSubtaskDone: (d: SubTaskDoneEvent) => {
+      const st = subTasks.value.find((s) => s.id === d.sub_task_id)
+      if (st) {
+        st.status = 'done'
+        st.result_summary = d.result_summary
+        st.artifacts = d.artifacts || []
+      }
+    },
+    onSubtaskFail: (d: SubTaskFailEvent) => {
+      const st = subTasks.value.find((s) => s.id === d.sub_task_id)
+      if (st) {
+        // 状态按原因细分(兜底 5: 风险分级)
+        if (d.reason.includes('高风险')) st.status = 'blocked'
+        else if (d.reason.includes('中风险')) st.status = 'skipped'
+        else st.status = 'failed'
+        st.fail_reason = d.reason
+        st.recoverable = d.recoverable
+      }
+    },
+    onMerge: (d: MergeEvent) => {
+      // 合并正文已在 __merge__ token 流中累积到主气泡; 此处仅记录部分失败清单
+      mergeResult.value = {
+        success_count: d.success_count,
+        fail_count: d.fail_count,
+        failed_tasks: d.failed_tasks,
+      }
+    },
   }
 }
 
@@ -734,6 +829,9 @@ async function doSend(text: string) {
   } else {
     console.log('[WebLLM] 本地分类不可用 → 走服务端')
   }
+
+  // 多意图: 全新用户请求, 清空之前累计的已确认子任务
+  confirmedSubtaskIds.value = []
 
   // 乐观更新:先把用户消息 + 一个空 assistant 占位塞进消息列表,
   // 后续 token 事件直接累加到 assistant 占位上,实现"打字机"效果。
@@ -940,7 +1038,7 @@ watch(pendingRetry, (r) => {
           @blur="saveProjectName"
           @keyup.escape="editingProject = false"
         />
-        <button class="proj-edit" title="修改项目名" @click="startEditProject">✏️</button>
+        <button class="proj-edit" title="修改项目名" data-track="重命名项目" @click="startEditProject">✏️</button>
         <span class="proj-date">{{ currentProjectDate }}</span>
       </div>
 
@@ -983,14 +1081,31 @@ watch(pendingRetry, (r) => {
         </template>
       </div>
 
-      <div v-if="generating && (thoughtSteps.length || planNodes.length)" class="trail-wrap">
+      <div
+        v-if="(generating && !isMultiIntent && (thoughtSteps.length || planNodes.length)) || (isMultiIntent && subTasks.length)"
+        class="trail-wrap"
+      >
         <ThoughtTrail
+          v-if="!isMultiIntent"
           :steps="thoughtSteps"
           :plans="planNodes"
           :degraded="degraded"
           :current="currentStage"
           :intent="currentIntent"
         />
+        <template v-else>
+          <SubTaskTrack
+            :subtasks="subTasks"
+            :strategy="orchStrategy"
+            @confirm="confirmSubTask"
+          />
+          <MergedResult
+            v-if="mergeResult"
+            :success-count="mergeResult.success_count"
+            :fail-count="mergeResult.fail_count"
+            :failed-tasks="mergeResult.failed_tasks"
+          />
+        </template>
       </div>
 
       <div class="footer">
@@ -1070,21 +1185,21 @@ watch(pendingRetry, (r) => {
                 :class="{ on: selectedOption === c.id }"
               >
                 <input
+                  v-model="selectedOption"
                   type="radio"
                   :value="c.id"
-                  v-model="selectedOption"
                   class="om-radio"
                 />
                 <div class="om-info">
                   <div class="om-name">{{ c.id }}. {{ c.title }}</div>
-                  <div class="om-desc" v-if="c.desc">{{ c.desc }}</div>
-                  <div class="om-pros" v-if="c.pros">✅ {{ c.pros }}</div>
-                  <div class="om-cons" v-if="c.cons">⚠️ {{ c.cons }}</div>
+                  <div v-if="c.desc" class="om-desc">{{ c.desc }}</div>
+                  <div v-if="c.pros" class="om-pros">✅ {{ c.pros }}</div>
+                  <div v-if="c.cons" class="om-cons">⚠️ {{ c.cons }}</div>
                 </div>
               </label>
             </div>
             <div class="om-actions">
-              <button class="om-btn om-confirm" @click="onOptionsConfirm" :disabled="!selectedOption">确认选择</button>
+              <button class="om-btn om-confirm" :disabled="!selectedOption" @click="onOptionsConfirm">确认选择</button>
               <button class="om-btn om-cancel" @click="cancelOptions">取消</button>
             </div>
           </div>
@@ -1111,6 +1226,7 @@ watch(pendingRetry, (r) => {
             v-if="previewUrl"
             class="copy-link"
             title="复制预览链接"
+            data-track="复制预览链接"
             @click="copyPreviewLink"
           >
             🔗 复制预览链接

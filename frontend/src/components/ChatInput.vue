@@ -38,10 +38,10 @@ function submit() {
         placeholder="描述你想生成的网站，AI 会先规划再产出…"
         @keydown.enter.exact.prevent="submit"
       ></textarea>
-      <button v-if="!generating" class="send" :disabled="!value.trim()" @click="submit">
+      <button v-if="!generating" class="send" data-track="发送" :disabled="!value.trim()" @click="submit">
         发送 ⏎
       </button>
-      <button v-else class="stop" @click="emit('stop')">停止</button>
+      <button v-else class="stop" data-track="停止" @click="emit('stop')">停止</button>
     </div>
   </div>
 </template>

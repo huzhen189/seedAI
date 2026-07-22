@@ -1,4 +1,4 @@
-import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent, QcResult, RatingDims } from '../types'
+import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent, QcResult, RatingDims, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent } from '../types'
 import { notifyAuthRequired } from '../stores/auth'
 import { post, publicGet } from './client'
 
@@ -6,7 +6,7 @@ export interface ChatCallbacks {
   onNode?: (data: NodeEvent) => void
   onThink?: (data: ThinkEvent) => void
   onPlan?: (data: PlanEvent) => void
-  onToken?: (text: string) => void
+  onToken?: (text: string, subTaskId?: string) => void
   onPreview?: (data: NodeEvent) => void
   onDegraded?: (data: unknown) => void
   onDone?: () => void
@@ -27,6 +27,16 @@ export interface ChatCallbacks {
   onBlock?: (data: BlockEvent) => void
   /** 二次确认(安全 high, 等待用户确认后带 confirmed 重发) */
   onConfirm?: (data: ConfirmEvent) => void
+  /** 多意图编排总览(orchestration):子任务清单 + 执行策略 */
+  onOrchestration?: (data: OrchestrationEvent) => void
+  /** 子任务开始进入执行层(subtask_start) */
+  onSubtaskStart?: (data: SubTaskStartEvent) => void
+  /** 子任务完成(subtask_done) */
+  onSubtaskDone?: (data: SubTaskDoneEvent) => void
+  /** 子任务失败 / 拦截 / 跳过(subtask_fail) */
+  onSubtaskFail?: (data: SubTaskFailEvent) => void
+  /** 结果合并完成(merge):最终连贯回复 + 部分失败清单 */
+  onMerge?: (data: MergeEvent) => void
   /** 后置 QC 三裁判结果(v0.8.5 M1):整体分 + 6 维聚合, 落入气泡徽标 */
   onQc?: (data: QcResult) => void
 }
@@ -46,6 +56,8 @@ export interface StartChatOptions {
   confirmed?: boolean
   /** 多选项选中后重发: 指定 Worker 直接执行的 skill(管道级 options 选择) */
   skill?: string
+  /** 多意图中风险已确认的子任务 id 列表(重发时带上, 让 MEDIUM 风险子任务放行) */
+  confirmedSubtasks?: string[]
 }
 
 /** 打开与业务服务的 SSE 对话流(需登录 Cookie + conversation_id)。返回 EventSource 以便取消。 */
@@ -61,6 +73,7 @@ export function startChat(opts: StartChatOptions): EventSource {
   if (opts.correct) params.set('correct', 'true')
   if (opts.confirmed) params.set('confirmed', '1')
   if (opts.skill) params.set('skill', opts.skill)
+  if (opts.confirmedSubtasks?.length) params.set('confirmed_subtasks', opts.confirmedSubtasks.join(','))
 
   const url = `/api/chat?${params.toString()}`
   console.log('[SSE] 连接 %s', url)
@@ -82,12 +95,20 @@ export function startChat(opts: StartChatOptions): EventSource {
   es.addEventListener('unsupported', (e) => opts.cb.onUnsupported?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('block', (e) => opts.cb.onBlock?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('confirm', (e) => opts.cb.onConfirm?.(safeParse((e as MessageEvent).data)))
+  // 多意图编排事件(sub_task_id 已在 proxy 透传, 前端按事件渲染泳道)
+  es.addEventListener('orchestration', (e) => opts.cb.onOrchestration?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('subtask_start', (e) => opts.cb.onSubtaskStart?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('subtask_done', (e) => opts.cb.onSubtaskDone?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('subtask_fail', (e) => opts.cb.onSubtaskFail?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('merge', (e) => opts.cb.onMerge?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('paused', (e) => opts.cb.onPaused?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('requirement_doc', (e) => opts.cb.onRequirement?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('token', (e) => {
     const d = safeParse((e as MessageEvent).data)
     const text = typeof d.data === 'string' ? d.data : (e as MessageEvent).data
-    opts.cb.onToken?.(text)
+    // 多意图: token 带 sub_task_id(单意图为 undefined;合并结果 = "__merge__")
+    const subTaskId = typeof d.sub_task_id === 'string' ? d.sub_task_id : undefined
+    opts.cb.onToken?.(text, subTaskId)
   })
   es.addEventListener('preview', (e) => opts.cb.onPreview?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('degraded', (e) => opts.cb.onDegraded?.(safeParse((e as MessageEvent).data)))

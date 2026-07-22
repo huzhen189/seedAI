@@ -259,12 +259,38 @@ async function viewTrace(traceId: string) {
 interface LatencyBucket { p50: number; p90: number; p99: number; avg: number; samples: number }
 interface IntentStat { ok: number; total: number; rate: number }
 interface SkillStat { ok: number; fail: number; abort: number; total: number; success_rate: number }
+interface ApiCallStat {
+  total: number
+  ok: number
+  fail: number
+  success_rate: number
+  latency: LatencyBucket
+}
+interface OrchestrationStat {
+  total: number
+  available: boolean
+  strategy_dist?: Record<string, number>
+  split_count?: LatencyBucket
+  success_rate?: LatencyBucket
+  duration_ms?: LatencyBucket
+  sub_tasks?: {
+    total: number
+    status_dist: Record<string, number>
+    risk_dist: Record<string, number>
+    per_skill: Record<string, { total: number; done: number; failed: number; blocked: number; skipped: number; success_rate: number }>
+    duration_ms: LatencyBucket
+  }
+}
 interface AnalyticsSnapshot {
   intent_stats: Record<string, IntentStat>
   skill_outcomes: Record<string, SkillStat>
   gen_stages: Record<string, LatencyBucket>
   api_latency: Record<string, LatencyBucket>
+  api_calls: Record<string, ApiCallStat>
+  orchestration: OrchestrationStat
   frontend_perf: Record<string, LatencyBucket>
+  frontend_access: Record<string, number>
+  frontend_clicks: Record<string, number>
   generation_rate: { total: number; done: number; rate: number }
   error_stats?: Record<string, number>
   model_stats?: Record<string, { total: number; ok: number; fail: number; rate: number }>
@@ -314,6 +340,16 @@ function fmtMs(v: number): string { return Math.round(v) + 'ms' }
 
 function statusLabel(s: string) {
   const m: Record<string, string> = { running: '生成中', done: '完成', error: '错误', aborted: '已取消' }
+  return m[s] || s
+}
+
+function strategyLabel(s: string) {
+  const m: Record<string, string> = { parallel: '全并行', mixed: '分层串行' }
+  return m[s] || s
+}
+
+function riskLabel(s: string) {
+  const m: Record<string, string> = { high: '高', medium: '中', low: '低' }
   return m[s] || s
 }
 
@@ -652,6 +688,59 @@ onUnmounted(() => {
           </table>
           <p v-else class="muted">暂无数据</p>
         </div>
+        <!-- 业务接口统计(STAT-2) -->
+        <div class="block">
+          <h4>业务接口调用</h4>
+          <table v-if="al.api_calls && Object.keys(al.api_calls).length" class="atable">
+            <thead><tr><th>端点</th><th>调用</th><th>成功</th><th>失败</th><th>成功率</th><th>P50</th><th>P90</th><th>P99</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.api_calls" :key="k">
+                <td>{{ k }}</td><td>{{ v.total }}</td><td>{{ v.ok }}</td><td>{{ v.fail }}</td>
+                <td>{{ (v.success_rate * 100).toFixed(0) }}%</td>
+                <td>{{ fmtMs(v.latency.p50) }}</td><td>{{ fmtMs(v.latency.p90) }}</td><td>{{ fmtMs(v.latency.p99) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="muted">暂无数据</p>
+        </div>
+        <!-- AI 核心编排统计(STAT-1, 由 ai_service 写入同 Redis) -->
+        <div class="block" v-if="al.orchestration && al.orchestration.total">
+          <h4>AI 核心 · 多意图编排</h4>
+          <div class="kv">
+            <span>编排总次数</span><b>{{ al.orchestration.total }}</b>
+            <span>平均子任务数</span><b>{{ al.orchestration.split_count ? al.orchestration.split_count.avg.toFixed(1) : '-' }}</b>
+            <span>平均成功率</span><b>{{ al.orchestration.success_rate ? (al.orchestration.success_rate.avg * 100).toFixed(0) + '%' : '-' }}</b>
+            <span>平均耗时</span><b>{{ al.orchestration.duration_ms ? fmtMs(al.orchestration.duration_ms.avg) : '-' }}</b>
+          </div>
+          <div v-if="al.orchestration.strategy_dist" class="muted" style="margin:6px 0;">
+            策略分布:
+            <span v-for="(v, k) in al.orchestration.strategy_dist" :key="k" class="pill">{{ strategyLabel(k) }} {{ v }}</span>
+          </div>
+          <div v-if="al.orchestration.sub_tasks && al.orchestration.sub_tasks.total">
+            <h5>子任务状态</h5>
+            <div class="muted">
+              <span v-for="(v, k) in al.orchestration.sub_tasks.status_dist" :key="k" class="pill">{{ statusLabel(k) }} {{ v }}</span>
+            </div>
+            <h5>风险分布</h5>
+            <div class="muted">
+              <span v-for="(v, k) in al.orchestration.sub_tasks.risk_dist" :key="k" class="pill">{{ riskLabel(k) }} {{ v }}</span>
+            </div>
+            <h5>各 Skill 产出</h5>
+            <table class="atable">
+              <thead><tr><th>Skill</th><th>总数</th><th>完成</th><th>失败</th><th>拦截</th><th>跳过</th><th>成功率</th></tr></thead>
+              <tbody>
+                <tr v-for="(v, k) in al.orchestration.sub_tasks.per_skill" :key="k">
+                  <td>{{ k }}</td><td>{{ v.total }}</td><td>{{ v.done }}</td><td>{{ v.failed }}</td><td>{{ v.blocked }}</td><td>{{ v.skipped }}</td>
+                  <td>{{ (v.success_rate * 100).toFixed(0) }}%</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div v-else-if="al.orchestration && !al.orchestration.total" class="block">
+          <h4>AI 核心 · 多意图编排</h4>
+          <p class="muted">暂无多意图编排记录</p>
+        </div>
         <!-- 前端性能 -->
         <div class="block">
           <h4>前端加载性能</h4>
@@ -662,6 +751,32 @@ onUnmounted(() => {
                 <td>{{ PERF_LABELS[k] || k }}</td>
                 <td>{{ fmtMs(v.p50) }}</td><td>{{ fmtMs(v.p90) }}</td><td>{{ fmtMs(v.p99) }}</td>
                 <td>{{ fmtMs(v.avg) }}</td><td>{{ v.samples }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="muted">暂无数据</p>
+        </div>
+        <!-- 前端访问统计(STAT-3) -->
+        <div class="block">
+          <h4>前端页面访问</h4>
+          <table v-if="al.frontend_access && Object.keys(al.frontend_access).length" class="atable">
+            <thead><tr><th>路由</th><th>访问次数</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.frontend_access" :key="k">
+                <td>{{ k }}</td><td>{{ v }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="muted">暂无数据</p>
+        </div>
+        <!-- 前端点击统计(STAT-3) -->
+        <div class="block">
+          <h4>前端点击热点 (Top 20)</h4>
+          <table v-if="al.frontend_clicks && Object.keys(al.frontend_clicks).length" class="atable">
+            <thead><tr><th>元素</th><th>点击次数</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.frontend_clicks" :key="k">
+                <td>{{ k }}</td><td>{{ v }}</td>
               </tr>
             </tbody>
           </table>
@@ -899,6 +1014,36 @@ onUnmounted(() => {
   margin: 0 0 10px;
   font-size: 14px;
   color: #1e293b;
+}
+.block h4 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  color: var(--brand);
+}
+.block h5 {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 700;
+}
+.kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  font-size: 13px;
+  align-items: center;
+}
+.kv span { color: var(--muted); }
+.kv b { color: #1e293b; font-weight: 700; }
+.pill {
+  display: inline-block;
+  margin: 2px 6px 2px 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 600;
 }
 .muted {
   color: var(--muted);

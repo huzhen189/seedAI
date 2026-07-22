@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from collections.abc import AsyncGenerator
 from contextlib import suppress
 from typing import Any, Dict, Optional
@@ -467,6 +468,12 @@ async def worker_loop(concurrency: int = 1):
                         orch = Orchestrator()
                         logger.info("[Worker] [5/6] 多意图编排 sub_tasks=%d confirmed=%s",
                                     len(sub_tasks), confirmed_subtasks)
+                        # 编排统计埋点(补充 6: 多意图必接统计)
+                        from ..analytics import record_orchestration, record_sub_task
+                        t0_split = time.time()
+                        sub_start: dict[str, float] = {}
+                        sub_meta = {s.id: (s.selected_skill, s.risk_level) for s in sub_tasks}
+                        merge_data: dict = {}
                         event_cnt = 0
                         qc_user_text = user_text
                         qc_assistant_buf = []
@@ -487,8 +494,43 @@ async def worker_loop(concurrency: int = 1):
                                 data = event.get("data", "")
                                 if isinstance(data, str):
                                     qc_assistant_buf.append(data)
+                            # 子任务级统计: 记录开始/完成耗时与状态
+                            ev_name = event.get("event")
+                            if ev_name == "subtask_start":
+                                d = event.get("data") or {}
+                                sid = d.get("sub_task_id")
+                                if sid:
+                                    sub_start[sid] = time.time()
+                            elif ev_name == "subtask_done":
+                                d = event.get("data") or {}
+                                sid = d.get("sub_task_id")
+                                skill, risk = sub_meta.get(sid, ("unknown", "low"))
+                                dur = (time.time() - sub_start.get(sid, t0_split)) * 1000
+                                await record_sub_task(skill, "done", risk, dur)
+                            elif ev_name == "subtask_fail":
+                                d = event.get("data") or {}
+                                sid = d.get("sub_task_id")
+                                skill, risk = sub_meta.get(sid, ("unknown", "low"))
+                                dur = (time.time() - sub_start.get(sid, t0_split)) * 1000
+                                reason = d.get("reason", "")
+                                st = "blocked" if "高风险" in reason else ("skipped" if "中风险" in reason else "failed")
+                                await record_sub_task(skill, st, risk, dur)
+                            elif ev_name == "merge":
+                                merge_data = event.get("data") or {}
                             await q.publish(trace_id, event)
                             event_cnt += 1
+                        # 编排整体统计(成功率 + 总耗时 + 策略)
+                        try:
+                            sc = int(merge_data.get("success_count", 0))
+                            fc = int(merge_data.get("fail_count", 0))
+                            rate = sc / max(sc + fc, 1)
+                            dur_ms = (time.time() - t0_split) * 1000
+                            has_dep = any(s.dependencies for s in sub_tasks)
+                            await record_orchestration(
+                                len(sub_tasks), "mixed" if has_dep else "parallel", dur_ms, rate
+                            )
+                        except Exception as oe:  # noqa: BLE001
+                            logger.warning("[Worker] 编排统计失败(跳过): %s", oe)
                         # 后置 QC(合并文本)
                         qc_assistant_text = "".join(qc_assistant_buf)
                         if qc_assistant_text.strip() and done_event is not None:
