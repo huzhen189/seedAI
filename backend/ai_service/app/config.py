@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     chroma_collection_components: str = "components"
     chroma_collection_memory: str = "memory"
     chroma_collection_cache: str = "cache_gen"
+    # v0.9.0 六集合扩展(P0)
+    chroma_collection_user_preferences: str = "user_preferences"
+    chroma_collection_project_memory: str = "project_memory"
+    chroma_collection_project_code: str = "project_code"
+    chroma_collection_error_patterns: str = "error_patterns"
     rag_top_k: int = 5
 
     # 对象存储(COS 预览投递,§10 / §5.9 tool:cos_upload)
