@@ -42,8 +42,11 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
                            context_hint: str = "",
                            project_status: str = "draft",
                            project_constraints: list[str] | None = None,
-                           checkpoint_info: dict | None = None) -> dict:
-    """v2 意图管道: 5模块并行 → PipelineResult → 兼容旧 dict。"""
+                           checkpoint_info: dict | None = None,
+                           user_id: int | None = None,
+                           project_id: int | None = None) -> dict:
+    """v2 意图管道: 5模块并行 → PipelineResult → 兼容旧 dict。
+    v0.9.0: 新增 user_id/project_id 用于 Chroma 上下文增强。"""
     t0 = time.time()
     result = await classify_v2(
         messages, model_id,
@@ -52,6 +55,8 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
         project_status=project_status,
         project_constraints=project_constraints,
         checkpoint_info=checkpoint_info,
+        user_id=user_id,
+        project_id=project_id,
     )
     l1 = result.intent["level1"]
     l2 = result.intent["level2"]

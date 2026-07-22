@@ -46,6 +46,8 @@ async def classify_v2(
     project_status: str = "draft",
     project_constraints: list[str] | None = None,
     checkpoint_info: dict | None = None,
+    user_id: int | None = None,          # v0.9.0: Chroma 用户偏好
+    project_id: int | None = None,       # v0.9.0: Chroma 项目记忆
 ) -> PipelineResult:
     """v2 意图管道: 语义异步发射 + 4 同步模块重叠执行 + 汇总器决策。
 
@@ -91,7 +93,9 @@ async def classify_v2(
 
     try:
         rule_result = run_rules(messages)
-        context_result = run_context(messages, conversation_id=conversation_id, frontend_hint=context_hint)
+        context_result = run_context(messages, conversation_id=conversation_id,
+                                    frontend_hint=context_hint,
+                                    user_id=user_id, project_id=project_id)
         safety_result = run_safety(messages, project_constraints=project_constraints)
         logger.info("[管道] [3/5] 规则完成 rule=%s/%s ctx=%s safety=%s",
                    rule_result.pattern, rule_result.confidence,

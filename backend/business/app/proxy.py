@@ -333,22 +333,65 @@ async def list_agents():
     return data
 
 
-# ---- 对话摘要(Redis 滑动窗口, 每 10 条消息压缩一次) ----
+# ---- 对话摘要(Redis 滑动窗口, v0.9.0: TTL 1d + 过期 MySQL 回退) ----
 async def get_summary(conversation_id: int) -> str:
-    """读取对话摘要(500字滑动窗口)"""
+    """读取对话摘要; Redis 过期则从 MySQL 重压(v0.9.0 新增)。"""
     try:
         r = await get_redis()
         val = await r.get(f"summary:{conversation_id}")
-        return val.decode() if isinstance(val, bytes) else (val or "")
+        if val:
+            return val.decode() if isinstance(val, bytes) else str(val)
     except Exception:
+        pass
+    # --- Redis MISS: 从 MySQL 回退重压 ---
+    try:
+        from .db import SessionLocal
+        from sqlalchemy import select, text as sa_text
+        async with SessionLocal() as db:
+            rows = (await db.execute(
+                sa_text(
+                    "SELECT role, content FROM messages WHERE conversation_id=:cid "
+                    "ORDER BY id DESC LIMIT 30"
+                ),
+                {"cid": conversation_id},
+            )).fetchall()
+            if not rows:
+                return ""
+            # 拼接最近消息(最多取最近10轮user+asst)
+            parts = []
+            count = 0
+            for role, content in reversed(rows):
+                if count >= 20:
+                    break
+                parts.append(f"[{role}]: {content[:300]}")
+                count += 1
+            raw = "\n".join(parts)
+            # 调 LLM 重压为 ≤200 字摘要
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    "https://api.deepseek.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
+                    json={"model": "deepseek-chat",
+                          "messages": [{"role":"user","content":
+                              f"把对话压缩成 ≤200字 摘要(主题/决策/进度)。\n{raw}"}],
+                          "max_tokens": 200, "temperature": 0.3},
+                )
+                new_summary = resp.json()["choices"][0]["message"]["content"].strip()
+            # 写回 Redis
+            r2 = await get_redis()
+            await r2.setex(f"summary:{conversation_id}", 86400, new_summary[:1000])
+            logger.info("[chat] 摘要过期回退重压 conv=%s len=%d", conversation_id, len(new_summary))
+            return new_summary
+    except Exception as e:
+        logger.debug("[chat] 摘要过期回退失败: %s", e)
         return ""
 
 
 async def save_summary(conversation_id: int, text: str) -> None:
-    """写入对话摘要, 7天过期"""
+    """写入对话摘要, 1天过期(v0.9.0: 从7天缩短)"""
     try:
         r = await get_redis()
-        await r.setex(f"summary:{conversation_id}", 86400 * 7, text[:1000])
+        await r.setex(f"summary:{conversation_id}", 86400, text[:1000])
     except Exception:
         pass
 
@@ -359,7 +402,7 @@ async def maybe_compress_summary(conversation_id: int, model: str, latest_user: 
         r = await get_redis()
         # Redis 计数器: 每轮递增
         cnt = await r.incr(f"summary_cnt:{conversation_id}")
-        await r.expire(f"summary_cnt:{conversation_id}", 86400 * 7)
+        await r.expire(f"summary_cnt:{conversation_id}", 86400)
         if cnt % 6 != 1:  # 每6条才压缩一次(第1/7/13...条)
             return
         old_summary = await get_summary(conversation_id)
@@ -543,7 +586,8 @@ async def chat(
     await create_trace(db, user.id, conversation_id, tid, model)
     logger.info("[chat] [4/8] 计量已记录 + trace=%s 已创建", tid)
 
-    payload = {"model_id": model, "messages": messages, "trace_id": tid, "conversation_id": conversation_id}
+    payload = {"model_id": model, "messages": messages, "trace_id": tid,
+               "conversation_id": conversation_id, "user_id": user.id, "project_id": None}
     # 前端二次确认回传(安全 confirm 通过后带 confirmed=1 重发, Worker 据此跳过拦截)
     confirmed = request.query_params.get("confirmed")
     if confirmed in ("1", "true", "True"):

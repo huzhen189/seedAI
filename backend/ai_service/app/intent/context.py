@@ -18,11 +18,14 @@ class ContextResult:
     hint: str = ""
     correction: dict | None = None  # {level1, level2, reason} 可选的意图修正
     source: str = "none"            # "webllm"|"chroma"|"fallback"|"none"
+    chroma_context: str = ""        # v0.9.0: 项目记忆 + 用户偏好(额外上下文)
 
 
 def run_context(messages: list[dict], conversation_id: int | None = None,
-                frontend_hint: str = "") -> ContextResult:
-    """上下文检测入口。"""
+                frontend_hint: str = "",
+                user_id: int | None = None,
+                project_id: int | None = None) -> ContextResult:
+    """上下文检测入口。v0.9.0: 新增 Chroma 项目记忆/用户偏好来源。"""
     last = ""
     for m in reversed(messages):
         if m.get("role") == "user":
@@ -32,10 +35,31 @@ def run_context(messages: list[dict], conversation_id: int | None = None,
         logger.info("[上下文] 输入为空,跳过")
         return ContextResult()
 
+    # --- Chroma 项目/用户偏好(v0.9.0, 最先跑, 非阻塞) ---
+    chroma_ctx = ""
+    if user_id is not None or project_id is not None:
+        try:
+            from ..knowledge.chroma import retrieve_user_preferences, retrieve_project_memory
+            parts = []
+            if user_id is not None:
+                prefs = retrieve_user_preferences(user_id, last)
+                if prefs:
+                    parts.append("用户偏好: " + "; ".join(p["content"][:100] for p in prefs[:3]))
+            if project_id is not None:
+                mems = retrieve_project_memory(project_id, last)
+                if mems:
+                    parts.append("项目记忆: " + "; ".join(m["content"][:100] for m in mems[:3]))
+            if parts:
+                chroma_ctx = " | ".join(parts)
+                logger.info("[上下文] 来源=Chroma项目/用户 | %s", chroma_ctx[:150])
+        except Exception as e:
+            logger.debug("[上下文] Chroma项目/用户检索异常: %s", e)
+
     # 1. 前端 WebLLM hint
     if frontend_hint:
         logger.info("[上下文] 来源=前端WebLLM | 内容=%.60s", frontend_hint)
-        return ContextResult(has_context=True, hint=frontend_hint, source="webllm")
+        return ContextResult(has_context=True, hint=frontend_hint, source="webllm",
+                           chroma_context=chroma_ctx)
 
     # 2. Chroma 向量检索
     if conversation_id:
@@ -51,7 +75,9 @@ def run_context(messages: list[dict], conversation_id: int | None = None,
                     logger.info("[上下文] 来源=Chroma向量 | 相关消息=%d | 摘要=%.60s",
                                len(relevant_ids), hint)
                     correction = _infer_correction(hint)
-                    return ContextResult(has_context=True, hint=hint, correction=correction, source="chroma")
+                    return ContextResult(has_context=True, hint=hint,
+                                       correction=correction, source="chroma",
+                                       chroma_context=chroma_ctx)
             else:
                 logger.info("[上下文] Chroma未找到相关消息 conv=%s", conversation_id)
         except Exception as e:
@@ -65,10 +91,12 @@ def run_context(messages: list[dict], conversation_id: int | None = None,
             if hint:
                 logger.info("[上下文] 来源=关键词兜底 | 摘要=%.60s", hint)
                 correction = _infer_correction(hint)
-                return ContextResult(has_context=True, hint=hint, correction=correction, source="fallback")
+                return ContextResult(has_context=True, hint=hint,
+                                   correction=correction, source="fallback",
+                                   chroma_context=chroma_ctx)
             break
     logger.info("[上下文] 所有来源均未检测到上下文")
-    return ContextResult()
+    return ContextResult(chroma_context=chroma_ctx)
 
 
 # 话题 → 关键词(打分制聚合, 零 LLM)。覆盖全部行业 + 主要意图。

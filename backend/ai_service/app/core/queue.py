@@ -375,6 +375,8 @@ async def worker_loop(concurrency: int = 1):
                 # ── [3/6] 上下文检测 ──
                 ctx_hint = job.get("context_hint", "")
                 summary = job.get("conversation_summary", "")
+                user_id = job.get("user_id")                    # v0.9.0
+                project_id = job.get("project_id")              # v0.9.0
                 doc = job.get("requirement_doc")
                 proj_status = job.get("project_status", "draft")
                 # Tier 1/2: 项目系统 prompt + 结构化硬约束(由 business 侧解析后下发)
@@ -395,7 +397,8 @@ async def worker_loop(concurrency: int = 1):
                                          conversation_id=conversation_id,
                                          context_hint=ctx_hint,
                                          project_status=proj_status,
-                                         project_constraints=proj_constraints),
+                                         project_constraints=proj_constraints,
+                                         user_id=user_id, project_id=project_id),
                         timeout=35.0,
                     )
                 except asyncio.TimeoutError:

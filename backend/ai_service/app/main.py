@@ -85,6 +85,8 @@ class GenerateReq(BaseModel):
     skill: str | None = None
     trace_id: str | None = None
     conversation_id: int | None = None
+    user_id: int | None = None          # v0.9.0: Chroma 隔离 + 用户偏好
+    project_id: int | None = None       # v0.9.0: Chroma 隔离 + 项目记忆
     context_hint: str = ""            # 前端WebLLM上下文检测
     conversation_summary: str = ""    # Redis对话摘要
     project_status: str = "draft"     # 项目状态
@@ -170,6 +172,8 @@ async def generate(req: GenerateReq, after: str | None = None):
             "conversation_id": req.conversation_id,
             "context_hint": req.context_hint,
             "conversation_summary": req.conversation_summary,
+            "user_id": req.user_id,               # v0.9.0
+            "project_id": req.project_id,          # v0.9.0
             "project_status": req.project_status,
             "requirement_doc": req.requirement_doc,
             "confirmed": req.confirmed,
