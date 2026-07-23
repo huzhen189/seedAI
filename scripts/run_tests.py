@@ -313,7 +313,7 @@ async def main():
     print(f"目标: {BASE} | 用户: {USER}")
     print("=" * 60)
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=10)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0)) as client:
         # 1. 登录
         TOKEN = await login(client)
         if not TOKEN:

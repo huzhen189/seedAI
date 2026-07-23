@@ -466,6 +466,7 @@ async def worker_loop(concurrency: int = 1):
             messages = job.get("messages", [])
             skill = job.get("skill")
             conversation_id = job.get("conversation_id")
+            qc_result = None  # v1.0: 全局初始化,非build类agent不跑QC
             # v1.0: 全局递归保护(借鉴 LangGraph recursion_limit)
             recursion_count = job.get("recursion_count", 0)
             if recursion_count >= 20:
