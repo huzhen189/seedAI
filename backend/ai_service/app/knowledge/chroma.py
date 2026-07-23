@@ -35,20 +35,15 @@ def _client():
 def _ef():
     from chromadb.utils import embedding_functions
 
-    # 优先 Qwen, 其次 DeepSeek, 最后本地 sentence-transformers
+    # 优先 Qwen text-embedding(§7: 配 qwen_embedding_key), 否则本地 sentence-transformers 兜底。
+    # 注意: DeepSeek 无 embedding 模型(deepseek-chat 是聊天模型), 不可用于向量化——去掉该分支。
     if settings.qwen_embedding_key:
         return embedding_functions.OpenAIEmbeddingFunction(
             api_key=settings.qwen_embedding_key,
             api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
             model_name=settings.qwen_embedding_model,
         )
-    if settings.deepseek_api_key:
-        return embedding_functions.OpenAIEmbeddingFunction(
-            api_key=settings.deepseek_api_key,
-            api_base="https://api.deepseek.com/v1",
-            model_name="deepseek-chat",
-        )
-    # 本地模型兜底(无需 API key)
+    # 本地模型兜底(无需 API key, 首次使用自动下载 all-MiniLM-L6-v2 ~79MB)
     return embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name="all-MiniLM-L6-v2"
     )
