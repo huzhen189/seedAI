@@ -283,12 +283,16 @@ def _append_q(messages: list, request: Request, *, from_cache: bool = False) -> 
     if from_cache:
         return messages
     q = request.query_params.get("q")
+    resume = request.query_params.get("resume", "").lower() in ("true", "1")
     if q:
         if not messages or messages[-1].get("role") != "user" or messages[-1].get("content") != q:
             messages.append({"role": "user", "content": q})
             logger.info("[chat] 追加当前用户输入 q=%.60s", q)
     if not messages:
-        raise HTTPException(status_code=400, detail="missing 'q' query param and no history")
+        if resume or request.query_params.get("after"):
+            logger.info("[chat] resume/after 模式: 无历史消息, 允许空 messages 进行流回放")
+        else:
+            raise HTTPException(status_code=400, detail="missing 'q' query param and no history")
     logger.info("[chat] 最终消息数=%d", len(messages))
     return messages
 
