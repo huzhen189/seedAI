@@ -294,7 +294,7 @@ async def analytics_snapshot() -> dict:
         fail_keys = await r.hgetall(f"{P_API_CALLS}:fail")
         for p in sorted(total_keys.keys()):
             pt = int(total_keys.get(p, 0))
-            if pt < 3:  # 噪声过滤, 少于 3 次不展示
+            if pt < 1:  # v0.9.0: 降低噪��过滤(原<3在开发阶段看不到数据)
                 continue
             po = int(ok_keys.get(p, 0))
             pf = int(fail_keys.get(p, 0))
@@ -496,6 +496,12 @@ async def analytics_snapshot() -> dict:
                 "avg_rating": fb_avg,
                 "with_dims_rate": fb_dims_rate,
             },
+            # v0.9.0 新增: 修复/蒸馏/代码索引/精炼/闲聊重答
+            "v090_features": {
+                k.decode() if isinstance(k, bytes) else k: int(v)
+                for k, v in ((await r.hgetall("an:v090:feature")) or {}).items()
+            },
+            "v090_summary_fallback": int((await r.hget("an:v090:summary_fallback", "count")) or 0),
         }
     except Exception as e:
         logger.warning("analytics_snapshot failed: %s", e)
