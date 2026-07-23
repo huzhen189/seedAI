@@ -39,12 +39,13 @@ def _client():
 def _ef():
     from chromadb.utils import embedding_functions
 
-    # 优先 Qwen text-embedding(§7: 配 qwen_embedding_key), 否则本地 sentence-transformers 兜底。
-    # 注意: DeepSeek 无 embedding 模型(deepseek-chat 是聊天模型), 不可用于向量化——去掉该分支。
+    # 优先 Qwen text-embedding(§7: 配 qwen_embedding_key)。
+    # 关键点: api_base 必须用 settings.qwen_base_url(本机 Qwen key 是私有 MaaS 主机签发,
+    # 打公共 dashscope 端点会 401)。无 embedding key 时本地 sentence-transformers 兜底。
     if settings.qwen_embedding_key:
         return embedding_functions.OpenAIEmbeddingFunction(
             api_key=settings.qwen_embedding_key,
-            api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            api_base=settings.qwen_base_url,
             model_name=settings.qwen_embedding_model,
         )
     # 本地模型兜底(无需 API key, 首次使用自动下载 all-MiniLM-L6-v2 ~79MB)
@@ -88,6 +89,8 @@ def ensure_collections() -> None:
     try:
         client = _client()
         ef = _ef()
+        provider = "Qwen text-embedding-v3" if settings.qwen_embedding_key else "本地 SentenceTransformer(all-MiniLM-L6-v2)"
+        logger.info("ensure_collections: embedding 提供方=%s", provider)
         for name in _ALL_COLLECTIONS:
             try:
                 client.get_or_create_collection(name=name, embedding_function=ef)

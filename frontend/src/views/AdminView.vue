@@ -52,11 +52,6 @@ function fmtUptime(s?: number): string {
   return parts.join('')
 }
 
-const totalModelUsage = computed(() => {
-  const u = metrics.value.model_usage || {}
-  return Object.values(u).reduce((a, b) => a + (b || 0), 0)
-})
-
 // ---- 用户管理(仅超管) ----
 const users = ref<AdminUser[]>([])
 const usersLoading = ref(false)

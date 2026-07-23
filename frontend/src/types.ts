@@ -211,12 +211,29 @@ export interface AuthUser {
 }
 
 /** 管理后台实时指标快照(/admin/metrics SSE)。 */
+export interface ModelUsageItem {
+  tokens: number
+  count: number
+  est_cost: number
+  raw_count: number
+}
+
+export interface LatencyBucket {
+  p50: number
+  p90: number
+  p99: number
+  avg: number
+  samples: number
+}
+
 export interface MetricsSnapshot {
   uptime_s?: number
   requests_total?: number
   requests_error?: number
   requests_per_min?: number
-  model_usage?: Record<string, number>
+  model_usage?: Record<string, ModelUsageItem>
+  api_latency?: Record<string, LatencyBucket>
+  ai_stats?: { generate_total: number; v090_features: Record<string, number> }
   /** 三库健康状态(业务可检的 MySQL + Redis) */
   db?: DbStatus
   error?: string
