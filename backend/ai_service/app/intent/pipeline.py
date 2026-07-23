@@ -26,7 +26,7 @@ logger = logging.getLogger("ai_service.intent.pipeline")
 
 @dataclass
 class PipelineResult:
-    intent: dict = field(default_factory=lambda: {"level1": "learn", "level2": "casual", "confidence": 0.3, "industry": "other"})
+    intent: dict = field(default_factory=lambda: {"level1": "chat", "level2": "casual", "confidence": 0.3, "industry": "other"})
     plan: list[dict] = field(default_factory=list)
     risk: SafetyResult = field(default_factory=SafetyResult)
     tools: ToolResult = field(default_factory=ToolResult)
@@ -70,7 +70,7 @@ async def classify_v2(
         logger.info("[管道] [0/5] 命中选项选择 → 短路路由 skill=%s (候选=%s,不重跑LLM)", _chosen, _cands)
         clear_pending_options(conversation_id)  # 消费后清除,避免陈旧状态
         return PipelineResult(
-            intent={"level1": "learn", "level2": "casual", "confidence": 1.0, "industry": "other"},
+            intent={"level1": "chat", "level2": "casual", "confidence": 1.0, "industry": "other"},
             plan=[{"action": "route", "skill": _chosen, "confidence": 1.0, "from_selection": True}],
             risk=SafetyResult(),
             tools=ToolResult(skills=[SkillCandidate(name=_chosen, confidence=1.0, reason="用户选择/指定")]),
@@ -111,14 +111,14 @@ async def classify_v2(
     except asyncio.TimeoutError:
         logger.error("[管道] 语义模块超时35s → 降级规则结果")
         semantic_result = SemanticResult(
-            level1="learn", level2="casual", confidence=0.3,
+            level1="chat", level2="casual", confidence=0.3,
             industry=rule_result.industry or "other",
             raw_output="timeout", latency_ms=35000,
         )
     except Exception as e:
         logger.error("[管道] 语义模块异常: %s → 降级规则结果", e)
         semantic_result = SemanticResult(
-            level1="learn", level2="casual", confidence=0.3,
+            level1="chat", level2="casual", confidence=0.3,
             industry=rule_result.industry or "other",
         )
 
@@ -172,7 +172,7 @@ def _aggregate(
     if safety.risk_level == "critical":
         logger.warning("[汇总] 安全检查→拦截 risk=%s tags=%s", safety.risk_level, safety.risk_tags)
         return PipelineResult(
-            intent={"level1": "learn", "level2": "casual", "confidence": 0.0, "industry": semantic.industry},
+            intent={"level1": "chat", "level2": "casual", "confidence": 0.0, "industry": semantic.industry},
             plan=[{"action": "block", "reason": safety.block_reason}],
             risk=safety,
             evidence=evidence,
@@ -211,7 +211,7 @@ def _aggregate(
     if not tools.skills:
         logger.info("[汇总] 无可用工具 → 降级 explain")
         return PipelineResult(
-            intent={"level1": "learn", "level2": "casual", "confidence": confidence, "industry": industry},
+            intent={"level1": "chat", "level2": "casual", "confidence": confidence, "industry": industry},
             plan=[{"action": "fallback", "skill": "explain"}],
             risk=safety,
             tools=tools,
@@ -279,12 +279,9 @@ def _aggregate(
 
 
 def _intent_compatible(rule_pattern: str, semantic_l1: str) -> bool:
-    """判断规则意图和语义意图是否兼容。"""
+    """判断规则意图和语义意图是否兼容(v1.0: chat/build 两大方向)。"""
     compatible = {
-        "build": {"build", "learn"},
-        "code": {"code", "learn"},
-        "learn": {"learn", "build", "code", "doc", "translate"},
-        "doc": {"doc", "learn"},
-        "translate": {"translate", "learn"},
+        "build": {"build", "chat"},
+        "chat": {"chat", "build"},
     }
-    return semantic_l1 in compatible.get(rule_pattern, {"learn"})
+    return semantic_l1 in compatible.get(rule_pattern, {"chat"})
