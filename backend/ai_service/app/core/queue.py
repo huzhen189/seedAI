@@ -767,8 +767,7 @@ async def worker_loop(concurrency: int = 1):
                         logger.warning("[Worker] [6/6] QC 执行失败(已跳过, 不影响主流程) trace=%s: %s",
                                        trace_id, qc_err)
                 # Phase D(v0.9.0): 闲聊低分→1轮轻量重答
-                _qc_ok = qc_result is not None  # qc_result 仅 QC 成功时赋值
-                if skill_name == "agent_chat" and qc_assistant_text.strip() and _qc_ok:
+                if qc_result is not None and skill_name == "agent_chat" and qc_assistant_text.strip():
                     try:
                         qc_overall = qc_result.get("overall", 10)
                         qc_needs = qc_result.get("needs_review", False)
@@ -817,7 +816,10 @@ async def worker_loop(concurrency: int = 1):
                         logger.debug("[Worker] 代码索引失败: %s", _ie)
                 logger.info("[Worker] [6/6] 执行完毕 trace=%s skill=%s 共发出%d个事件 总耗时%.0fms",
                            trace_id, skill_name, event_cnt, (time.time() - t_job) * 1000)
-                await _commit_after_done(trace_id, skill_name, qc_user_text)
+                try:
+                    await _commit_after_done(trace_id, skill_name, qc_user_text)
+                except Exception:
+                    pass  # chat类skill无qc_user_text,跳过
             except Exception as e:
                 logger.error("[Worker] 执行异常 trace=%s skill=%s 错误=%s: %s",
                             trace_id, skill_name, type(e).__name__, e)
