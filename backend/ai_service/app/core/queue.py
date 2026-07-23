@@ -48,7 +48,7 @@ async def _commit_after_done(trace_id: str, skill_name: str, user_text: str) -> 
     explain 等纯文本 skill 不生成站点,跳过。
     失败仅告警(版本控制故障不能阻断主链路,与 QC 同策略)。
     """
-    if skill_name in ("generate_site", "write_code", "orchestrator"):
+    if skill_name in ("agent_build", "agent_generate_site", "orchestrator"):
         try:
             await asyncio.to_thread(commit_site_for_trace, trace_id, skill_name, user_text)
         except Exception as e:  # noqa: BLE001
@@ -79,7 +79,7 @@ async def _distill_memories(trace_id: str, user_id: int | None, project_id: int 
                             refined_text: str, skill_name: str) -> None:
     """L2+ 蒸馏(v0.9.0 P3): done 后从精炼对话抽取结构化项目记忆+用户偏好→写 Chroma。
     仅建站类 skill 触发; 失败仅 warn。"""
-    if skill_name not in ("generate_site", "write_code", "orchestrator"):
+    if skill_name not in ("agent_build", "agent_generate_site", "orchestrator"):
         return
     if not (user_id or project_id) or not refined_text.strip():
         return
@@ -466,6 +466,16 @@ async def worker_loop(concurrency: int = 1):
             messages = job.get("messages", [])
             skill = job.get("skill")
             conversation_id = job.get("conversation_id")
+            # v1.0: 全局递归保护(借鉴 LangGraph recursion_limit)
+            recursion_count = job.get("recursion_count", 0)
+            if recursion_count >= 20:
+                logger.error("[Worker] 递归超限 trace=%s count=%d,终止", trace_id, recursion_count)
+                await q.publish(trace_id, {
+                    "event": "error",
+                    "data": {"message": "任务执行步数超限(20),已安全终止,请尝试简化需求或拆分任务"}
+                })
+                await q.publish(trace_id, {"event": "done", "data": {}})
+                continue
 
             # ── [2/6] Chroma 向量索引 ──
             if conversation_id:
@@ -523,7 +533,7 @@ async def worker_loop(concurrency: int = 1):
                     logger.error("[Worker] [3/6] 意图分类超时(35s) → 降级")
                     intent = {"level1": "learn", "level2": "casual", "confidence": 0.3,
                               "industry": "other", "checkpoint_relation": "none",
-                              "selected_skill": "explain", "decision": "fallback"}
+                              "selected_skill": "agent_chat", "decision": "fallback"}
                 ctx_result = ctx_hint or "检测完成"
                 logger.info("[Worker] [3/6] 上下文结果 ctx=%.60s (+%.0fms, 含意图分类)", ctx_result,
                            (time.time() - t_job) * 1000)
@@ -531,7 +541,7 @@ async def worker_loop(concurrency: int = 1):
                 # ── [4/6] 意图分类(汇总器已算好最终 skill, 单一来源) ──
                 decision = intent.get("decision", "route")
                 confirmed = bool(job.get("confirmed", False))
-                skill_name = skill or intent.get("selected_skill") or skill_for(intent["level1"], intent["level2"]) or "explain"
+                skill_name = skill or intent.get("selected_skill") or skill_for(intent["level1"], intent["level2"]) or "agent_chat"
                 logger.info("[Worker] [4/6] 决策 decision=%s risk=%s 汇总skill=%s 最终skill=%s conf=%.0f%% (+%.0fms)",
                            decision, intent.get("risk_level", "?"), intent.get("selected_skill"),
                            skill_name, intent.get("confidence", 0) * 100,
@@ -550,7 +560,7 @@ async def worker_loop(concurrency: int = 1):
                 if intent["level1"] == "unsupported":
                     logger.info("[Worker] [5/6] 不支持的功能 → explain降级")
                     async for event in run_skill(
-                        "explain", model_id, messages,
+                        "agent_chat", model_id, messages,
                         trace_id=trace_id, is_cancelled=_cancelled,
                         intent_info=intent,
                     ):
@@ -596,7 +606,7 @@ async def worker_loop(concurrency: int = 1):
                     sub_tasks_raw = intent.get("sub_tasks") or []
                     if not sub_tasks_raw:
                         logger.warning("[Worker] [5/6] split 决策但无 sub_tasks → 退化为单 skill")
-                        skill_name = intent.get("selected_skill") or "explain"
+                        skill_name = intent.get("selected_skill") or "agent_chat"
                     else:
                         from ..core.orchestrator import Orchestrator
                         from ..core.models import SharedContext, SubTask
@@ -757,7 +767,7 @@ async def worker_loop(concurrency: int = 1):
                                        trace_id, qc_err)
                 # Phase D(v0.9.0): 闲聊低分→1轮轻量重答
                 _qc_ok = qc_result is not None  # qc_result 仅 QC 成功时赋值
-                if skill_name == "explain" and qc_assistant_text.strip() and _qc_ok:
+                if skill_name == "agent_chat" and qc_assistant_text.strip() and _qc_ok:
                     try:
                         qc_overall = qc_result.get("overall", 10)
                         qc_needs = qc_result.get("needs_review", False)
@@ -781,7 +791,7 @@ async def worker_loop(concurrency: int = 1):
                 if done_event is not None:
                     await q.publish(trace_id, done_event)
                 # L2 对话精炼(v0.9.0): done 后 LLM 去冗余 → 改写 Message.content(仅建站类)
-                if skill_name in ("generate_site", "write_code", "orchestrator") and qc_assistant_text.strip():
+                if skill_name in ("agent_build", "agent_generate_site", "orchestrator") and qc_assistant_text.strip():
                     try:
                         refined = await _refine_assistant_dialog(qc_assistant_text)
                         await q.publish(trace_id, {"event": "refined", "data": refined[:500]})

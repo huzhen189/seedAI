@@ -30,8 +30,28 @@ INTENT_SKILL_MAP: dict[tuple[str, str], str] = {
     ("doc", "tutorial"): "generate_doc",
     ("doc", "plan"): "generate_doc",
     ("translate", "text"): "explain",
-    ("translate", "code_lang"): "write_code",
+    ("translate", "code_lang"): "agent_build",
 }
+# v1.0: 重映射到新 agent 命名空间
+_REMAP = {
+    "explain": "agent_chat",
+    "write_code": "agent_build",
+    "fix_agent": "agent_review",
+    "review_agent": "agent_review",
+    "generate_site": "agent_build",
+    "requirement_agent": "agent_requirement",
+    "design_agent": "agent_design",
+    "search_agent": "agent_search",
+    "generate_doc": "agent_doc",
+}
+_INTENT_MAP_REBUILT = False
+if not _INTENT_MAP_REBUILT:
+    new_map = {}
+    for (l1, l2), old_name in list(INTENT_SKILL_MAP.items()):
+        new_map[(l1, l2)] = _REMAP.get(old_name, old_name)
+    INTENT_SKILL_MAP.clear()
+    INTENT_SKILL_MAP.update(new_map)
+    _INTENT_MAP_REBUILT = True
 
 
 @dataclass

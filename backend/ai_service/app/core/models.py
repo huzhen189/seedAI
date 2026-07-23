@@ -1,17 +1,49 @@
-"""多意图编排共享数据模型(§多意图 v1.0)。
+"""共享数据模型(v1.0 统一 Agent 规范)。
 
 包含:
-- SubTask         : 单个子计划(可独立执行的最小单元)
-- SplitResult     : 拆分器输出(单意图 or 多意图)
-- SharedContext    : 子任务间共享状态(上下文/产物传递)
-- SubTaskResult    : 单个子任务执行结果
-- OrchestratorResult: 编排器总结果(成功/失败分组 + 合并回复)
+- AgentInput/AgentOutput: 所有 Agent 统一入参/出参
+- AgentState: 全局追踪状态(含 recursion_limit 保护)
+- SubTask/SplitResult/SharedContext/SubTaskResult/OrchestratorResult: 多意图编排
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
+# --- v1.0 Agent 统一规范 ---
+
+@dataclass
+class AgentInput:
+    """所有 Agent 统一入参。"""
+    user_text: str                          # 本轮用户输入(必填)
+    messages: list[dict]                    # 对话历史(必填)
+    model_id: str = "deepseek"              # 模型名
+    trace_id: str | None = None             # 追踪 ID
+    user_id: int | None = None              # Chroma 隔离
+    project_id: int | None = None           # Chroma 隔离
+    conversation_id: int | None = None
+    conversation_summary: str = ""           # L1 摘要
+    requirement_doc: dict | None = None
+    project_constraints: list[str] | None = None
+    recursion_count: int = 0                # 递归保护
+    is_cancelled: Callable[[], bool] | None = None  # 取消回调
+
+
+@dataclass
+class AgentOutput:
+    """所有 Agent 统一出参(必须 JSON 可序列化)。"""
+    agent_name: str                         # 本 Agent 标识
+    decision: str                           # done | repair_needed | escalate | clarifying
+    content: str = ""                       # 文本输出
+    artifact: dict | None = None            # 产物(HTML/URL等)
+    suggestions: list[str] | None = None     # 建议的下一步
+    raw_data: list[dict] | None = None       # 搜索结果等原始数据
+    meta: dict | None = field(default_factory=dict)  # {tokens, elapsed, model_used, qc_overall}
+
+
+# 递归上限(v1.0 借自 LangGraph 最佳实践)
+MAX_RECURSION = 20
 
 
 # 风险等级常量(与 safety.py 保持一致)
