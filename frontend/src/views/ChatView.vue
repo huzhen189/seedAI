@@ -837,39 +837,42 @@ async function doSend(text: string) {
   const cid = convStore.currentConvId!
   setActiveGen(cid, traceId.value)
 
-  // ---- WebLLM 上下文检测 ----
+  // ---- WebLLM(v1.0 弃用, 直接走服务端) ----
+  // 后续升级启用时: 删除下方 if(true) return 块, 恢复 WebLLM 代码
+  if (true) { // WEBLLM_DISABLED — 跳过所有本地推理
+    /* ↓↓↓ 原 WebLLM 代码(弃用保留, 方便后续恢复) ↓↓↓
   let contextHint: string | undefined
   try {
     const { contextCheck } = await import('../webllm/context')
     contextHint = await contextCheck(text, convStore.messages.slice(-20).map(m => ({ role: m.role, content: m.content }))) || undefined
-  } catch { /* 降级 */ }
+  } catch { }
 
-  // ---- WebLLM 本地分类 ----
   let intent: { level1: string; level2: string } | null = null
   try {
     const { localClassify } = await import('../webllm/classifier')
     intent = await localClassify(text)
-  } catch { /* 降级: 走服务端 */ }
+  } catch { }
 
-  // ---- 本地闲聊(casual/explain) ----
   if (intent && intent.level1 === 'learn' && intent.level2 === 'casual') {
     try {
       const { localChat } = await import('../webllm/chat')
       const chatMsgs = convStore.messages.slice(-6).map(m => ({ role: m.role, content: m.content }))
       const reply = await localChat([...chatMsgs, { role: 'user', content: text }])
       if (reply) {
-        console.log(`[WebLLM] 本地闲聊完成 → 不走服务端`)
+        console.log('[WebLLM] 本地闲聊完成 → 不走服务端')
         convStore.messages.push({ role: 'user', content: text, conversation_id: cid, id: 0, created_at: '' } as any)
         convStore.messages.push({ role: 'assistant', content: reply, conversation_id: cid, id: 0, created_at: '' } as any)
         nextTick(scrollToBottom)
         return
       }
-    } catch { /* 降级: 走服务端 */ }
+    } catch { }
   }
   if (intent) {
-    console.log(`[WebLLM] 分类结果: ${intent.level1}/${intent.level2} → 路由服务端`)
+    console.log('[WebLLM] 分类结果: ${intent.level1}/${intent.level2} → 路由服务端')
   } else {
     console.log('[WebLLM] 本地分类不可用 → 走服务端')
+  }
+    ↑↑↑ 原 WebLLM 代码结束 ↑↑↑ */
   }
 
   // 多意图: 全新用户请求, 清空之前累计的已确认子任务
@@ -978,13 +981,13 @@ onMounted(async () => {
   await auth.init()
   const m = await fetchModels()
   if (m.length) models.value = m
-  // WebLLM 后台预热(不阻塞页面)
-  import('../webllm/engine').then(({ initEngine }) => {
-    initEngine((pct) => {
-      if (pct === 100) console.log('[WebLLM] 就绪')
-      else if (pct % 10 === 0) console.log(`[WebLLM] 下载 ${pct}%`)
-    })
-  }).catch(() => {})
+  // WebLLM 后台预热 —— v1.0 弃用, 跳过
+  // import('../webllm/engine').then(({ initEngine }) => {
+  //   initEngine((pct) => {
+  //     if (pct === 100) console.log('[WebLLM] 就绪')
+  //     else if (pct % 10 === 0) console.log(`[WebLLM] 下载 ${pct}%`)
+  //   })
+  // }).catch(() => {})
   if (auth.user.value) {
     await projectStore.load()
     await loadCurrentProject()

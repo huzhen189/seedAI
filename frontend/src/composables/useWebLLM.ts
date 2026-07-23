@@ -1,20 +1,10 @@
 /**
- * WebLLM 本地浏览器推理(④-b):仅本地跑 Planner, Coder 仍走云端。
+ * WebLLM 本地浏览器推理——暂时弃用(v1.0)，后续升级后重新启用。
  *
- * 约束(文档 §2.6):
- *   1. 锁定单固定小模型 Qwen2.5-7B-Instruct-q4f16_1-MLC(约2-5GB 权重, CDN 下载 + Cache Storage 预取)。
- *   2. 在首屏空闲时预取(warmup),减少首次调用等待。
- *   3. 本地 Planner 推理, Planner 结果 -> 云端 Coder/Reviewer。
- *   4. 本地失败自动回退云端(无感切换,前端不报错,仅标记 degraded)。
- *
- * 运行时要求:Chrome 113+ / Edge 113+ (WebGPU);Safari/Firefox 暂不支持,自动跳过。
- *
- * TODO(④-b 落地):
- *   - `npm install @mlc-ai/web-llm` 后取消下方 import 注释
- *   - 确认模型权重 CDN 可达(需网络通畅);若 CDN 不可用可换 HuggingFace mirror
- *   - 首次使用需下载权重(约 2-5GB),**请在首屏调用 warmup() 触发预取**
- *   - Chrome 需开启 WebGPU:chrome://flags/#enable-unsafe-webgpu(正式版默认已开)
+ * 弃用原因: @mlc-ai/web-llm 模型权重太大(2-5GB), 本地HTTP环境COOP/COEP不兼容,
+ * 目前云端推理完全满足需求。后续升级时取消下方 DISABLED 即可恢复。
  */
+export const WEBLLM_DISABLED = true
 
 // import { CreateMLCEngine, MLCEngine } from '@mlc-ai/web-llm'
 
