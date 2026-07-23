@@ -1,13 +1,14 @@
-"""一键重置: 清空数据库 + Redis + 重建表 + 自动创建默认超管。
+"""一键重置: 清空数据库 + Redis + Chroma + 重建表 + 自动创建默认超管。
 
 用法(项目根目录):  python scripts/reset_all.py
 
 执行后:
   1. DROP 所有业务表
   2. FLUSHDB 清空 Redis
-  3. 重建表 + 补齐缺失列
-  4. 自动创建默认超管用户: huzhen / huzhen189 / 超级管理员
-  5. 提示重启两个后端服务
+  3. 清空 Chroma 所有集合数据
+  4. 重建表 + 补齐缺失列
+  5. 自动创建默认超管用户: huzhen / huzhen189 / 超级管理员
+  6. 提示重启两个后端服务
 """
 
 import asyncio
@@ -53,6 +54,24 @@ async def reset() -> None:
             await r.aclose()
         except Exception as e:
             print(f"  >> Redis 清理失败: {e}")
+
+    # 2.5) 清空 Chroma 所有集合(v0.9.0 新增)
+    try:
+        from urllib.parse import urlparse as _up
+        import chromadb
+        chroma_url = getattr(settings, 'chroma_url', None) or "http://chroma:8000"
+        p = _up(chroma_url)
+        c = chromadb.HttpClient(host=p.hostname or "localhost", port=p.port or 8000)
+        colls = c.list_collections()
+        for col in colls:
+            try:
+                c.delete_collection(col.name if hasattr(col, 'name') else str(col))
+                print(f"  >> Chroma 集合已删除: {col}")
+            except Exception:
+                print(f"  >> Chroma 集合删除失败: {col}")
+        print(f"  >> Chroma 已清空({len(colls)} 个集合)")
+    except Exception as e:
+        print(f"  >> Chroma 清理失败(可忽略): {e}")
 
     # 3) 重建表
     from app.models import Base  # noqa: E402
