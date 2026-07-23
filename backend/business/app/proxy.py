@@ -36,7 +36,7 @@ from .analytics import record_qc, record_feedback
 from .cache import cache_get, cache_set, ck_delete, ck_get, ck_set, enqueue_write_error, get_redis
 from .config import settings
 from .db import get_db
-from .metrics import consume_daily_quota, record_model_usage, record_unsupported
+from .metrics import consume_daily_quota, record_model_usage, record_model_tokens, record_api_latency, record_unsupported
 from .models import Artifact, Conversation, Message, Project, Trace, User
 from .repos.business_repos import conv_repo, message_repo
 from .repos.trace_repos import feedback_repo, qc_score_repo, trace_repo
@@ -672,6 +672,7 @@ async def chat(
             logger.info("[chat] 断点恢复 trace=%s stage=%s mode=%s", tid, ck_stage, payload.get("resume_mode"))
 
     async def publisher():
+        t_start_chat = time.time()  # v0.9.0: API 延迟起点
         # read 不超时(生成可能持续数分钟),connect 给 10s
         timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
         assistant_parts: list[str] = []
@@ -854,6 +855,11 @@ async def chat(
                 preview_url=preview_url,
                 qc_result=qc_result,
             ))
+            # v0.9.0: token 统计 + API 延迟记录
+            if approx_tokens > 0:
+                asyncio.create_task(record_model_tokens(model, approx_tokens))
+            _elapsed = (time.time() - t_start_chat) * 1000
+            asyncio.create_task(record_api_latency("/api/chat", _elapsed))
 
     return StreamingResponse(
         publisher(),

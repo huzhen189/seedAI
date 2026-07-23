@@ -246,11 +246,32 @@ async def list_traces(
     qc_by_trace: dict[str, float] = {q.trace_id: q.overall for q in qc_rows}
     fb_rows = (await db.execute(select(Feedback))).scalars().all()
     fb_by_trace: dict[str, int] = {f.trace_id: f.rating for f in fb_rows}
+    # 查每条 trace 的第一条用户消息(供列表预览,限20字)
+    from sqlalchemy import text as sa_text
+    user_inputs = {}
+    conv_ids = list(set(t.conversation_id for t in rows if t.conversation_id))
+    if conv_ids:
+        try:
+            placeholders = ",".join([f":c{i}" for i in range(len(conv_ids))])
+            params = {f"c{i}": cid for i, cid in enumerate(conv_ids)}
+            mrows = (await db.execute(
+                sa_text(
+                    f"SELECT DISTINCT ON (conversation_id) conversation_id, content FROM messages "
+                    f"WHERE conversation_id IN ({placeholders}) AND role='user' "
+                    f"ORDER BY conversation_id, id ASC"
+                ), params,
+            )).fetchall()
+            for cid, content in mrows:
+                user_inputs[cid] = (content or "")[:20] + ("..." if len(content or "") > 20 else "")
+        except Exception:
+            pass
+
     return [
         {
             "id": t.id,
             "trace_id": t.trace_id,
             "user_id": t.user_id,
+            "user_input": user_inputs.get(t.conversation_id, "") if t.conversation_id else "",
             "model_id": t.model_id,
             "status": t.status,
             "total_tokens": t.total_tokens,

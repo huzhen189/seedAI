@@ -62,6 +62,27 @@ async def record_model_usage(user_id: int, model_id: str) -> None:
         logger.warning("record_model_usage failed: %s", e)
 
 
+async def record_model_tokens(model_id: str, tokens: int) -> None:
+    """记录模型 token 消耗(v0.9.0 增强)。"""
+    try:
+        r = await get_redis()
+        if tokens > 0:
+            await r.hincrby("stats:model_tokens", model_id, tokens)
+            await r.hincrby("stats:model_count", model_id, 1)
+    except Exception:
+        pass
+
+
+async def record_api_latency(path: str, elapsed_ms: float) -> None:
+    """记录 API 接口耗时(v0.9.0 运营数据)。"""
+    try:
+        r = await get_redis()
+        await r.lpush(f"stats:latency:{path}", str(round(elapsed_ms, 1)))
+        await r.ltrim(f"stats:latency:{path}", 0, 99)  # 保留最近100条
+    except Exception:
+        pass
+
+
 async def record_request(path: str, status_code: int, elapsed_ms: float) -> None:
     try:
         r = await get_redis()
@@ -78,24 +99,70 @@ async def record_request(path: str, status_code: int, elapsed_ms: float) -> None
 
 
 async def snapshot() -> dict:
-    """给管理页的实时指标快照(含三库健康状态)。"""
+    """给管理页的实时指标快照(含三库健康状态+v0.9.0增强)。"""
     try:
         r = await get_redis()
         pipe = r.pipeline()
         pipe.get("stats:requests:total")
         pipe.get("stats:requests:error")
         pipe.hgetall("stats:model_usage")
-        pipe.get("stats:rpm:now")
-        total, err, usage, _ = await pipe.execute()
+        pipe.hgetall("stats:model_tokens")
+        pipe.hgetall("stats:model_count")
+        total, err, usage, tokens_raw, count_raw = await pipe.execute()
         minute = int(time.time() // 60)
         rpm = await r.get(f"stats:rpm:{minute}") or 0
         db = await _db_status()
+
+        # 模型用量增强: token数 + 次数 + 估算花费
+        tokens = {k: int(v) for k, v in (tokens_raw or {}).items()}
+        counts = {k: int(v) for k, v in (count_raw or {}).items()}
+        model_usage = {}
+        all_models = set(list(tokens.keys()) + list(counts.keys()) + list((usage or {}).keys()))
+        # 估算花费(USD per 1M tokens, 粗略)
+        COST_RATE = {"deepseek": 0.14, "qwen": 0.30, "hy3": 0.50}
+        for m in all_models:
+            t = tokens.get(m, 0)
+            c = counts.get(m, 0)
+            rate = COST_RATE.get(m, 0.20)
+            model_usage[m] = {
+                "tokens": t, "count": c,
+                "est_cost": round(t / 1_000_000 * rate, 4),
+                "raw_count": int((usage or {}).get(m, 0)),
+            }
+
+        # API 延迟统计
+        latency = {}
+        for path in ["/api/chat", "/auth/login", "/admin/metrics"]:
+            vals = await r.lrange(f"stats:latency:{path}", 0, 49)
+            vals_f = [float(v) for v in vals if v]
+            if vals_f:
+                vals_f.sort()
+                n = len(vals_f)
+                latency[path] = {
+                    "p50": round(vals_f[int(n*0.5)], 1),
+                    "p90": round(vals_f[int(n*0.9)], 1),
+                    "p99": round(vals_f[int(n*0.99)], 1),
+                    "avg": round(sum(vals_f)/n, 1),
+                    "samples": n,
+                }
+
+        # AI 核心统计(从共享Redis读取)
+        ai_stats = {}
+        try:
+            ai_total = int((await r.hget("an:generate:total", "count")) or 0)
+            ai_v090 = {k: int(v) for k, v in ((await r.hgetall("an:v090:feature")) or {}).items()}
+            ai_stats = {"generate_total": ai_total, "v090_features": ai_v090}
+        except Exception:
+            pass
+
         return {
             "uptime_s": int(time.time() - START_TIME),
             "requests_total": int(total or 0),
             "requests_error": int(err or 0),
             "requests_per_min": int(rpm),
-            "model_usage": {k: int(v) for k, v in (usage or {}).items()},
+            "model_usage": model_usage,
+            "api_latency": latency,
+            "ai_stats": ai_stats,
             "db": db,
         }
     except Exception as e:

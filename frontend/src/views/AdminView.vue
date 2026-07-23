@@ -439,20 +439,32 @@ onUnmounted(() => {
       </div>
 
       <div class="block">
-        <h3>模型用量</h3>
-        <div v-if="totalModelUsage === 0" class="muted">暂无数据</div>
-        <ul v-else class="usage">
-          <li v-for="(cnt, model) in metrics.model_usage" :key="model">
-            <span class="mname">{{ model }}</span>
-            <span class="mbar">
-              <span
-                class="mfill"
-                :style="{ width: totalModelUsage ? (cnt / totalModelUsage) * 100 + '%' : '0%' }"
-              ></span>
-            </span>
-            <span class="mcnt">{{ cnt }}</span>
-          </li>
-        </ul>
+        <h3>模型用量（次数 / Token / 估算花费）</h3>
+        <div v-if="!metrics.model_usage || Object.keys(metrics.model_usage).length === 0" class="muted">暂无数据</div>
+        <table v-else class="model-table">
+          <thead><tr><th>模型</th><th>请求次数</th><th>Token 消耗</th><th>估算花费(USD)</th></tr></thead>
+          <tbody>
+            <tr v-for="(info, model) in metrics.model_usage" :key="model">
+              <td class="mname">{{ model }}</td>
+              <td>{{ info.count || info.raw_count || 0 }}</td>
+              <td>{{ (info.tokens || 0).toLocaleString() }}</td>
+              <td>${{ (info.est_cost || 0).toFixed(4) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="block" v-if="metrics.api_latency && Object.keys(metrics.api_latency).length">
+        <h3>API 接口延迟 (ms)</h3>
+        <table class="model-table">
+          <thead><tr><th>接口</th><th>P50</th><th>P90</th><th>P99</th><th>平均</th><th>样本</th></tr></thead>
+          <tbody>
+            <tr v-for="(lat, path) in metrics.api_latency" :key="path">
+              <td><code>{{ path }}</code></td>
+              <td>{{ lat.p50 }}</td><td>{{ lat.p90 }}</td><td>{{ lat.p99 }}</td>
+              <td>{{ lat.avg }}</td><td>{{ lat.samples }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </section>
 
@@ -592,16 +604,16 @@ onUnmounted(() => {
       </div>
       <table v-else class="utable">
         <thead>
-          <tr><th>Trace ID</th><th>模型</th><th>状态</th><th>QC</th><th>评分</th><th>Token</th><th>时间</th></tr>
+          <tr><th>Trace ID</th><th>用户输入</th><th>模型</th><th>状态</th><th>QC</th><th>评分</th><th>时间</th></tr>
         </thead>
         <tbody>
           <tr v-for="t in traces" :key="t.id" style="cursor:pointer;" @click="viewTrace(t.trace_id)">
             <td>{{ t.trace_id.slice(0, 12) }}</td>
+            <td class="user-input">{{ (t as any).user_input || '-' }}</td>
             <td>{{ t.model_id || '-' }}</td>
             <td>{{ statusLabel(t.status) }}</td>
             <td>{{ t.qc_overall != null ? t.qc_overall.toFixed(1) : '-' }}</td>
             <td>{{ t.feedback_rating != null ? t.feedback_rating : '-' }}</td>
-            <td>~{{ t.total_tokens }}</td>
             <td>{{ t.started_at?.slice(0, 19) || '-' }}</td>
           </tr>
         </tbody>
@@ -1217,4 +1229,9 @@ h4 { margin: 12px 0 8px; font-size: 14px; color: #1e293b; }
 .msg.assistant { background: #fff; }
 .msg-role { font-size: 11px; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
 .msg-body { font-size: 13px; white-space: pre-wrap; word-break: break-word; max-height: 280px; overflow: auto; }
+.model-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+.model-table th { text-align: left; padding: 6px 10px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }
+.model-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.model-table .mname { font-weight: 600; color: var(--primary, #2563eb); }
+.user-input { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
 </style>
