@@ -20,10 +20,11 @@ INTENT_SKILL_MAP: dict[tuple[str, str], str] = {
     ("chat", "design"): "agent_design",
     # Build 方向 → Agent
     ("build", "requirement"): "agent_requirement",
-    ("build", "site"): "agent_build",
+    ("build", "site"): "agent_generate_site",   # 完整站生成(多 Agent 管线)
     ("build", "page"): "agent_build",
     ("build", "modify"): "agent_build",
     ("build", "game"): "agent_build",
+    ("build", "doc"): "agent_doc",              # 文档/README 生成
     ("build", "fix"): "agent_review",
     ("build", "review"): "agent_review",
 }
@@ -43,8 +44,8 @@ class ToolResult:
     fallback: str = "explain"
 
 
-# 这些技能执行前必须先有「需求文档」
-REQUIRES_DOC_SKILLS = frozenset({"generate_site", "builder_agent"})
+# 这些技能执行前必须先有「需求文档」(新架构 Agent 名)
+REQUIRES_DOC_SKILLS = frozenset({"agent_generate_site", "agent_build"})
 
 
 def _mk_candidate(name: str, confidence: float, reason: str) -> SkillCandidate:
@@ -64,9 +65,9 @@ def run_tools(level1: str, level2: str, confidence: float,
         return ToolResult(fallback="explain")
 
     # 状态路由(draft/planning 项目先走需求分析, 不直奔代码生成)
-    if skill_name == "generate_site" and project_status in ("draft", "planning"):
-        logger.info("[工具] 状态路由 generate_site→requirement_agent (status=%s)", project_status)
-        skill_name = "requirement_agent"
+    if skill_name == "agent_generate_site" and project_status in ("draft", "planning"):
+        logger.info("[工具] 状态路由 agent_generate_site→agent_requirement (status=%s)", project_status)
+        skill_name = "agent_requirement"
 
     if confidence >= 0.8:
         logger.info("[工具] 技能=%s conf=%.0f%% → 直接路由", skill_name, confidence * 100)

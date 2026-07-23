@@ -86,6 +86,9 @@ def run_rules(messages: list[dict]) -> RuleResult:
                "readme", "文档", "说明书", "方案文档", "教程文档", "tutorial",
                "翻译", "translate", "译成", "汉化", "本地化", "译文",
                "写文档", "生成文档"]
+    # learn 关键词(归 chat/explain: 新 schema 无独立 learn 方向, 讲解=chat/explain)
+    learn_kw = ["入门", "基础", "进阶", "怎么理解", "如何理解", "底层原理", "扫盲",
+                "科普", "干货", "笔记", "总结一下", "梳理"]
 
     if any(w in t for w in build_kw):
         keywords = [w for w in build_kw if w in t]
@@ -98,7 +101,7 @@ def run_rules(messages: list[dict]) -> RuleResult:
     if any(w in t for w in learn_kw):
         keywords = [w for w in learn_kw if w in t]
         logger.info("[规则] 命中: learn 关键词=%s industry=%s conf=0.7", keywords[:5], industry)
-        return RuleResult(keywords=keywords, pattern="learn", confidence=0.7, industry=industry)
+        return RuleResult(keywords=keywords, pattern="chat", confidence=0.7, industry=industry)
 
-    logger.info("[规则] 未命中关键词→默认learn conf=0.5")
-    return RuleResult(keywords=[], pattern="learn", confidence=0.5, industry=industry)
+    logger.info("[规则] 未命中关键词→默认chat conf=0.5")
+    return RuleResult(keywords=[], pattern="chat", confidence=0.5, industry=industry)

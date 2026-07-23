@@ -32,7 +32,7 @@ LEVEL2_LABELS: dict[str, str] = {
     # Build 方向
     "requirement": "需求分析", "site": "完整网站", "page": "单页",
     "modify": "修改已有", "fix": "修复Bug", "review": "代码评审",
-    "game": "互动游戏",
+    "game": "互动游戏", "doc": "文档生成",
 }
 
 

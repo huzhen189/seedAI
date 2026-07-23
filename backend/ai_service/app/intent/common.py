@@ -12,7 +12,7 @@ VALID_LEVEL2 = frozenset({
     # Chat 方向
     "casual", "explain", "compare", "search", "design", "translate",
     # Build 方向
-    "requirement", "site", "page", "modify", "fix", "review", "game",
+    "requirement", "site", "page", "modify", "fix", "review", "game", "doc",
 })
 VALID_INDUSTRIES = frozenset({
     "restaurant", "ecommerce", "gov", "edu", "health",

@@ -159,11 +159,11 @@ function fmtTime(t: string): string {
       <div v-if="showQc" class="qc-detail">
         <div v-for="d in QC_DIMENSIONS" :key="d" class="qc-dim">
           <span class="qc-dim-label">{{ QC_DIM_LABELS[d as QcDimension] }}</span>
-          <span class="qc-bar"><i :style="{ width: (qc.dimensions[d].mean * 10) + '%', background: starColor(qc.dimensions[d].mean) }"></i></span>
-          <span class="qc-mean" :style="{ color: starColor(qc.dimensions[d].mean) }">{{ qc.dimensions[d].mean.toFixed(1) }}</span>
+          <span class="qc-bar"><i :style="{ width: ((qc.dimensions?.[d]?.mean ?? 0) * 10) + '%', background: starColor(qc.dimensions?.[d]?.mean ?? 0) }"></i></span>
+          <span class="qc-mean" :style="{ color: starColor(qc.dimensions?.[d]?.mean ?? 0) }">{{ (qc.dimensions?.[d]?.mean ?? 0).toFixed(1) }}</span>
           <span class="qc-judges">
             <i
-              v-for="(s, i) in qc.dimensions[d].scores"
+              v-for="(s, i) in (qc.dimensions?.[d]?.scores ?? [])"
               :key="i"
               class="qc-dot"
               :class="{ zero: !s }"

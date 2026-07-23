@@ -151,9 +151,6 @@ function parseSelectionToken(text: string): number | null {
   if (nth) return _CN_NUM[nth] - 1
   return null
 }
-function clearAlternatives() {
-  alternativesData.value = null
-}
 // 二次确认弹框(安全 high)
 const pendingConfirm = ref<{ reason: string; skill: string } | null>(null)
 const showConfirmModal = ref(false)
@@ -387,6 +384,8 @@ const isMultiIntent = ref(false)
 const orchStrategy = ref<'parallel' | 'mixed'>('parallel')
 const subTasks = ref<SubTaskView[]>([])
 const mergeResult = ref<{ success_count: number; fail_count: number; failed_tasks: FailedSubTask[] } | null>(null)
+// L2 对话精炼终版文本(v0.9.0, #235): 覆盖主气泡冗余内容
+const refinedText = ref('')
 // 已确认放行的子任务 id(中风险确认后重发时带上, 跨重发保留)
 const confirmedSubtaskIds = ref<string[]>([])
 
@@ -775,6 +774,21 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
         failed_tasks: d.failed_tasks,
       }
     },
+    // ---- L2 对话精炼(v0.9.0, #235) ----
+    onRefined: (text: string) => {
+      // refined 事件在 done 前到达: 携带 LLM 去冗余后的终版助手文本。
+      // 用其覆盖主气泡累积内容(站点产物走 artifacts/preview, 此处仅为对话正文精炼),
+      // 避免合并流中的重复/口头禅进入最终展示。
+      const clean = (text || '').trim()
+      if (!clean) return
+      const m = convStore.messages[assistantIdx]
+      if (m) {
+        m.content = clean
+        refinedText.value = clean
+        if (convStore.currentConvId != null) saveDraft(convStore.currentConvId)
+      }
+      console.log('[SSE] refined 终版文本已应用(len=%d)', clean.length)
+    },
   }
 }
 
@@ -906,7 +920,6 @@ async function doSend(text: string) {
     traceId: traceId.value,
     conversationId: cid,
     q: text,
-    contextHint,
     cb: makeCallbacks(assistantIdx),
   })
 }
@@ -924,6 +937,7 @@ async function resume(convId: number, tid: string) {
     model: model.value,
     traceId: tid,
     conversationId: convId,
+    resume: true,
     cb: makeCallbacks(idx),
   })
 }

@@ -173,14 +173,14 @@ _CORRECTION_MAP: list[tuple[str, dict]] = [
     ("个人建站", {"level1": "build", "level2": "site", "reason": "上条在讨论个人站"}),
     ("企业建站", {"level1": "build", "level2": "site", "reason": "上条在讨论企业站"}),
     ("需求分析", {"level1": "build", "level2": "requirement", "reason": "上条在讨论需求"}),
-    ("代码生成", {"level1": "code", "level2": "snippet", "reason": "上条在讨论写代码"}),
-    ("代码修复", {"level1": "code", "level2": "fix", "reason": "上条在讨论修复"}),
-    ("代码重构", {"level1": "code", "level2": "refactor", "reason": "上条在讨论重构"}),
-    ("文档", {"level1": "doc", "level2": "readme", "reason": "上条在讨论文档"}),
-    ("翻译", {"level1": "translate", "level2": "text", "reason": "上条在讨论翻译"}),
-    ("设计", {"level1": "learn", "level2": "design", "reason": "上条在讨论设计"}),
-    ("搜索", {"level1": "learn", "level2": "search", "reason": "上条在讨论搜索查资料"}),
-    ("教程讲解", {"level1": "learn", "level2": "explain", "reason": "上条在讨论讲解"}),
+    ("代码生成", {"level1": "build", "level2": "modify", "reason": "上条在讨论写代码"}),
+    ("代码修复", {"level1": "build", "level2": "fix", "reason": "上条在讨论修复"}),
+    ("代码重构", {"level1": "build", "level2": "modify", "reason": "上条在讨论重构"}),
+    ("文档", {"level1": "build", "level2": "doc", "reason": "上条在讨论文档"}),
+    ("翻译", {"level1": "chat", "level2": "translate", "reason": "上条在讨论翻译"}),
+    ("设计", {"level1": "chat", "level2": "design", "reason": "上条在讨论设计"}),
+    ("搜索", {"level1": "chat", "level2": "search", "reason": "上条在讨论搜索查资料"}),
+    ("教程讲解", {"level1": "chat", "level2": "explain", "reason": "上条在讨论讲解"}),
 ]
 
 

@@ -23,6 +23,7 @@ import httpx
 
 # ── 配置 ──────────────────────────────────────────
 BASE = os.environ.get("TEST_HOST", "http://127.0.0.1:7101")
+AI_BASE = os.environ.get("TEST_AI_HOST", "http://127.0.0.1:7102")
 USER = os.environ.get("TEST_USER", "huzhen")
 PASS = os.environ.get("TEST_PASS", "huzhen189")
 CONV_ID = None
@@ -256,46 +257,39 @@ async def create_conv(client: httpx.AsyncClient, headers: dict) -> tuple[int | N
 
 async def send_chat(client: httpx.AsyncClient, headers: dict,
                     conv_id: int, text: str, timeout: int = 120) -> dict:
-    """发送一轮对话，返回 {done, tokens, events, qc, refined, error, elapsed}。"""
+    """发送一轮对话(直调AI核心7102/generate)，返回 {done, tokens, events, qc, refined, error, elapsed}。"""
     t0 = time.time()
     result = {"done": False, "tokens": 0, "events": 0,
               "qc": False, "refined": False, "error": False, "elapsed": 0.0}
     try:
-        url = f"{BASE}/api/chat?q={quote_plus(text)}&conversation_id={conv_id}"
-        async with client.stream("GET", url, headers=headers, timeout=timeout) as resp:
+        job = {
+            "model_id": "deepseek", "messages": [{"role": "user", "content": text}],
+            "trace_id": f"test-{int(t0*1000)%1000000}", "conversation_id": conv_id,
+            "user_id": 1, "project_id": PROJ_ID or 1,
+        }
+        async with client.stream("POST", f"{AI_BASE}/generate", json=job,
+                                 headers={"Content-Type": "application/json"},
+                                 timeout=timeout) as resp:
             if resp.status_code != 200:
-                result["error"] = True
-                result["elapsed"] = time.time() - t0
-                return result
-            current_event = None
-            data_parts = []
+                result["error"] = True; result["elapsed"] = time.time() - t0; return result
+            current_event = None; data_parts = []
             async for line in resp.aiter_lines():
                 if line == "":
                     if current_event or data_parts:
                         data = "".join(data_parts)
                         if data:
-                            try:
-                                obj = json.loads(data)
-                            except json.JSONDecodeError:
-                                obj = {}
-                            if current_event == "done":
-                                result["done"] = True
-                            elif current_event in ("qc", "think"):
-                                if current_event == "qc":
-                                    result["qc"] = True
-                            elif current_event == "refined":
-                                result["refined"] = True
+                            try: obj = json.loads(data)
+                            except json.JSONDecodeError: obj = {}
+                            if current_event == "done": result["done"] = True
+                            elif current_event == "qc": result["qc"] = True
+                            elif current_event == "refined": result["refined"] = True
                             elif current_event == "token" and isinstance(obj.get("data"), str):
                                 result["tokens"] += len(obj["data"])
-                            elif current_event == "error":
-                                result["error"] = True
+                            elif current_event == "error": result["error"] = True
                             result["events"] += 1
-                    current_event = None
-                    data_parts = []
-                elif line.startswith("event: "):
-                    current_event = line[7:].strip()
-                elif line.startswith("data: "):
-                    data_parts.append(line[6:])
+                    current_event = None; data_parts = []
+                elif line.startswith("event: "): current_event = line[7:].strip()
+                elif line.startswith("data: "): data_parts.append(line[6:])
     except Exception:
         result["error"] = True
     result["elapsed"] = round(time.time() - t0, 1)

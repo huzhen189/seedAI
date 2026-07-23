@@ -4,17 +4,26 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
+import { useTheme, type ThemePref } from '../composables/theme'
 import AuthPanel from './AuthPanel.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
 const projectStore = useProjectStore()
 const convStore = useConversationStore()
+const { currentPref, setTheme } = useTheme()
 
 const searchText = ref('')
 
 const user = computed(() => auth.user)
 const searchResults = computed(() => projectStore.searchResults)
+
+// 主题分段控件(label + 图标)
+const themeOptions: { value: ThemePref; icon: string; label: string }[] = [
+  { value: 'light', icon: '☀️', label: '亮色' },
+  { value: 'dark', icon: '🌙', label: '暗色' },
+  { value: 'system', icon: '🖥️', label: '跟随系统' },
+]
 
 let timer: any
 function onSearch() {
@@ -65,6 +74,20 @@ function goSettings() {
       </div>
     </div>
     <div class="right">
+      <!-- 主题切换(light/dark/system) v0.9.0 #239 -->
+      <div class="theme-switch" role="group" aria-label="主题切换">
+        <button
+          v-for="opt in themeOptions"
+          :key="opt.value"
+          class="theme-opt"
+          :class="{ active: currentPref === opt.value }"
+          :title="opt.label"
+          :aria-pressed="currentPref === opt.value"
+          @click="setTheme(opt.value)"
+        >
+          <span class="ico">{{ opt.icon }}</span>
+        </button>
+      </div>
       <template v-if="user">
         <span class="avatar" title="点击进入设置" @click="goSettings">{{
           (user.nickname || user.username).slice(0, 1)
@@ -106,7 +129,7 @@ function goSettings() {
 }
 .navlink.router-link-active {
   color: var(--brand);
-  background: #eef2ff;
+  background: var(--active-bg);
   font-weight: 600;
 }
 .search {
@@ -126,7 +149,7 @@ function goSettings() {
   top: 38px;
   left: 0;
   right: 0;
-  background: #fff;
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
@@ -140,7 +163,7 @@ function goSettings() {
   cursor: pointer;
 }
 .item:hover {
-  background: #f3f4f6;
+  background: var(--hover-bg);
 }
 .tag {
   font-size: 11px;
@@ -192,5 +215,42 @@ function goSettings() {
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
+}
+/* 主题切换分段控件(v0.9.0 #239) */
+.theme-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: var(--hover-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.theme-opt {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  width: 28px;
+  height: 26px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  transition: background-color 0.2s ease, transform 0.15s ease;
+}
+.theme-opt:hover {
+  transform: translateY(-1px);
+}
+.theme-opt.active {
+  background: var(--panel);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+.theme-opt .ico {
+  filter: grayscale(0.2);
+}
+.theme-opt.active .ico {
+  filter: none;
 }
 </style>

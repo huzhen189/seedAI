@@ -127,7 +127,7 @@ async def _distill_memories(trace_id: str, user_id: int | None, project_id: int 
 async def _index_project_code(trace_id: str, project_id: int | None, skill_name: str) -> None:
     """P4(v0.9.0): 建站 done 后异步索引项目代码块到 Chroma project_code。
     仅 generate_site skill 触发; 失败仅 warn。"""
-    if skill_name != "generate_site" or project_id is None:
+    if skill_name not in ("agent_build", "agent_generate_site") or project_id is None:
         return
     try:
         import re
@@ -788,9 +788,8 @@ async def worker_loop(concurrency: int = 1):
                                 logger.info("[闲聊重答] 重答完成 len=%d", len(retry_text))
                     except Exception as _re:  # noqa: BLE001
                         logger.debug("[闲聊重答] 失败: %s", _re)
-                if done_event is not None:
-                    await q.publish(trace_id, done_event)
-                # L2 对话精炼(v0.9.0): done 后 LLM 去冗余 → 改写 Message.content(仅建站类)
+                # L2 对话精炼(v0.9.0): done 前 LLM 去冗余 → 改写 Message.content(仅建站类)
+                # 必须在 done 之前发布: 前端收到 done 即关闭 SSE, refined 才能被消费
                 if skill_name in ("agent_build", "agent_generate_site", "orchestrator") and qc_assistant_text.strip():
                     try:
                         refined = await _refine_assistant_dialog(qc_assistant_text)
@@ -800,6 +799,8 @@ async def worker_loop(concurrency: int = 1):
                         record_refine(len(qc_assistant_text), len(refined))  # v0.9.0 统计
                     except Exception as _le:  # noqa: BLE001
                         logger.debug("[Worker] L2 精炼失败: %s", _le)
+                if done_event is not None:
+                    await q.publish(trace_id, done_event)
                 # L2+ 蒸馏(v0.9.0 P3): 从精炼对话抽取项目记忆+用户偏好→写 Chroma
                 _user_id_job = job.get("user_id"); _project_id_job = job.get("project_id")
                 if _user_id_job or _project_id_job:

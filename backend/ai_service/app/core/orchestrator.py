@@ -8,7 +8,8 @@
 - 全部完成后调用 ResultMerger 合并为连贯中文回复
 
 对外: Orchestrator.execute() 为 async 生成器, 逐事件 yield(供 worker 透传 SSE)。
-注意: 编排器不.emit done —— done 由 worker 在 QC 之后统一发送(与单 skill 路径一致)。
+注意: 编排器在合并文本产出后统一 emit 一个 done 事件, 供 worker 识别多意图
+流程结束并发布 SSE done(与单 skill 路径收口一致, 避免前端 spinner 不消失)。
 """
 
 from __future__ import annotations
@@ -186,6 +187,10 @@ class Orchestrator:
         )
         # 合并文本作为 token 流(供前端气泡 + QC 落库)
         yield ev("token", data=merged_text, sub_task_id="__merge__")
+
+        # 多意图流程收口: 发 done 事件, worker 据此发布 SSE done 并终止流
+        # (单 skill 路径由 skill 自身发 done; 编排器在此统一收口)
+        yield ev("done", data={})
 
         orch_result = OrchestratorResult(
             success_results=success, failed_results=failed,

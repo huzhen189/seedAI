@@ -25,7 +25,7 @@ INTENT_SYSTEM = (
     "level1(3选1): chat|build|unsupported\n\n"
     "level2(只选对应 level1 下的):\n"
     "chat→casual(打招呼/闲聊/情感表达)|explain(解释概念/答疑)|compare(技术对比)|search(搜索查资料)|design(UI设计/配色/布局咨询)|translate(翻译)\n"
-    "build→requirement(需求分析/规划方案)|site(建完整网站)|page(单页/落地页)|modify(修改已有代码)|fix(修Bug)|review(代码评审)|game(互动小游戏)\n"
+    "build→requirement(需求分析/规划方案)|site(建完整网站)|page(单页/落地页)|modify(修改已有代码)|fix(修Bug)|review(代码评审)|game(互动小游戏)|doc(文档/README生成)\n"
     "unsupported→无子类\n"
     f"{UNSUPPORTED_HINT}\n\n"
     "industry(13选1, build/requirement 时必填, 其他填 none):\n"
@@ -50,7 +50,7 @@ INTENT_SYSTEM = (
 
 @dataclass
 class SemanticResult:
-    level1: str = "learn"
+    level1: str = "chat"
     level2: str = "casual"
     industry: str = "other"
     confidence: float = 0.5

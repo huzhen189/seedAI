@@ -219,6 +219,25 @@ async def reset_db() -> dict:
     except Exception as e:
         logger.warning("reset_db: Redis 清理失败: %s", e)
 
+    # 2.5) 清空 Chroma 所有集合(v0.9.0: 重置须同步清向量库, 与 reset_all.py 一致)
+    try:
+        from urllib.parse import urlparse as _up
+        import chromadb
+        chroma_url = getattr(settings, "chroma_url", None) or "http://chroma:8000"
+        p = _up(chroma_url)
+        c = chromadb.HttpClient(host=p.hostname or "localhost", port=p.port or 8000)
+        colls = c.list_collections()
+        for col in colls:
+            try:
+                name = col.name if hasattr(col, "name") else str(col)
+                c.delete_collection(name)
+                logger.info("reset_db: Chroma 集合已删除: %s", name)
+            except Exception as ce:
+                logger.warning("reset_db: Chroma 集合删除失败 %s: %s", col, ce)
+        logger.info("reset_db: Chroma 已清空(%d 个集合)", len(colls))
+    except Exception as e:
+        logger.warning("reset_db: Chroma 清理失败(可忽略): %s", e)
+
     # 3) 重建表
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

@@ -57,7 +57,9 @@ async def rag_retrieve(
             "results": [],
         }
     try:
-        client = chromadb.HttpClient(base_url=settings.chroma_url)
+        from urllib.parse import urlparse
+        p = urlparse(settings.chroma_url)
+        client = chromadb.HttpClient(host=p.hostname or "localhost", port=p.port or 8000)
         ef = embedding_functions.OpenAIEmbeddingFunction(
             api_key=settings.qwen_embedding_key,
             api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",

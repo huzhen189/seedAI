@@ -41,6 +41,8 @@ export interface ChatCallbacks {
   onMerge?: (data: MergeEvent) => void
   /** 后置 QC 三裁判结果(v0.8.5 M1):整体分 + 6 维聚合, 落入气泡徽标 */
   onQc?: (data: QcResult) => void
+  /** L2 精炼结果(v0.9.0): done 前下发的终版润色文本(建站类), 用于覆盖气泡内容 */
+  onRefined?: (data: string) => void
 }
 
 export interface StartChatOptions {
@@ -118,6 +120,11 @@ export function startChat(opts: StartChatOptions): EventSource {
   es.addEventListener('qc', (e) => {
     const d = safeParse((e as MessageEvent).data) as QcResult
     opts.cb.onQc?.(d)
+  })
+  es.addEventListener('refined', (e) => {
+    const d = safeParse((e as MessageEvent).data)
+    const text = typeof d.data === 'string' ? d.data : (e as MessageEvent).data
+    opts.cb.onRefined?.(text)
   })
   es.addEventListener('done', () => {
     console.log('[SSE] 收到 done, 关闭连接')
