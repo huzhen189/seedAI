@@ -11,47 +11,22 @@ from dataclasses import dataclass, field
 logger = logging.getLogger("ai_service.intent.tools")
 
 INTENT_SKILL_MAP: dict[tuple[str, str], str] = {
-    ("learn", "explain"): "explain",
-    ("learn", "debug"): "explain",
-    ("learn", "compare"): "explain",
-    ("learn", "casual"): "explain",
-    ("code", "snippet"): "write_code",
-    ("code", "component"): "write_code",
-    ("code", "fix"): "fix_agent",
-    ("code", "refactor"): "review_agent",
-    ("build", "page"): "generate_site",
-    ("build", "site"): "generate_site",
-    ("build", "modify"): "generate_site",
-    ("build", "game"): "generate_site",
-    ("build", "requirement"): "requirement_agent",
-    ("learn", "design"): "design_agent",
-    ("learn", "search"): "search_agent",
-    ("doc", "readme"): "generate_doc",
-    ("doc", "tutorial"): "generate_doc",
-    ("doc", "plan"): "generate_doc",
-    ("translate", "text"): "explain",
-    ("translate", "code_lang"): "agent_build",
+    # Chat 方向 → Agent
+    ("chat", "casual"): "agent_chat",
+    ("chat", "explain"): "agent_chat",
+    ("chat", "compare"): "agent_chat",
+    ("chat", "translate"): "agent_chat",
+    ("chat", "search"): "agent_search",
+    ("chat", "design"): "agent_design",
+    # Build 方向 → Agent
+    ("build", "requirement"): "agent_requirement",
+    ("build", "site"): "agent_build",
+    ("build", "page"): "agent_build",
+    ("build", "modify"): "agent_build",
+    ("build", "game"): "agent_build",
+    ("build", "fix"): "agent_review",
+    ("build", "review"): "agent_review",
 }
-# v1.0: 重映射到新 agent 命名空间
-_REMAP = {
-    "explain": "agent_chat",
-    "write_code": "agent_build",
-    "fix_agent": "agent_review",
-    "review_agent": "agent_review",
-    "generate_site": "agent_build",
-    "requirement_agent": "agent_requirement",
-    "design_agent": "agent_design",
-    "search_agent": "agent_search",
-    "generate_doc": "agent_doc",
-}
-_INTENT_MAP_REBUILT = False
-if not _INTENT_MAP_REBUILT:
-    new_map = {}
-    for (l1, l2), old_name in list(INTENT_SKILL_MAP.items()):
-        new_map[(l1, l2)] = _REMAP.get(old_name, old_name)
-    INTENT_SKILL_MAP.clear()
-    INTENT_SKILL_MAP.update(new_map)
-    _INTENT_MAP_REBUILT = True
 
 
 @dataclass

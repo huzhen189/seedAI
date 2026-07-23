@@ -20,20 +20,19 @@ from ..registry import SkillRegistry
 
 logger = logging.getLogger("ai_service.router")
 
-# 两级标签(前端展示)
+# 两级标签(v1.0: Chat/Build 两大方向)
 LEVEL1_LABELS = {
-    "learn": "学习理解", "code": "编码实战", "build": "建站生成",
-    "doc": "文档方案", "translate": "翻译转换", "unsupported": "不支持",
+    "chat": "智能对话", "build": "建站生成", "unsupported": "不支持",
 }
 
 LEVEL2_LABELS: dict[str, str] = {
-    "explain": "概念解释", "debug": "排查报错", "compare": "技术对比",
-    "casual": "需求沟通", "snippet": "函数片段", "component": "UI组件",
-    "fix": "修复Bug", "refactor": "重构优化", "page": "单页/落地页",
-    "site": "完整网站", "modify": "修改已有", "game": "互动游戏",
-    "readme": "README", "tutorial": "教程指南", "plan": "方案设计",
-    "text": "文本翻译", "code_lang": "代码翻译", "design": "UI设计",
-    "search": "联网搜索",
+    # Chat 方向
+    "casual": "闲聊", "explain": "概念解释", "compare": "技术对比",
+    "search": "联网搜索", "design": "设计咨询", "translate": "翻译",
+    # Build 方向
+    "requirement": "需求分析", "site": "完整网站", "page": "单页",
+    "modify": "修改已有", "fix": "修复Bug", "review": "代码评审",
+    "game": "互动游戏",
 }
 
 

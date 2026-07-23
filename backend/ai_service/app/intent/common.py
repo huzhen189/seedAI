@@ -6,14 +6,13 @@ rules.py / semantic.py 原先各自重复定义 VALID_LEVEL1/2/INDUSTRIES,
 
 from __future__ import annotations
 
-# 有效的意图值域(单一来源)
-VALID_LEVEL1 = frozenset({"learn", "code", "build", "doc", "translate", "unsupported"})
+# 有效的意图值域(v1.0: Chat/Build 两大方向)
+VALID_LEVEL1 = frozenset({"chat", "build", "unsupported"})
 VALID_LEVEL2 = frozenset({
-    "explain", "debug", "compare", "casual",
-    "snippet", "component", "fix", "refactor",
-    "page", "site", "modify", "game",
-    "readme", "tutorial", "plan",
-    "text", "code_lang", "design", "search",
+    # Chat 方向
+    "casual", "explain", "compare", "search", "design", "translate",
+    # Build 方向
+    "requirement", "site", "page", "modify", "fix", "review", "game",
 })
 VALID_INDUSTRIES = frozenset({
     "restaurant", "ecommerce", "gov", "edu", "health",
@@ -21,13 +20,16 @@ VALID_INDUSTRIES = frozenset({
     "travel", "other", "none",
 })
 
-# 旧版意图名 → 新版 (level1, level2)
+# 旧版意图名 → 新版(v1.0 Chat/Build)
 OLD_TO_LEVELS = {
+    "learn_explain": ("chat", "explain"),
+    "learn_casual": ("chat", "casual"),
+    "learn_search": ("chat", "search"),
+    "learn_design": ("chat", "design"),
     "build_site": ("build", "site"),
     "build_page": ("build", "page"),
-    "code_snippet": ("code", "snippet"),
-    "learn_explain": ("learn", "explain"),
-    "learn_casual": ("learn", "casual"),
+    "code_fix": ("build", "fix"),
+    "code_review": ("build", "review"),
 }
 
 
