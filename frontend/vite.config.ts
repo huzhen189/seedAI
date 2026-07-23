@@ -14,11 +14,12 @@ export default defineConfig({
   server: {
     host: true,
     port: 7100,
-    // WebLLM 需要 SharedArrayBuffer → 跨域隔离头
-    headers: {
-      'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp',
-    },
+    // WebLLM 需要 SharedArrayBuffer → 跨域隔离头(仅生产 HTTPS 生效,本地 HTTP 会触发 COOP 忽略警告)
+    // v1.0: dev 模式移除, 本地用 HTTP 不需要且会干扰 fetch
+    // headers: {
+    //   'Cross-Origin-Opener-Policy': 'same-origin',
+    //   'Cross-Origin-Embedder-Policy': 'require-corp',
+    // },
     // Vite 5.4+ 默认拦截非 localhost 的 Host 头(防 DNS 重绑定),
     // 本地 dev 用自定义域名访问需关闭该检查(仅本地开发,生产走 nginx 不受影响)。
     allowedHosts: true,
