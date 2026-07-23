@@ -60,6 +60,12 @@ _worker_task = None
 async def lifespan(app: FastAPI):
     global _worker_task
     get_queue()  # 确保队列单例初始化(副作用)
+    # 启动即确定性重建 Chroma 集合结构(重置数据删空集合后, 重启 AI 服务即重建)
+    try:
+        from .knowledge.chroma import ensure_collections
+        ensure_collections()
+    except Exception as e:
+        logger.warning("lifespan: ensure_collections 失败(可忽略): %s", e)
     # 启动 Worker 池(消费 queue:generate,发布进度)
     _worker_task = __import__("asyncio").ensure_future(
         worker_loop(concurrency=settings.worker_concurrency)

@@ -22,6 +22,10 @@ logger = logging.getLogger("ai_service.rag")
 # 注入 Planner 的 RAG 上下文上限,防 prompt 过长
 _RAG_INJECT_MAX_CHARS = 4000
 
+# 对话上下文集合(向量相似度边界检测)。提到顶部,供 _ALL_COLLECTIONS 引用。
+CTX_COLLECTION = "conversation_context"
+CTX_SIMILARITY_THRESHOLD = 0.55  # 余弦相似度 < 0.55 视为无关
+
 
 def _client():
     from urllib.parse import urlparse
@@ -54,6 +58,44 @@ def _available() -> bool:
         return _ef() is not None
     except Exception:
         return False
+
+
+# 全部集合名(单一事实来源)。重置数据会 delete_collection 删空集合,
+# ensure_collections() 据此在 AI 服务启动时确定性地重建向量库"结构"。
+_ALL_COLLECTIONS = [
+    settings.chroma_collection_components,
+    settings.chroma_collection_memory,
+    settings.chroma_collection_cache,
+    settings.chroma_collection_user_preferences,
+    settings.chroma_collection_project_memory,
+    settings.chroma_collection_project_code,
+    settings.chroma_collection_error_patterns,
+    CTX_COLLECTION,
+]
+
+
+def ensure_collections() -> None:
+    """确保全部 Chroma 集合存在(用统一 _ef 创建)。
+
+    重置数据后会删空集合, 本函数在 AI 服务启动时调用, 确定性地重建向量库
+    '结构', 避免首个 RAG / 上下文检索调用前因集合缺失而 404。
+    用 get_or_create_collection, 集合已存在则不报错(且 ef 一致, 不会触发
+    embedding 函数不匹配)。
+    """
+    if not _available():
+        logger.warning("ensure_collections: embedding 不可用, 跳过(向量库降级)")
+        return
+    try:
+        client = _client()
+        ef = _ef()
+        for name in _ALL_COLLECTIONS:
+            try:
+                client.get_or_create_collection(name=name, embedding_function=ef)
+            except Exception as e:
+                logger.warning("ensure_collections: 创建 %s 失败: %s", name, e)
+        logger.info("ensure_collections: 已确保 %d 个集合存在", len(_ALL_COLLECTIONS))
+    except Exception as e:
+        logger.warning("ensure_collections 失败(可忽略): %s", e)
 
 
 def _short_hash(s: str) -> str:
@@ -187,8 +229,6 @@ def seed_components(items: list[dict]) -> int:
 
 
 # ---- 对话上下文关联(向量相似度边界检测) ----
-CTX_COLLECTION = "conversation_context"
-CTX_SIMILARITY_THRESHOLD = 0.55  # 余弦相似度 < 0.55 视为无关
 
 
 def index_message(msg_id: int, conversation_id: int, role: str, content: str) -> None:
@@ -212,7 +252,9 @@ def find_relevant_messages(query: str, conversation_id: int, top_k: int = 10) ->
     if not _available():
         return []
     try:
-        col = _client().get_collection(name=CTX_COLLECTION, embedding_function=_ef())
+        # 用 get_or_create 而非 get_collection: 集合尚未创建时也能自愈,
+        # 避免重置后集合被删、本函数抢先执行而抛 404。
+        col = _client().get_or_create_collection(name=CTX_COLLECTION, embedding_function=_ef())
         res = col.query(
             query_texts=[query],
             n_results=min(top_k, 20),
