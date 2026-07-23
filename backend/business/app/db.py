@@ -250,13 +250,13 @@ def schedule_biz_restart() -> None:
         old_pid = _os.getpid()
         venv_py = _sys.executable
         cwd = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..")
-        # 写临时 bat(延迟杀旧进程再起新进程, 避开端口冲突)
         bat = _os.path.join(_tmp.gettempdir(), "seedai_biz_restart.bat")
         lines = [
             "@echo off",
-            f"timeout /t 1 /nobreak >nul",
+            # 先杀 7101 上所有 LISTENING 进程, 再起新的, 避免端口残留幽灵进程
+            "for /f \"tokens=5\" %%a in ('netstat -ano ^| findstr :7101 ^| findstr LISTENING') do taskkill /PID %%a /F 2>nul",
             f"taskkill /PID {old_pid} /F 2>nul",
-            f"timeout /t 1 /nobreak >nul",
+            "timeout /t 2 /nobreak >nul",
             f'cd /d "{cwd}"',
             f'"{venv_py}" -m uvicorn app.main:app --app-dir backend\\\\business --host 0.0.0.0 --port 7101',
         ]
