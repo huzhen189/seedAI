@@ -369,15 +369,135 @@ async def main():
         print(f"总耗时: {stats['total_time']:.0f}s | done={stats['done_sum']} qc={stats['qc_sum']} refined={stats['refined_sum']}")
         print(f"{'='*60}")
 
-        # CSV 输出
+        # 4. 收集后端统计
+        backend_stats = {}
+        print(f"\n{'─'*60}")
+        print("[后端统计拉取]")
+        try:
+            mr = await client.get(f"{BASE}/admin/metrics", headers=hdrs)
+            if mr.status_code == 200:
+                backend_stats["metrics"] = mr.json()
+                m = backend_stats["metrics"]
+                print(f"  请求总数:{m.get('requests_total',0)} 错误:{m.get('requests_error',0)} RPM:{m.get('requests_per_min',0)}")
+                mu = m.get("model_usage", {})
+                for mdl, info in mu.items():
+                    if isinstance(info, dict):
+                        print(f"  {mdl}: {info.get('count',0)}次 {info.get('tokens',0)}tokens")
+        except Exception as e:
+            print(f"  metrics 获取失败: {e}")
+
+        try:
+            ar = await client.get(f"{BASE}/admin/analytics", headers=hdrs)
+            if ar.status_code == 200:
+                al_data = ar.json()
+                backend_stats["analytics"] = al_data
+                print(f"  QC 总数:{al_data.get('qc',{}).get('count',0)} "
+                      f"整体均分:{al_data.get('qc',{}).get('overall_avg','-')}")
+                v090 = al_data.get("v090_features", {})
+                if v090:
+                    print(f"  v0.9.0 功能: {v090}")
+        except Exception as e:
+            print(f"  analytics 获取失败: {e}")
+
+        # 5. 分类统计
+        cat_stats = {}
+        for _, cat, _, ok, r_ in rows:
+            if cat not in cat_stats:
+                cat_stats[cat] = {"total": 0, "pass": 0, "time": 0.0, "qc": 0, "refined": 0}
+            cat_stats[cat]["total"] += 1
+            cat_stats[cat]["time"] += r_["elapsed"]
+            if ok:
+                cat_stats[cat]["pass"] += 1
+            if r_["qc"]:
+                cat_stats[cat]["qc"] += 1
+            if r_["refined"]:
+                cat_stats[cat]["refined"] += 1
+
+        # 6. 生成完整测试报告
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        report_path = f"reports/test-{ts}.md"
+        os.makedirs("reports", exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(f"# SeedAI 回归测试报告\n\n")
+            f.write(f"> 测试时间: {time.strftime('%Y-%m-%d %H:%M:%S')} | 目标: {BASE} | 用户: {USER}\n")
+            f.write(f"> 测试条数: {len(cases)} ({'快速' if quick else '完整'}模式)\n\n")
+
+            f.write(f"## 总览\n\n")
+            f.write(f"| 指标 | 值 |\n|---|---|\n")
+            f.write(f"| 通过率 | **{rate:.1f}%** ({stats['pass']}/{stats['total']}) |\n")
+            f.write(f"| done 事件 | {stats['done_sum']} 条 |\n")
+            f.write(f"| QC 触发 | {stats['qc_sum']} 次 |\n")
+            f.write(f"| L2 精炼 | {stats['refined_sum']} 次 |\n")
+            f.write(f"| 总耗时 | {stats['total_time']:.0f}s |\n")
+            f.write(f"| 平均耗时 | {stats['total_time']/max(stats['total'],1):.1f}s/条 |\n\n")
+
+            f.write(f"## 按类别统计\n\n")
+            f.write(f"| 类别 | 总数 | 通过 | 通过率 | 耗时 | QC | 精炼 |\n")
+            f.write(f"|---|---|---|---|---|---|---|\n")
+            for cat in sorted(cat_stats):
+                cs = cat_stats[cat]
+                r_ = cs["pass"] / max(cs["total"], 1) * 100
+                f.write(f"| {cat} | {cs['total']} | {cs['pass']} | {r_:.0f}% | {cs['time']:.0f}s | {cs['qc']} | {cs['refined']} |\n")
+
+            f.write(f"\n## 详细结果\n\n")
+            f.write(f"| # | 类别 | 输入(前30字) | 结果 | done | tok | ev | qc | ref | 耗时 |\n")
+            f.write(f"|---|---|---|---|---|---|---|---|---|---|\n")
+            for i, cat, txt, ok, r_ in rows:
+                s = "✅" if ok else "❌"
+                f.write(f"| {i} | {cat} | {txt[:30]} | {s} | {r_['done']} | {r_['tokens']} | {r_['events']} | {r_['qc']} | {r_['refined']} | {r_['elapsed']}s |\n")
+
+            f.write(f"\n## 后端统计快照\n\n")
+            if backend_stats.get("metrics"):
+                m = backend_stats["metrics"]
+                f.write(f"### 运行指标\n")
+                f.write(f"- 运行时长: {m.get('uptime_s',0)//3600}h{(m.get('uptime_s',0)%3600)//60}m\n")
+                f.write(f"- 总请求: {m.get('requests_total',0)} | 错误: {m.get('requests_error',0)} | RPM: {m.get('requests_per_min',0)}\n")
+                mu = m.get("model_usage", {})
+                if mu:
+                    f.write(f"- 模型用量:\n")
+                    for mdl, info in mu.items():
+                        if isinstance(info, dict):
+                            f.write(f"  - {mdl}: {info.get('count',0)}次 / {info.get('tokens',0)}tokens / ${info.get('est_cost',0)}\n")
+                lat = m.get("api_latency", {})
+                if lat:
+                    f.write(f"- API 延迟:\n")
+                    for p, l in lat.items():
+                        f.write(f"  - `{p}`: P50={l.get('p50',0)}ms P90={l.get('p90',0)}ms P99={l.get('p99',0)}ms\n")
+
+            if backend_stats.get("analytics"):
+                a = backend_stats["analytics"]
+                f.write(f"\n### 系统分析\n")
+                f.write(f"- AI 总生成: {a.get('orchestration',{}).get('ai_core_requests',0)} 次\n")
+                qc_a = a.get("qc", {})
+                f.write(f"- QC 统计: {qc_a.get('count',0)}次, 均分{'-' if qc_a.get('overall_avg') is None else qc_a['overall_avg']}, 复核率{qc_a.get('review_rate',0)}\n")
+                fb = a.get("feedback", {})
+                if fb.get("count", 0) > 0:
+                    f.write(f"- 用户反馈: {fb.get('count',0)}条, 均分{fb.get('avg_rating','-')}\n")
+                v090 = a.get("v090_features", {})
+                if v090:
+                    f.write(f"- v0.9.0 功能: {v090}\n")
+                fa = a.get("frontend_access", {})
+                if fa:
+                    f.write(f"- 前端访问: {sum(fa.values())} 次\n")
+
+            f.write(f"\n## 日志摘要\n\n")
+            f.write(f"```\n")
+            f.write(f"测试开始: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() - stats['total_time']))}\n")
+            f.write(f"测试结束: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"项目ID: {PROJ_ID} | 对话ID: {CONV_ID}\n")
+            f.write(f"```\n")
+            f.write(f"\n> 完整后端日志见: `backend/business/logs/business.log` / `backend/ai_service/logs/ai_service.log`\n")
+
+        print(f"\n📄 报告: {report_path}")
+
+        # CSV 可选
         if csv_out:
-            csv_path = "reports/regression-test.csv"
-            os.makedirs("reports", exist_ok=True)
+            csv_path = f"reports/test-{ts}.csv"
             with open(csv_path, "w", encoding="utf-8", newline="") as f:
                 f.write("idx,category,input,passed,done,qc,refined,events,tokens,elapsed\r\n")
-                for i, cat, txt, ok, r in rows:
-                    f.write(f"{i},{cat},{txt},{ok},{r['done']},{r['qc']},{r['refined']},{r['events']},{r['tokens']},{r['elapsed']}\r\n")
-            print(f"CSV: {csv_path}")
+                for i, cat, txt, ok, r_ in rows:
+                    f.write(f"{i},{cat},{txt},{ok},{r_['done']},{r_['qc']},{r_['refined']},{r_['events']},{r_['tokens']},{r_['elapsed']}\r\n")
+            print(f"📊 CSV: {csv_path}")
 
 
 if __name__ == "__main__":
