@@ -5,7 +5,7 @@
 执行后:
   1. DROP 所有业务表
   2. FLUSHDB 清空 Redis
-  3. 清空 Chroma 所有集合数据
+  3. 清空 Chroma **运行数据**集合(用户/项目运行时数据), **保留配置/知识类集合**(规则/意图/组件库等)
   4. 重建表 + 补齐缺失列
   5. 自动创建默认超管用户: huzhen / huzhen189 / 超级管理员
   6. 提示重启两个后端服务
@@ -55,21 +55,45 @@ async def reset() -> None:
         except Exception as e:
             print(f"  >> Redis 清理失败: {e}")
 
-    # 2.5) 清空 Chroma 所有集合(v0.9.0 新增)
+    # 2.5) 清空 Chroma 运行数据集合, 保留配置/知识类集合(规则/意图/组件库等)
+    #      集合名与 backend/ai_service/app/config.py 保持一致。
+    #      - 配置/知识集合(保留): components(组件库) / error_patterns(错误模式库) / intents(意图向量索引)
+    #      - 运行数据集合(清空): memory / cache_gen / user_preferences / project_memory / project_code
+    #      说明: 规则 JSON 文件(intent_catalog.json / rules_catalog.json / ruleset.json)在磁盘上,
+    #           本脚本不触碰, 天然安全; 此处仅针对 Chroma 内"由规则派生的向量索引"做保留。
     try:
         from urllib.parse import urlparse as _up
         import chromadb
         chroma_url = getattr(settings, 'chroma_url', None) or "http://chroma:8000"
         p = _up(chroma_url)
         c = chromadb.HttpClient(host=p.hostname or "localhost", port=p.port or 8000)
+
+        # 配置/知识类集合 —— 重置时**保留**, 不删除(规则等配置项)
+        CHROMA_CONFIG_COLLECTIONS = {"components", "error_patterns", "intents"}
+        # 运行数据集合 —— 用户/项目运行时数据, 重置时**清空**
+        CHROMA_RUNTIME_COLLECTIONS = {
+            "memory", "cache_gen", "user_preferences", "project_memory", "project_code",
+        }
+
         colls = c.list_collections()
+        kept, cleared = 0, 0
         for col in colls:
-            try:
-                c.delete_collection(col.name if hasattr(col, 'name') else str(col))
-                print(f"  >> Chroma 集合已删除: {col}")
-            except Exception:
-                print(f"  >> Chroma 集合删除失败: {col}")
-        print(f"  >> Chroma 已清空({len(colls)} 个集合)")
+            name = col.name if hasattr(col, "name") else str(col)
+            if name in CHROMA_CONFIG_COLLECTIONS:
+                print(f"  >> 保留配置集合(不删): {name}")
+                kept += 1
+            elif name in CHROMA_RUNTIME_COLLECTIONS:
+                try:
+                    c.delete_collection(name)
+                    print(f"  >> 已清空运行数据集合: {name}")
+                    cleared += 1
+                except Exception as e:
+                    print(f"  >> 清空集合失败 {name}: {e}")
+            else:
+                # 未知集合: 安全起见保留并告警, 避免误删配置
+                print(f"  >> 未知集合, 安全保留并告警: {name}")
+                kept += 1
+        print(f"  >> Chroma 处理完成: 清空 {cleared} 个运行数据集合, 保留 {kept} 个配置/未知集合")
     except Exception as e:
         print(f"  >> Chroma 清理失败(可忽略): {e}")
 
