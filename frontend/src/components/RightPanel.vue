@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import type { Artifact } from '../types'
 import MarkdownView from './MarkdownView.vue'
 
@@ -65,11 +65,12 @@ function iconFor(name: string) {
   return map[e] || '📄'
 }
 
-function previewMode(name: string): 'html' | 'image' | 'code' | 'requirement' {
+function previewMode(name: string): 'html' | 'image' | 'code' | 'md' | 'requirement' {
   if (name === '__requirement_doc__') return 'requirement'
   const e = ext(name)
   if (['html', 'htm'].includes(e)) return 'html'
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(e)) return 'image'
+  if (['md', 'markdown'].includes(e)) return 'md'
   return 'code'
 }
 
@@ -124,17 +125,38 @@ const mode = computed(() => {
   return currentFile.value ? previewMode(currentFile.value.name) : 'none'
 })
 
-// 需求文档下载为 .txt(走后端 /api/projects/{id}/requirement-doc)
+// Markdown 文件预览内容: 优先用内联 content, 否则按 url 拉取
+const mdContent = ref<string>('')
+watch(
+  () => [mode.value, currentFile.value?.name, currentFile.value?.artifactId, currentFile.value?.url],
+  async () => {
+    if (mode.value !== 'md' || !currentFile.value) { mdContent.value = ''; return }
+    const f = currentFile.value
+    const inline = (f.artifact.files?.[f.name] as any)?.content
+    if (inline) { mdContent.value = inline; return }
+    if (f.url) {
+      try {
+        const resp = await fetch(f.url)
+        mdContent.value = await resp.text()
+        return
+      } catch { /* 拉取失败, 走下方兜底 */ }
+    }
+    mdContent.value = '(无法加载 Markdown 内容)'
+  },
+  { immediate: true },
+)
+
+// 需求文档下载统一为 .md(走后端 /api/projects/{id}/requirement-doc)
 async function downloadReqDoc() {
   if (!props.projectId || !props.requirementDoc) return
   try {
     const resp = await fetch(`/api/projects/${props.projectId}/requirement-doc`)
     if (!resp.ok) return
     const text = await resp.text()
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    a.download = `requirement_doc_${props.projectId}.txt`
+    a.download = `requirement_doc_${props.projectId}.md`
     a.click()
     URL.revokeObjectURL(a.href)
   } catch { /* 下载失败忽略 */ }
@@ -155,8 +177,8 @@ defineExpose({ selectFile })
         @click="selectFile('__requirement_doc__')"
       >
         <span class="tree-icon">📄</span>
-        <span class="tree-name">{{ requirementDoc.brand?.name || '需求文档' }}.txt</span>
-        <button class="dl-btn" title="下载 .txt" @click.stop="downloadReqDoc()">⬇</button>
+        <span class="tree-name">{{ requirementDoc.brand?.name || '需求文档' }}.md</span>
+        <button class="dl-btn" title="下载 .md" @click.stop="downloadReqDoc()">⬇</button>
       </div>
     </div>
 
@@ -241,6 +263,14 @@ defineExpose({ selectFile })
       <!-- 图片预览 -->
       <div v-else-if="mode === 'image' && currentFile?.url" class="pv-image">
         <img :src="currentFile.url" :alt="currentFile.name" />
+      </div>
+
+      <!-- Markdown 预览 -->
+      <div v-else-if="mode === 'md' && currentFile" class="pv-md">
+        <div class="pv-code-head">{{ currentFile.name }}</div>
+        <div class="pv-md-body">
+          <MarkdownView :content="mdContent" />
+        </div>
       </div>
 
       <!-- 代码/文本预览 -->
@@ -395,6 +425,19 @@ defineExpose({ selectFile })
   height: 100%;
   overflow: auto;
   padding: 12px;
+}
+.pv-md {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.pv-md-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  font-size: 13px;
+  line-height: 1.6;
 }
 .pv-code-head {
   font-size: 12px;

@@ -304,13 +304,53 @@ async def list_artifacts(
     ]
 
 
+def _doc_to_markdown(doc: dict) -> str:
+    """把旧格式(或任意)需求文档字典转成可读 Markdown, 避免下载文件扩展名与内容格式不一致。"""
+    lines: list[str] = []
+    brand = doc.get("brand") or {}
+    if isinstance(brand, dict):
+        name = brand.get("name") or "需求文档"
+        lines.append(f"# {name}")
+        if brand.get("slogan"):
+            lines.append(f"> {brand['slogan']}")
+        if brand.get("intro"):
+            lines += ["", brand["intro"]]
+    else:
+        lines.append("# 需求文档")
+    if doc.get("target_user"):
+        lines += ["", "## 目标用户", "", str(doc["target_user"])]
+    pages = doc.get("pages") or []
+    if pages:
+        lines += ["", "## 页面结构", ""]
+        for p in pages:
+            if not isinstance(p, dict):
+                lines.append(f"- {p}")
+                continue
+            lines.append(f"### {p.get('title', '页面')}")
+            for s in (p.get("sections") or []):
+                if isinstance(s, dict):
+                    lines.append(f"- **{s.get('name', '')}**: {s.get('content', '')}")
+    feats = doc.get("features") or []
+    if feats:
+        lines += ["", "## 功能清单", ""]
+        for f in feats:
+            lines.append(f"- {f}")
+    if doc.get("design_style"):
+        lines += ["", "## 设计风格", "", str(doc["design_style"])]
+    cs = doc.get("color_scheme") or {}
+    if isinstance(cs, dict) and cs:
+        lines.append("")
+        lines.append("色值: " + "  ".join(f"{k}={v}" for k, v in cs.items()))
+    return "\n".join(lines)
+
+
 @router.get("/projects/{project_id}/requirement-doc")
 async def download_requirement_doc(
     project_id: int,
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """下载需求文档。若含 PM 详细报告(report 字段)则返回 Markdown(.md)，否则返回原始 JSON(.txt)。requirement_doc 落库于 projects 表, 未单独传 COS。"""
+    """下载需求文档。统一返回 Markdown(.md): 含 PM 详细报告(report)则用报告正文, 否则把结构化文档转成可读 Markdown。模型原始输出(raw_llm_output)一并拼接。requirement_doc 落库于 projects 表, 未单独传 COS。"""
     import json
     from fastapi.responses import Response
 
@@ -329,17 +369,17 @@ async def download_requirement_doc(
     raw_out = ""
     if isinstance(doc, dict) and isinstance(doc.get("raw_llm_output"), str) and doc["raw_llm_output"].strip():
         raw_out = doc["raw_llm_output"]
-    # 优先返回产品经理视角的详细报告(Markdown); 无 report 字段时回退到原始 JSON
+    # 统一返回 Markdown(.md): 有 report 用报告正文, 否则把结构化文档转成可读 Markdown
     if isinstance(doc, dict) and isinstance(doc.get("report"), str) and doc["report"].strip():
         text = doc["report"]
-        if raw_out:
-            text = text.rstrip() + "\n\n---\n\n## 原始生成内容（模型原始输出）\n\n```text\n" + raw_out + "\n```\n"
-        filename = f"requirement_report_{project_id}.md"
-        media = "text/markdown; charset=utf-8"
+    elif isinstance(doc, dict):
+        text = _doc_to_markdown(doc)
     else:
-        text = json.dumps(doc, ensure_ascii=False, indent=2) if isinstance(doc, (dict, list)) else str(doc)
-        filename = f"requirement_doc_{project_id}.txt"
-        media = "text/plain; charset=utf-8"
+        text = json.dumps(doc, ensure_ascii=False, indent=2)
+    if raw_out:
+        text = text.rstrip() + "\n\n---\n\n## 原始生成内容（模型原始输出）\n\n```text\n" + raw_out + "\n```\n"
+    filename = f"requirement_doc_{project_id}.md"
+    media = "text/markdown; charset=utf-8"
     return Response(
         content=text,
         media_type=media,

@@ -388,7 +388,7 @@ function openArtifact(name: string, kind: 'requirement' | 'file') {
   nextTick(() => rightPanel.value?.selectFile(target))
 }
 
-// 需求文档下载为 .txt(走后端 /api/projects/{id}/requirement-doc)
+// 需求文档下载统一为 .md(走后端 /api/projects/{id}/requirement-doc)
 async function downloadReqDoc() {
   const pid = projectStore.currentProjectId
   if (pid == null) return
@@ -396,10 +396,10 @@ async function downloadReqDoc() {
     const resp = await fetch(`/api/projects/${pid}/requirement-doc`)
     if (!resp.ok) return
     const text = await resp.text()
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    a.download = `requirement_doc_${pid}.txt`
+    a.download = `requirement_doc_${pid}.md`
     a.click()
     URL.revokeObjectURL(a.href)
   } catch { /* 下载失败忽略 */ }
@@ -1187,7 +1187,7 @@ watch(pendingRetry, (r) => {
             >
               <span class="asc-icon">{{ link.icon }}</span>
               <span class="asc-name">{{ link.name }}</span>
-              <span v-if="link.kind === 'requirement'" class="asc-dl" title="下载 .txt" @click.stop="downloadReqDoc()">⬇</span>
+              <span v-if="link.kind === 'requirement'" class="asc-dl" title="下载 .md" @click.stop="downloadReqDoc()">⬇</span>
               <span class="asc-open">打开 ↗</span>
             </button>
           </div>
@@ -1288,7 +1288,7 @@ watch(pendingRetry, (r) => {
             >
               <span class="alc-icon">{{ link.icon }}</span>
               <span class="alc-name">{{ link.name }}</span>
-              <span v-if="link.kind === 'requirement'" class="alc-dl" title="下载 .txt" @click.stop="downloadReqDoc()">⬇</span>
+              <span v-if="link.kind === 'requirement'" class="alc-dl" title="下载 .md" @click.stop="downloadReqDoc()">⬇</span>
               <span class="alc-open">打开 ↗</span>
             </button>
           </div>
