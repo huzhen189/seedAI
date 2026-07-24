@@ -138,6 +138,8 @@ const selectedOption = ref('')  // radio 单选绑定
 const pendingOptionsText = ref('')  // 已确认但未发送的选项文本
 // 非阻塞候选提示(管道级 alternatives 事件): 系统已自行决定 top-1, 列出可切换候选
 const alternativesData = ref<AlternativesEvent | null>(null)
+// SIR 澄清卡(CLARIFY 事件): 意图模糊/缺规格时下发动态最少必要追问
+const clarifyData = ref<{ questions: string[]; rounds: number } | null>(null)
 
 // 把用户输入解析为候选项索引(A-H / 1-9 / 中文数字 / 选X / 用X / 切换X / 第X个);
 // 不是选择则返 null。对齐后端 intent/selection.parse_selection。
@@ -573,6 +575,8 @@ function resetGenState() {
   mergeResult.value = null
   // 非阻塞候选提示(新请求时清除)
   alternativesData.value = null
+  // SIR 澄清卡(新请求时清除)
+  clarifyData.value = null
 }
 
 function upsertStep(stage: string, status: ThoughtStep['status'], customLabel?: string) {
@@ -732,6 +736,13 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       generating.value = false
       finished.value = true
       errorMsg.value = '暂不支持此功能，请尝试其他类型请求'
+      clearActiveGen()
+    },
+    onClarify: (d: { questions: string[]; rounds: number }) => {
+      // SIR 澄清: 意图模糊/缺规格 → 展示动态最少必要追问, 用户直接回复补充(不阻塞)
+      generating.value = false
+      finished.value = true
+      clarifyData.value = { questions: d.questions || [], rounds: d.rounds || 0 }
       clearActiveGen()
     },
     onBlock: (d: BlockEvent) => {
@@ -1293,6 +1304,15 @@ watch(pendingRetry, (r) => {
           >{{ String.fromCharCode(66 + i) }}. {{ sk }}</button>
           <span class="alts-tip">（输入字母如「B」或「用 {{ alternativesData.skills[0] }}」也可切换）</span>
         </div>
+        <!-- SIR 澄清卡: 意图模糊/缺规格时, 展示动态最少必要追问, 用户直接回复补充 -->
+        <div v-if="clarifyData && clarifyData.questions.length" class="clarify-card">
+          <div class="clarify-head">💬 为了更精准地帮你，确认一下：</div>
+          <ul class="clarify-list">
+            <li v-for="(q, i) in clarifyData.questions" :key="i">{{ q }}</li>
+          </ul>
+          <div class="clarify-hint" v-if="clarifyData.rounds > 0">（第 {{ clarifyData.rounds }} 轮追问，直接回复补充信息即可）</div>
+          <div class="clarify-hint">💡 直接在下方的输入框补充回答，或回复「随便聊聊」退出。</div>
+        </div>
         <!-- 方案已就绪: 文字产物链接(替代确认模态框) -->
         <div v-if="awaitingConfirm" class="artifact-links-card">
           <div class="alc-head">📦 需求方案已生成，预览已自动打开</div>
@@ -1702,6 +1722,17 @@ watch(pendingRetry, (r) => {
 }
 .alts-chip:hover { background: #10b981; color: #fff; transform: translateY(-1px); }
 .alts-tip { color: #94a3b8; font-size: 11px; }
+
+/* ── SIR 澄清卡 ── */
+.clarify-card {
+  padding: 12px 16px; margin: 0 16px 8px;
+  background: rgba(99,102,241,.08); border: 1px solid #a5b4fc;
+  border-radius: 12px; font-size: 13px; color: #4338ca;
+}
+.clarify-head { font-weight: 600; margin-bottom: 6px; }
+.clarify-list { margin: 0 0 6px; padding-left: 18px; }
+.clarify-list li { margin: 3px 0; line-height: 1.5; }
+.clarify-hint { color: #6b7280; font-size: 11px; margin-top: 4px; }
 
 /* ── 待发送选项提示 ── */
 .pending-opt-badge {

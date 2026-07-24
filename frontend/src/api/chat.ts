@@ -43,6 +43,8 @@ export interface ChatCallbacks {
   onQc?: (data: QcResult) => void
   /** L2 精炼结果(v0.9.0): done 前下发的终版润色文本(建站类), 用于覆盖气泡内容 */
   onRefined?: (data: string) => void
+  /** SIR 澄清(CLARIFY):意图模糊/缺规格时, 下发动态最少必要追问, 用户直接回复补充 */
+  onClarify?: (data: { questions: string[]; rounds: number }) => void
 }
 
 export interface StartChatOptions {
@@ -107,6 +109,7 @@ export function startChat(opts: StartChatOptions): EventSource {
   es.addEventListener('subtask_fail', (e) => opts.cb.onSubtaskFail?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('merge', (e) => opts.cb.onMerge?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('paused', (e) => opts.cb.onPaused?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('clarify', (e) => opts.cb.onClarify?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('requirement_doc', (e) => opts.cb.onRequirement?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('token', (e) => {
     const d = safeParse((e as MessageEvent).data)

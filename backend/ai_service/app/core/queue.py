@@ -546,6 +546,7 @@ async def worker_loop(concurrency: int = 1):
                 decision = intent.get("decision", "route")
                 confirmed = bool(job.get("confirmed", False))
                 skill_name = skill or intent.get("selected_skill") or skill_for(intent["level1"], intent["level2"]) or "agent_chat"
+                req_id = intent.get("request_id")
                 logger.info("[Worker] [4/6] 决策 decision=%s risk=%s 汇总skill=%s 最终skill=%s conf=%.0f%% (+%.0fms)",
                            decision, intent.get("risk_level", "?"), intent.get("selected_skill"),
                            skill_name, intent.get("confidence", 0) * 100,
@@ -585,6 +586,21 @@ async def worker_loop(concurrency: int = 1):
                     logger.info("[Worker] [5/6] 二次确认 等待用户确认 skill=%s reason=%s", skill_name, reason)
                     await q.publish(trace_id, {"event": "confirm", "data": {"reason": reason, "skill": skill_name}})
                     await q.publish(trace_id, {"event": "done", "data": {}})
+                    continue
+
+                # 3.5) 澄清(CLARIFY, SIR 新增): 发 clarify 事件 + 存轮次, 不阻塞用户
+                if decision == "clarify":
+                    questions = intent.get("clarify_questions", [])
+                    rounds = intent.get("clarify_rounds", 0)
+                    logger.info("[Worker] [5/6] 澄清轮次=%d questions=%s", rounds, questions)
+                    await q.publish(trace_id, {"event": "clarify", "data": {"questions": questions, "rounds": rounds}})
+                    await q.publish(trace_id, {"event": "done", "data": {}})
+                    if req_id:
+                        try:
+                            from ..intent.observation import mark_outcome
+                            mark_outcome(req_id, "clarified_sent")
+                        except Exception:
+                            pass
                     continue
 
                 # 4) 多选项 → 改为非阻塞提示(系统已自己决定 top-1,不再阻塞用户)
@@ -808,6 +824,12 @@ async def worker_loop(concurrency: int = 1):
                         logger.debug("[Worker] L2 精炼失败: %s", _le)
                 if done_event is not None:
                     await q.publish(trace_id, done_event)
+                if req_id:
+                    try:
+                        from ..intent.observation import mark_outcome
+                        mark_outcome(req_id, "executed")
+                    except Exception:
+                        pass
                 # L2+ 蒸馏(v0.9.0 P3): 从精炼对话抽取项目记忆+用户偏好→写 Chroma
                 _user_id_job = job.get("user_id"); _project_id_job = job.get("project_id")
                 if _user_id_job or _project_id_job:
@@ -833,5 +855,11 @@ async def worker_loop(concurrency: int = 1):
                             trace_id, skill_name, type(e).__name__, e)
                 await q.publish(trace_id, {"event": "error", "data": str(e)})
                 await q.publish(trace_id, {"event": "done", "data": {}})
+                if req_id:
+                    try:
+                        from ..intent.observation import mark_outcome
+                        mark_outcome(req_id, "error")
+                    except Exception:
+                        pass
 
     await asyncio.gather(*[_one() for _ in range(concurrency)])
