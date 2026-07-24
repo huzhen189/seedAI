@@ -6,6 +6,7 @@
   1. DROP 所有业务表
   2. FLUSHDB 清空 Redis
   3. 清空 Chroma **运行数据**集合(用户/项目运行时数据), **保留配置/知识类集合**(规则/意图/组件库等)
+  3.5 清空项目内全部 *.log 日志文件(运行日志, 重置时不保留), 含 logs/ 下的运行时观测 jsonl(如 intent_observations.jsonl)
   4. 重建表 + 补齐缺失列
   5. 自动创建默认超管用户: huzhen / huzhen189 / 超级管理员
   6. 提示重启两个后端服务
@@ -96,6 +97,35 @@ async def reset() -> None:
         print(f"  >> Chroma 处理完成: 清空 {cleared} 个运行数据集合, 保留 {kept} 个配置/未知集合")
     except Exception as e:
         print(f"  >> Chroma 清理失败(可忽略): {e}")
+
+    # 2.6) 清空项目内全部 *.log 日志文件(运行日志, 重置时不保留)
+    #      含 logs/ 目录下的运行时观测 jsonl(如 intent_observations.jsonl); 排除 .git / node_modules。
+    #      配置/源代码(JSON/YAML/py 等)一律不动。
+    try:
+        from pathlib import Path as _P
+
+        _log_deleted = 0
+        for logf in ROOT.rglob("*.log"):
+            if ".git" in logf.parts or "node_modules" in logf.parts:
+                continue
+            try:
+                logf.unlink()
+                _log_deleted += 1
+            except Exception:
+                pass
+        # 运行时观测日志(jsonl): 仅清 logs/ 目录下的, 避免误删源码/数据 json
+        for logf in ROOT.rglob("*.jsonl"):
+            if ".git" in logf.parts or "node_modules" in logf.parts:
+                continue
+            if "logs" in logf.parts:  # 仅 logs/ 下的运行时观测日志
+                try:
+                    logf.unlink()
+                    _log_deleted += 1
+                except Exception:
+                    pass
+        print(f"  >> 已清空 {_log_deleted} 个日志文件(*.log + logs/ 下 *.jsonl)")
+    except Exception as e:
+        print(f"  >> 日志清理失败(可忽略): {e}")
 
     # 3) 重建表
     from app.models import Base  # noqa: E402
