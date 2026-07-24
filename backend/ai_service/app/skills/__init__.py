@@ -1,15 +1,13 @@
-"""Skills 包:导入即注册(v1.0 重构)。
+"""Skills 包：导入即注册（v1.0 重构落地）。
 
-8 个 agent:
+8 个 agent（chat/build 各 4）：
   Chat:  agent_chat, agent_search, agent_design, agent_doc
   Build: agent_requirement, agent_build, agent_review, agent_generate_site
 
-旧文件保留兼容(逐步移除): explain, search_agent, design_agent, generate_doc,
-  requirement_agent, generate_site, write_code, fix_agent, review_agent, builder_agent
+旧 11 个 skill 文件已于 v1.0 删除（见 docs/agent-skill-reorg-plan.md / docs/v1.0-版本更新日志.md）。
 """
 
 from . import (
-    # v1.0 新 agent
     agent_chat,
     agent_search,
     agent_design,
@@ -22,14 +20,12 @@ from . import (
 
 
 __all__ = [
-    "design_agent",
-    "explain",
-    "fix_agent",
-    "generate_doc",
-    "generate_site",
-    "rag_retrieve_skill",
-    "requirement_agent",
-    "review_agent",
-    "search_agent",
-    "write_code",
+    "agent_chat",
+    "agent_search",
+    "agent_design",
+    "agent_doc",
+    "agent_requirement",
+    "agent_build",
+    "agent_review",
+    "agent_generate_site",
 ]

@@ -336,3 +336,20 @@ skills/
 4. **更新注册表**：`skills/__init__.py` 导入新 agent
 5. **验证**：跑 `scripts/run_tests.py --quick`
 6. **清理**：删除旧文件
+
+
+---
+
+## 落地状态（2026-07-24 · v1.0）
+
+| 项 | 状态 | 说明 |
+|----|------|------|
+| 8 agent 架构 | ✅ | `agent_chat/search/design/doc/requirement/build/review/generate_site` 已落地 |
+| 旧 11 文件删除（#237） | ✅ | `explain/search_agent/design_agent/generate_doc/requirement_agent/generate_site/write_code/fix_agent/review_agent/builder_agent/rag_retrieve_skill` 已 `git rm` |
+| `skills/__init__.py` 清理 | ✅ | 仅导入 8 agent，`__all__` 同步；移除「旧文件保留兼容」注释 |
+| `AgentInput`/`AgentOutput` 契约 | ✅ | `core/models.py` 已定义；注：agent 以流式 SSE（`ev()`）返回，**不强行包成 AgentOutput 对象**（与计划 §3.2 的「全部返回 JSON」在流式架构下不兼容，按实际架构保留） |
+| Router `INTENT_SKILL_MAP` | ✅ | 与计划 §6 基本一致（build/site→agent_generate_site 等） |
+| 统一 System Prompt 6 约束 | ⚠️ | 各 agent 已含角色约束；未强制 6 条模板化（避免改写能跑的链路，留作后续增强） |
+| 操作日志（队列+10s 异步） | ✅ | 新增 `scripts/op_logger.py`，本轮操作全程跟踪（见 `reports/ops-20260724.md`） |
+
+**结论**：v1.0 结构性重构已完成（删冗余、统一命名、契约/路由就位）。剩余的「6 约束模板化」「AgentOutput 封装」属增强项，不阻断现有功能，按计划留作后续。
