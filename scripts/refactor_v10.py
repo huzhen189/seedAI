@@ -188,12 +188,13 @@ __all__ = [
     # 3.2 import app.skills（强校验：删旧文件后不得 ImportError）
     PATH = str(REPO / "backend" / "ai_service")
     import_test = (
-        "import sys; sys.path.insert(0, r'{PATH}');"
-        "try:"
-        "    import app.skills as s;"
-        "    print('IMPORT_OK agents=' + str(len(s.__all__)));"
-        "except Exception as e:"
-        "    print('IMPORT_FAIL: ' + repr(e)[:400])"
+        "import sys\n"
+        "sys.path.insert(0, r'{PATH}')\n"
+        "try:\n"
+        "    import app.skills as s\n"
+        "    print('IMPORT_OK agents=' + str(len(s.__all__)))\n"
+        "except Exception as e:\n"
+        "    print('IMPORT_FAIL: ' + repr(e)[:400])\n"
     ).replace("{PATH}", PATH)
     r = run([PY, "-c", import_test], check=False)
     out = (r.stdout or "") + (r.stderr or "")
@@ -204,15 +205,16 @@ __all__ = [
 
     # 3.3 意图路由冒烟
     route_test = (
-        "import sys; sys.path.insert(0, r'{PATH}');"
-        "try:"
-        "    from app.intent.tools import INTENT_SKILL_MAP;"
-        "    probes = [('chat','explain'),('chat','search'),('chat','design'),"
-        "              ('build','requirement'),('build','site'),('build','review'),('build','fix')];"
-        "    res = {a + '/' + b: INTENT_SKILL_MAP.get((a,b)) for a,b in probes};"
-        "    print('ROUTE_OK ' + str(res));"
-        "except Exception as e:"
-        "    print('ROUTE_FAIL: ' + repr(e)[:400])"
+        "import sys\n"
+        "sys.path.insert(0, r'{PATH}')\n"
+        "try:\n"
+        "    from app.intent.tools import INTENT_SKILL_MAP\n"
+        "    probes = [('chat','explain'),('chat','search'),('chat','design'),\n"
+        "              ('build','requirement'),('build','site'),('build','review'),('build','fix')]\n"
+        "    res = {a + '/' + b: INTENT_SKILL_MAP.get((a,b)) for a,b in probes}\n"
+        "    print('ROUTE_OK ' + str(res))\n"
+        "except Exception as e:\n"
+        "    print('ROUTE_FAIL: ' + repr(e)[:400])\n"
     ).replace("{PATH}", PATH)
     r2 = run([PY, "-c", route_test], check=False)
     out2 = (r2.stdout or "") + (r2.stderr or "")
