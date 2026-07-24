@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import type { Artifact } from '../types'
+import MarkdownView from './MarkdownView.vue'
 
 const props = defineProps<{
   artifacts: Artifact[]          // 生成的文件(COS/本地)
@@ -187,7 +188,12 @@ defineExpose({ selectFile })
       <!-- 需求文档预览(优先) -->
       <div v-if="mode === 'requirement'" class="pv-requirement">
         <div class="pv-code-head">📋 {{ requirementDoc?.brand?.name || '需求文档' }}</div>
-        <div class="req-body">
+        <!-- 产品经理视角的详细报告(Markdown 长文) -->
+        <div v-if="requirementDoc?.report" class="req-report">
+          <MarkdownView :content="requirementDoc.report" />
+        </div>
+        <!-- 旧格式 / 无 report 字段时回退到结构化树 -->
+        <div v-else class="req-body">
           <div v-if="requirementDoc?.brand" class="req-section">
             <h4>🏷 品牌</h4>
             <p><strong>{{ requirementDoc.brand.name }}</strong> — {{ requirementDoc.brand.slogan }}</p>

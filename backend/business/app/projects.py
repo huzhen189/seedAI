@@ -310,7 +310,7 @@ async def download_requirement_doc(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """下载需求文档为 .txt(requirement_doc 落库于 projects 表, 未单独传 COS)。"""
+    """下载需求文档。若含 PM 详细报告(report 字段)则返回 Markdown(.md)，否则返回原始 JSON(.txt)。requirement_doc 落库于 projects 表, 未单独传 COS。"""
     import json
     from fastapi.responses import Response
 
@@ -325,11 +325,19 @@ async def download_requirement_doc(
             doc = json.loads(doc)
         except Exception:
             pass
-    text = json.dumps(doc, ensure_ascii=False, indent=2) if isinstance(doc, (dict, list)) else str(doc)
+    # 优先返回产品经理视角的详细报告(Markdown); 无 report 字段时回退到原始 JSON
+    if isinstance(doc, dict) and isinstance(doc.get("report"), str) and doc["report"].strip():
+        text = doc["report"]
+        filename = f"requirement_report_{project_id}.md"
+        media = "text/markdown; charset=utf-8"
+    else:
+        text = json.dumps(doc, ensure_ascii=False, indent=2) if isinstance(doc, (dict, list)) else str(doc)
+        filename = f"requirement_doc_{project_id}.txt"
+        media = "text/plain; charset=utf-8"
     return Response(
         content=text,
-        media_type="text/plain; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="requirement_doc_{project_id}.txt"'},
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

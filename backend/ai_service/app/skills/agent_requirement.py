@@ -43,21 +43,49 @@ INDUSTRY_FOCUS: dict[str, str] = {
 }
 
 SYS_REQUIREMENT = (
-    "你叫小胡，是智能建站助手的「需求分析师」。职责：简洁高效地收集建站需求。\n\n"
-    "原则:\n"
-    "- 只问与行业相关的关键问题(2-3个),不问无关项\n"
-    "- 品牌名/口号/200字介绍都不是必须的,用户不给就留空\n"
-    "- 至少1个页面、1个功能即可输出文档\n"
-    "- 用户回答模糊时,不要反复追问,直接按常识合理补充\n"
-    "- 尽量一次性收集完毕,不要拖多轮\n\n"
-    "当信息足够时输出需求文档 JSON:\n"
-    '{{"brand":{{"name":"品牌名或留空","slogan":"口号或留空","intro":"一句话介绍或留空"}},'
-    '"target_user":"目标用户(一句话)","pages":[{{"title":"页面名","sections":[{{"name":"区块","content":"占位文案"}}]}}],'
-    '"features":["功能1"],"design_style":"风格(1-2词)","color_scheme":{{"primary":"#xxx","bg":"#xxx"}},'
-    '"status":"confirmed"}}\n\n'
-    "如果用户想法多且不确定方向,可出 2-3 个方案:\n"
-    '{{"options":{{"question":"方向选择","choices":['
-    '{{"id":"A","title":"方案","desc":"一句话","pros":"优点","cons":"缺点"}}]}}}}\n'
+    "你叫小胡，是智能建站助手的「高级产品经理（PM）」。你的职责不是简单记录，而是像资深 PM 一样，"
+    "把用户模糊的想法拆解、补全、专业化，产出一份**详尽、专业、可直接指导设计与开发的产品需求报告（PRD）**。\n\n"
+    "工作流程:\n"
+    "1. 先按行业只问 2-3 个最关键的决策问题（见下方行业提问策略），不要问无关项。\n"
+    "2. 信息足够后，一次性输出完整的产品需求文档 JSON（务必详尽，不要只给骨架）。\n"
+    "3. 若用户方向不清、想法发散，可先给 2-3 个方向方案（options）让其选择。\n\n"
+    "【详尽输出原则——核心要求】\n"
+    "- 不要只列标题，要写出**有信息量的文案**：每个页面/区块/功能都要有实质描述、目的、关键内容。\n"
+    "- 目标用户要写成具体画像（角色 / 年龄层 / 使用场景 / 痛点），禁止写成「广大用户」。\n"
+    "- 功能必须分级：P0（必须有）、P1（重要）、P2（增强），并说明其业务价值。\n"
+    "- 设计要具体到色值含义、字体气质、文案语气，而非「现代简约」这种空话。\n"
+    "- 必须包含：项目背景与目标、成功指标（KPI）、用户故事、验收标准、风险与假设。\n"
+    "- 用户没说的部分，按 PM 专业判断合理补全，并在文案中标注「（建议）」。\n"
+    "- 至少 1 个页面、1 个功能即可输出，但要写细、写专业。\n\n"
+    "【JSON 结构】只输出一个 JSON 对象，不要使用代码块标记。字段如下：\n"
+    "{\n"
+    '  "brand": {"name":"品牌名或留空","slogan":"口号或留空","intro":"一句话定位",'
+    '"story":"品牌故事/差异化价值(2-4句,有感染力)"},\n'
+    '  "project_goal": {"background":"项目背景(为什么做,2-4句)","objectives":["核心目标1","核心目标2"],'
+    '"success_metrics":["成功指标/KPI1","成功指标2"]},\n'
+    '  "target_users": [{"role":"用户角色","persona":"画像(年龄/身份/场景)","pain":"痛点","need":"核心诉求"}],\n'
+    '  "user_stories": [{"story":"作为<角色>,我要<功能>,以便<价值>","priority":"P0/P1/P2"}],\n'
+    '  "pages": [{"title":"页面名","goal":"该页面目标","sections":['
+    '{"name":"区块名","purpose":"区块目的","content":"详细文案/内容描述","key_elements":["关键元素1"]}]}],\n'
+    '  "features": [{"name":"功能名","description":"功能详细描述","priority":"P0/P1/P2","maps_to":"关联用户故事或页面"}],\n'
+    '  "information_architecture": {"navigation":["主导航项1","导航项2"],"notes":"结构/层级说明"},\n'
+    '  "design": {"style":"视觉风格(2-4词)","mood":"整体调性","color_scheme":'
+    '{"primary":"#hex","secondary":"#hex","bg":"#hex","accent":"#hex","meaning":"各颜色含义"},'
+    '"typography":"字体气质建议","tone":"文案语气"},\n'
+    '  "non_functional": {"performance":"性能要求","security":"安全要求","compatibility":"兼容/响应式",'
+    '"accessibility":"可访问性"},\n'
+    '  "acceptance_criteria": ["验收标准1","验收标准2"],\n'
+    '  "milestones": [{"phase":"阶段名","scope":"范围说明","priority":"P0/P1/P2"}],\n'
+    '  "risks": [{"risk":"风险或假设","mitigation":"应对措施"}],\n'
+    '  "report": "一份连贯的产品需求报告 Markdown 长文：用 # 标题组织上述全部内容，语言专业、可读，'
+    '像真实 PM 写给团队的 PRD。必须覆盖：项目概述、目标与指标、用户画像、用户故事、功能清单(含优先级)、'
+    '信息架构、页面详细规划、设计规范、非功能需求、验收标准、里程碑、风险。report 字段内的换行请用 \\\\n 转义，'
+    '不要出现未转义的换行符。",\n'
+    '  "status": "confirmed"\n'
+    "}\n\n"
+    "若用户方向不清，可输出 options 而非上述文档：\n"
+    '{"options": {"question":"方向选择","choices":['
+    '{"id":"A","title":"方案名","desc":"一句话描述","pros":"优点","cons":"缺点"}]}}\n'
 )
 
 
@@ -96,14 +124,24 @@ async def requirement_agent_handler(
 
     # 解析输出
     AGENT_LOG.info("[需求] [3/4] 解析LLM输出 raw=%.200s", raw)
-    m = __import__("re").search(r"\{[\s\S]*\}", raw)
-    if not m:
+    import re as _re
+    data = None
+    # 优先整段解析(模型若只输出纯 JSON, 避免 report 内字符干扰正则)
+    try:
+        data = json.loads(raw)
+    except Exception:
+        m = _re.search(r"\{[\s\S]*\}", raw)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                data = None
+    if data is None:
         AGENT_LOG.info("[需求] [3/4] 未检测到JSON → 纯文本追问")
         yield ev("token", data=raw, agent_id="requirement_agent")
         yield ev("think", stage="analyst", content="请告诉我更多关于您的项目…",
                  agent_id="requirement_agent")
         return
-    data = json.loads(m.group(0))
 
     # 多选方案
     if "options" in data:
@@ -119,21 +157,34 @@ async def requirement_agent_handler(
 
     # 需求文档
     if "brand" in data and data.get("status") == "confirmed":
-        AGENT_LOG.info("[需求] [3/4] 输出=需求文档 品牌=%s 页面数=%d 功能数=%d 风格=%s",
+        feats = data.get("features", [])
+        feat_names = [f["name"] if isinstance(f, dict) else str(f) for f in feats]
+        prio_summary: Dict[str, int] = {}
+        for f in feats:
+            if isinstance(f, dict) and f.get("priority"):
+                prio_summary[f["priority"]] = prio_summary.get(f["priority"], 0) + 1
+        prio_txt = " / ".join(f"{k}:{v}" for k, v in sorted(prio_summary.items())) or "—"
+        goal_obj = data.get("project_goal") or {}
+        design_obj = data.get("design") or {}
+        AGENT_LOG.info("[需求] [3/4] 输出=需求文档 品牌=%s 页面数=%d 功能数=%d 风格=%s 含报告=%s",
                        data["brand"].get("name", "?"), len(data.get("pages", [])),
-                       len(data.get("features", [])), data.get("design_style", "?"))
+                       len(feat_names), design_obj.get("style") or data.get("design_style", "?"),
+                       "report" in data)
         summary = [
             f"**品牌**: {data['brand'].get('name','?')}",
-            f"**定位**: {data.get('target_user','?')}",
-            f"**页面**: " + " → ".join(p.get("title", "?") for p in data.get("pages", [])),
-            f"**功能**: " + ", ".join(data.get("features", [])),
-            f"**风格**: {data.get('design_style','?')}",
+            f"**背景**: {goal_obj.get('background') or data.get('target_user','?')}",
+            f"**目标**: " + "；".join(goal_obj.get("objectives", []) or [data.get("target_user", "?")]),
+            f"**页面({len(data.get('pages', []))})**: " + " → ".join(p.get("title", "?") for p in data.get("pages", [])),
+            f"**功能({len(feat_names)})**: " + ", ".join(feat_names),
+            f"**优先级分布**: {prio_txt}",
+            f"**风格**: {design_obj.get('style') or data.get('design_style','?')}",
+            f"**报告**: {'已生成详细 PRD 报告' if 'report' in data else '（未生成）'}",
         ]
         yield ev("think", stage="analyst", content="\n".join(summary), agent_id="requirement_agent")
         yield ev("plan", title=data["brand"].get("name", "需求文档"),
-                 goal=data.get("target_user", ""),
+                 goal=(goal_obj.get("background") or data.get("target_user", "")),
                  steps=[f"页面: {', '.join(p.get('title','') for p in data.get('pages',[]))}",
-                        f"功能: {', '.join(data.get('features',[]))}"],
+                        f"功能: {', '.join(feat_names)} (优先级 {prio_txt})"],
                  agent_id="requirement_agent")
         yield ev("requirement_doc", data=data, agent_id="requirement_agent")
         yield ev("paused", stage="await_confirm", plan_title=data["brand"].get("name", ""),
