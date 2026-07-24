@@ -181,7 +181,8 @@ def _parse_plan(raw: str) -> dict:
             if len(line) > 2:
                 steps.append(line)
         steps = steps[:6]
-    return {"title": title, "goal": goal, "reasoning": reasoning, "steps": steps}
+    design_spec = data.get("design_spec") if isinstance(data.get("design_spec"), dict) else {}
+    return {"title": title, "goal": goal, "reasoning": reasoning, "steps": steps, "design_spec": design_spec}
 
 
 async def _review(model_id: str, html: str) -> Dict:
@@ -242,6 +243,64 @@ def _deliver(html: str, trace_id: str, user_id: int | None = None,
     except Exception:
         pass
     return None
+
+
+# 评分维度中文标签(用于生成结果汇总文案)
+_SCORE_LABELS = {
+    "correctness": "正确性", "completeness": "完整性", "readability": "可读性",
+    "compliance": "合规", "efficiency": "性能", "craft": "精致度",
+}
+
+
+def _build_generation_summary(plan: dict, review: dict | None, url: str | None,
+                               version: int | None, project_id: int | None,
+                               intent: str | None) -> str:
+    """组装本次生成的文字汇总(Markdown), 以 '文字 + 文件' 形式随 refined 事件返回前端气泡。"""
+    plan = plan or {}
+    review = review or {}
+    title = (plan.get("title") or "网站").strip()
+    goal = (plan.get("goal") or "").strip()
+    steps = plan.get("steps") or []
+    design = plan.get("design_spec") or {}
+    ds_mood = (design.get("mood") or "").strip()
+    ds_strategy = (design.get("visual_strategy") or "").strip()
+    scores = review.get("scores") or {}
+    passed = bool(review.get("passed"))
+    comment = (review.get("comment") or "").strip()
+    kind = "互动小游戏" if intent == "game" else "网站"
+
+    lines: list[str] = []
+    lines.append(f"✅ 已为你生成 **{title}**（{kind}）")
+    if goal:
+        lines.append(f"\n**目标**：{goal}")
+    lines.append("\n**本次构建**")
+    if steps:
+        lines.append(f"- 方案规划：{len(steps)} 个关键步骤（需求拆解 → 编码实现 → 多轮评审打磨）")
+    if ds_mood or ds_strategy:
+        line = "- 设计方向："
+        if ds_mood:
+            line += ds_mood
+        if ds_strategy:
+            line += ("" if not ds_mood else "；") + ds_strategy
+        lines.append(line)
+    lines.append("- 交付产物：单文件 `index.html`（CSS/JS 全内联，可直接预览与部署）")
+    if scores:
+        try:
+            avg = sum(float(v) for v in scores.values()) / len(scores)
+        except Exception:
+            avg = 0
+        lines.append(f"\n**质量评审**：{'通过 ✅' if passed else '已尽力优化 ⚠️'}（综合 {avg:.1f}/10）")
+        parts = [f"{_SCORE_LABELS.get(k, k)} {v}" for k, v in scores.items() if isinstance(v, (int, float))]
+        if parts:
+            lines.append("维度：" + " · ".join(parts))
+    if comment:
+        lines.append(f"\n> 评审备注：{comment}")
+    lines.append("\n**交付与查看**")
+    if url:
+        lines.append(f"- 在线预览：{url}")
+    lines.append("- 右侧预览面板可查看/下载；下载文件为本次生成版本（历史版本可按 `vN` 切换）")
+    lines.append("\n如需调整（配色 / 文案 / 某个模块 / 增删页面等），告诉我具体方向，我马上改。")
+    return "\n".join(lines)
 
 
 async def generate_stream(
@@ -347,6 +406,8 @@ async def generate_stream(
         yield ev("preview", url=url, fallback="srcdoc" if not url else None)
         with suppress(Exception):
             await asyncio.to_thread(save_memory, trace_id or "site", plan.get("title", "建站"), html[:1500], plan.get("steps", []))
+        # 文字汇总: 让后端在返回文件的同时, 以文字形式给出本次生成结果说明(前端气泡展示)
+        yield ev("refined", data=_build_generation_summary(plan, review, url, version, project_id, intent))
         yield ev("node", stage="done")
         return
 

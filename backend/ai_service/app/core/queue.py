@@ -790,9 +790,12 @@ async def worker_loop(concurrency: int = 1):
                                 logger.info("[闲聊重答] 重答完成 len=%d", len(retry_text))
                     except Exception as _re:  # noqa: BLE001
                         logger.debug("[闲聊重答] 失败: %s", _re)
-                # L2 对话精炼(v0.9.0): done 前 LLM 去冗余 → 改写 Message.content(仅建站类)
+                # L2 对话精炼(v0.9.0): done 前 LLM 去冗余 → 改写 Message.content。
+                # 注: agent_build / agent_generate_site 已由 skill 自身在收尾时 emit 结构化
+                # 'refined'(本次生成结果汇总, Markdown), 此处若再用流式 HTML 精炼会覆盖掉它,
+                # 故仅对产出自然语言正文的技能(agent_chat / orchestrator)启用通用精炼。
                 # 必须在 done 之前发布: 前端收到 done 即关闭 SSE, refined 才能被消费
-                if skill_name in ("agent_build", "agent_generate_site", "orchestrator") and qc_assistant_text.strip():
+                if skill_name in ("agent_chat", "orchestrator") and qc_assistant_text.strip():
                     try:
                         refined = await _refine_assistant_dialog(qc_assistant_text)
                         await q.publish(trace_id, {"event": "refined", "data": refined[:500]})
