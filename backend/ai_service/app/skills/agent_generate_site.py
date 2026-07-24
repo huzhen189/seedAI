@@ -39,21 +39,41 @@ GEN_LOG = logging.getLogger("ai_service.generate")
 
 
 SYS_PLANNER = (
-    "你负责把用户的建站需求拆解成结构化规格。请**只输出一个 JSON 对象**(不要代码块围栏、"
-    "不要多余解释),字段如下:\n"
+    "你是一名资深产品设计师兼前端架构师,负责把建站需求拆解成可直接指导『高级开发』的结构化规格。"
+    "请**只输出一个 JSON 对象**(不要代码块围栏、不要多余解释),字段如下:\n"
     "{\n"
     '  "title": "网站标题(简短,≤12字)",\n'
     '  "goal": "本次生成要达成的核心目标(1句话)",\n'
     '  "steps": ["步骤1", "步骤2", ...],   // 3~6 个有序执行步骤,每步一句话\n'
+    '  "design_spec": {\n'
+    '     "mood": "整体调性(如 高级/克制/科技/温润)",\n'
+    '     "visual_strategy": "差异化视觉策略(1-2句,如 玻璃拟态分层 + 渐变光晕 + 磁吸交互)",\n'
+    '     "layout": "布局骨架(如 全屏Hero + 玻璃卡片网格 + 粘性导航)",\n'
+    '     "motion": "动效纲领(如 滚动渐显 + 磁吸按钮 + 60fps 缓动)",\n'
+    '     "typography": "字号层级策略(如 Display 大标题 + 克制正文)"\n'
+    "  },\n"
     '  "reasoning": "拆解思路与关键取舍(2~4 句自由文本)"\n'
     "}\n"
-    "要求:板块划分 / 整体布局 / 视觉风格 / 技术选型建议都体现在 steps 与 reasoning 中;"
-    '用中文;steps 为可执行的有序清单。'
+    "要求: 板块划分 / 整体布局 / 视觉风格 / 技术选型 / 动效与交互都体现在 steps、design_spec 与 reasoning 中;"
+    "用中文;目标产出『有高级感、不简陋』的成品。"
 )
 SYS_CODER = (
-    "你是一名资深前端工程师。根据用户需求(及上方需求规格),生成一个【单文件 HTML】,"
-    "把 CSS 和 JS 全部内联在 <style> 和 <script> 中,可直接用 iframe 预览。"
-    "只输出完整 HTML 代码,不要解释、不要 markdown 代码块围栏(```)。"
+    "你是一名顶级前端创意开发工程师(Expert Frontend / Creative Developer)。"
+    "根据用户需求与上方需求规格(含 design_spec),生成一个【单文件 HTML】,"
+    "CSS 与 JS 全部内联在 <style> 和 <script> 中,可直接用 iframe 预览。"
+    "只输出完整 HTML 代码,不要解释、不要 markdown 代码块围栏(```)。\n\n"
+    "【高级视觉与交互硬标准——必须满足】\n"
+    "1. 视觉质感: 使用玻璃拟态(glassmorphism)、柔和分层阴影、渐变光晕/微噪点质感、克制留白;"
+    "杜绝大色块平涂与廉价渐变。配色须经设计且符合 WCAG AA 对比度。\n"
+    "2. 排版: 建立清晰字号层级(Display/标题/正文/辅助),使用系统字体栈或 Google Fonts,"
+    "字距与行高经过调校,呈现『编辑级』排版。\n"
+    "3. 微交互: 按钮/卡片 hover 有磁吸或抬升、平滑 cubic-bezier 缓动;"
+    "重要元素进入视口时用 IntersectionObserver 渐显/位移。\n"
+    "4. 动效性能: 仅 animate transform/opacity,目标 60fps;尊重 prefers-reduced-motion。\n"
+    "5. 响应式: 移动端单列、桌面多列,断点合理;触控目标 ≥44px。\n"
+    "6. 主题变量: 在 :root 用 CSS 变量暴露主色/背景/圆角/阴影,便于切换;若规格要求则实现浅/暗双主题。\n"
+    "7. 结构/可访问性: 语义化标签 + 必要 aria;英雄区(Hero)有强视觉焦点与清晰 CTA。\n"
+    "8. 内容: 不输出 lorem 占位或灰底色块;每一屏都要有真实信息与精心排布的内容。"
 )
 
 SYS_CODER_GAME = (
@@ -61,34 +81,36 @@ SYS_CODER_GAME = (
     "必须引入 Three.js CDN: "
     "<script src=\"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js\"></script>。"
     "游戏要素: 3D/2D 场景 + 玩家控制(键盘+触屏) + 碰撞/得分 + 开始/重新开始按钮 + 操作提示。"
-    "把 CSS/JS 全部内联,只输出完整 HTML,不要解释、不要 markdown 代码块围栏(```)。"
+    "视觉打磨: 发光粒子 / HUD / 流畅帧率 / 赛博感配色;把 CSS/JS 全部内联,"
+    "只输出完整 HTML,不要解释、不要 markdown 代码块围栏(```)。"
     "确保兼容移动端触屏操作和 PC 键盘操作。"
 )
 SYS_REVIEWER = (
-    "你是严格的代码评审。检查给定 HTML 是否:① 以 <html 开头且结构基本完整;② 标签基本闭合;"
-    "③ 不含明显会白屏的致命错误(eval / 未定义脚本、外部不可达资源);"
-    "④ 颜色/布局/可访问性有无问题。\\n"
+    "你是严格的资深前端评审 + 设计总监。检查给定 HTML 是否:① 以 <html 开头且结构基本完整;"
+    "② 标签基本闭合;③ 不含明显会白屏的致命错误(eval / 未定义脚本、外部不可达资源);"
+    "④ 视觉与交互是否达到『高级感』: 有层次/留白/微交互/缓动,而非平涂色块或简陋排版;"
+    "⑤ 颜色/排版/响应式/可访问性有无问题。\\n"
     "输出 JSON(不要代码块围栏):\\n"
     '{"passed": true/false, "comment": "..., 最多60字", '
     '"scores": {"correctness": 1-10, "completeness": 1-10, "readability": 1-10, '
-    '"compliance": 1-10, "efficiency": 1-10}, '
-    '"issues": ["问题1", "问题2"]}'  # passed=false 时列出具体问题
+    '"compliance": 1-10, "efficiency": 1-10, "craft": 1-10}, '
+    '"issues": ["问题1", "问题2"]}'  # passed=false 时列出具体问题; craft=视觉/交互精致度
 )
 
-# 行业→设计约束(注入 Planner)
+# 行业→设计约束(注入 Planner)——升级为高级视觉方向
 INDUSTRY_DESIGN: dict[str, str] = {
-    "restaurant": "暖色系(橙/红), 大图Banner, 菜单卡片, 预约/订座按钮, 电话醒目, 食品照突出",
-    "ecommerce": "商品网格布局, 搜索+筛选栏, 购物车图标, 促销标签, 评分星级, 分类导航",
-    "gov": "蓝白/红白主色调, 庄重权威, 无障碍访问(aria标签), 公告栏置顶, 政务标识",
-    "edu": "清新蓝绿, 课程卡片列表, 报名表单, 师资展示, 学生作品, 联系方式",
-    "health": "柔和蓝白/米色, 信任感强, 预约挂号按钮, 医生卡片, 卫生标识, 保险提示",
-    "finance": "深蓝/金色, 专业严谨, 数据图表, 合规声明, 安全标识, 客服入口",
-    "game": "暗色/赛博朋克, 动效丰富, 全屏沉浸, 开始游戏大按钮, 操作提示, Three.js",
-    "personal": "简约留白, 个人头像, 作品集卡片, 社交媒体链接, 时间线布局, 关于我",
-    "corp": "品牌色主调, 大图+视频Hero, 案例/客户Logo墙, 联系方式醒目, 关于我们",
-    "tech": "深色渐变, 产品截图/动图, 技术特性图标, CTA按钮, 代码风格, 功能介绍",
-    "media": "视觉冲击, 引导关注, 瀑布流布局, 视频嵌入, 订阅入口, 社交分享",
-    "other": "现代简约, 卡片布局, 响应式, 清新配色",
+    "restaurant": "暖色玻璃拟态, 大图Banner带渐变遮罩, 菜单卡片悬浮微交互, 预约/订座磁吸按钮, 电话醒目, 食品高清图",
+    "ecommerce": "商品玻璃网格布局, 搜索+筛选栏悬浮, 购物车图标动效, 促销标签微光, 评分星级, 分类导航吸顶",
+    "gov": "蓝白/红白庄重, 无障碍 aria 完善, 公告栏玻璃置顶, 政务标识清晰, 留白克制",
+    "edu": "清新蓝绿渐变, 课程玻璃卡片列表, 报名表单聚焦态, 师资头像圆角, 学生作品瀑布, 联系方式醒目",
+    "health": "柔和蓝白/米色分层, 预约挂号磁吸CTA, 医生卡片悬浮, 卫生标识, 保险提示, 信任感强",
+    "finance": "深蓝/金高级感, 数据图表动效, 合规声明小字, 安全标识, 客服入口常驻",
+    "game": "暗色/赛博朋克, 发光粒子, 全屏沉浸, 开始游戏大按钮脉冲, 操作提示, Three.js 3D",
+    "personal": "简约留白+玻璃卡片, 个人头像圆形光环, 作品集悬浮放大, 社交图标微动, 时间线, 关于我",
+    "corp": "品牌色主调, 大图+视频Hero渐变遮罩, 案例/客户Logo墙滚动, 联系CTA磁吸, 关于我们",
+    "tech": "深色渐变+网格光晕, 产品截图悬浮, 技术特性图标动效, CTA按钮脉冲, 代码风格等宽字体, 功能介绍",
+    "media": "视觉冲击大图, 引导关注动效, 瀑布流玻璃卡片, 视频嵌入, 订阅入口脉冲, 社交分享",
+    "other": "现代简约玻璃拟态, 卡片悬浮微交互, 响应式, 清新配色, 克制留白",
 }
 
 
@@ -169,11 +191,11 @@ async def _review(model_id: str, html: str) -> Dict:
     if "<html" not in low or len(html) < 50:
         return {"passed": False, "comment": "缺少 <html 根标签或内容过短",
                 "scores": {"correctness": 0, "completeness": 0, "readability": 0,
-                           "compliance": 5, "efficiency": 5}, "issues": ["缺少<html根标签"]}
+                           "compliance": 5, "efficiency": 5, "craft": 0}, "issues": ["缺少<html根标签"]}
     if low.count("<script") > low.count("</script") or low.count("<style") > low.count("</style>"):
         return {"passed": False, "comment": "标签未闭合(<script>/<style>)",
                 "scores": {"correctness": 2, "completeness": 5, "readability": 5,
-                           "compliance": 5, "efficiency": 5}, "issues": ["标签未闭合"]}
+                           "compliance": 5, "efficiency": 5, "craft": 3}, "issues": ["标签未闭合"]}
     # LLM 自审(给 JSON 结论,失败则按静态结果放过)
     try:
         out = await asyncio.to_thread(_chat, model_id, SYS_REVIEWER, [{"role": "user", "content": html[:6000]}])
@@ -184,14 +206,14 @@ async def _review(model_id: str, html: str) -> Dict:
                 "passed": bool(data.get("passed")),
                 "comment": data.get("comment", ""),
                 "scores": {k: max(1, min(10, int(data.get("scores", {}).get(k, 5))))
-                          for k in ["correctness", "completeness", "readability", "compliance", "efficiency"]},
+                          for k in ["correctness", "completeness", "readability", "compliance", "efficiency", "craft"]},
                 "issues": data.get("issues", []),
             }
     except Exception:
         pass
     return {"passed": True, "comment": "静态检查通过",
             "scores": {"correctness": 7, "completeness": 7, "readability": 7,
-                       "compliance": 8, "efficiency": 7}, "issues": []}
+                       "compliance": 8, "efficiency": 7, "craft": 8}, "issues": []}
 
 
 def _deliver(html: str, trace_id: str, user_id: int | None = None,

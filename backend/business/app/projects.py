@@ -325,9 +325,15 @@ async def download_requirement_doc(
             doc = json.loads(doc)
         except Exception:
             pass
+    # 模型原始输出(若有)——让下载文件不再单调, 一并返回文本结果
+    raw_out = ""
+    if isinstance(doc, dict) and isinstance(doc.get("raw_llm_output"), str) and doc["raw_llm_output"].strip():
+        raw_out = doc["raw_llm_output"]
     # 优先返回产品经理视角的详细报告(Markdown); 无 report 字段时回退到原始 JSON
     if isinstance(doc, dict) and isinstance(doc.get("report"), str) and doc["report"].strip():
         text = doc["report"]
+        if raw_out:
+            text = text.rstrip() + "\n\n---\n\n## 原始生成内容（模型原始输出）\n\n```text\n" + raw_out + "\n```\n"
         filename = f"requirement_report_{project_id}.md"
         media = "text/markdown; charset=utf-8"
     else:

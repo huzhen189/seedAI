@@ -186,6 +186,7 @@ async def requirement_agent_handler(
                  steps=[f"页面: {', '.join(p.get('title','') for p in data.get('pages',[]))}",
                         f"功能: {', '.join(feat_names)} (优先级 {prio_txt})"],
                  agent_id="requirement_agent")
+        data["raw_llm_output"] = raw  # 持久化模型原始输出, 供下载端点拼入报告文件, 避免返回内容单调
         yield ev("requirement_doc", data=data, agent_id="requirement_agent")
         yield ev("paused", stage="await_confirm", plan_title=data["brand"].get("name", ""),
                  agent_id="requirement_agent")
