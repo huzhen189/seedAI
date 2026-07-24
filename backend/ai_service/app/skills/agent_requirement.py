@@ -89,6 +89,89 @@ SYS_REQUIREMENT = (
 )
 
 
+def _build_requirement_summary(data: Dict) -> str:
+    """把结构化需求文档渲染成 Markdown 文字总结(供 refined 事件进入对话主气泡),
+    避免"只有文件卡片、没有文字总结"的问题。"""
+    brand = data.get("brand") or {}
+    goal = data.get("project_goal") or {}
+    design = data.get("design") or {}
+    pages = data.get("pages") or []
+    feats = data.get("features") or []
+    users = data.get("target_users") or []
+    ia = data.get("information_architecture") or {}
+    nav = ia.get("navigation") or []
+
+    lines: list[str] = []
+    name = brand.get("name") or "未命名项目"
+    lines.append(f"## 📋 需求文档已生成：{name}")
+    slogan = brand.get("slogan")
+    if slogan:
+        lines.append(f"> {slogan}")
+    lines.append("")
+
+    objs = goal.get("objectives") or []
+    bg = goal.get("background")
+    if bg:
+        lines.append(f"**项目背景**：{bg}")
+    if objs:
+        lines.append("**核心目标**：" + "；".join(objs))
+    metrics = goal.get("success_metrics") or []
+    if metrics:
+        lines.append("**成功指标**：" + "、".join(metrics))
+    lines.append("")
+
+    if users:
+        lines.append("**目标用户画像**：")
+        for u in users[:3]:
+            role = u.get("role", "")
+            persona = u.get("persona", "")
+            need = u.get("need", "")
+            line = f"- {role}" + (f"（{persona}）" if persona else "")
+            if need:
+                line += f"：{need}"
+            lines.append(line)
+        lines.append("")
+
+    if nav:
+        lines.append("**信息架构**：" + " / ".join(nav))
+        lines.append("")
+
+    if pages:
+        lines.append(f"**页面规划（{len(pages)} 个）**：")
+        for p in pages:
+            secs = p.get("sections") or []
+            suffix = f"（{len(secs)} 个区块）" if secs else ""
+            lines.append(f"- **{p.get('title', '')}**：{p.get('goal', '')}{suffix}")
+        lines.append("")
+
+    if feats:
+        prio: dict[str, list] = {}
+        for f in feats:
+            if isinstance(f, dict) and f.get("priority"):
+                prio.setdefault(f["priority"], []).append(f.get("name", ""))
+        lines.append(f"**功能清单（{len(feats)} 项）**：")
+        for p in ("P0", "P1", "P2"):
+            if prio.get(p):
+                items = [x for x in prio[p] if x]
+                if items:
+                    lines.append(f"- {p}：" + "、".join(items))
+        lines.append("")
+
+    style = design.get("style") or data.get("design_style")
+    if style:
+        lines.append(f"**设计风格**：{style}")
+    color = (design.get("color_scheme") or {}).get("primary")
+    if color:
+        lines.append(f"**主色**：{color}")
+    tone = design.get("tone")
+    if tone:
+        lines.append(f"**文案语气**：{tone}")
+    lines.append("")
+    lines.append("---")
+    lines.append("✅ 需求分析阶段已完成（100%）。点击下方「开始建站」按钮，或直接回复「开始生成 / 帮我做网站」即可进入设计与开发。")
+    return "\n".join(lines)
+
+
 async def requirement_agent_handler(
     model_id: str, messages: list, trace_id: str | None = None,
     is_cancelled=None, project_status: str = "draft",
@@ -177,29 +260,32 @@ async def requirement_agent_handler(
         prio_txt = " / ".join(f"{k}:{v}" for k, v in sorted(prio_summary.items())) or "—"
         goal_obj = data.get("project_goal") or {}
         design_obj = data.get("design") or {}
+        n_pages = len(data.get("pages", []))
+        n_feats = len(feat_names)
+        style = design_obj.get("style") or data.get("design_style", "?")
         AGENT_LOG.info("[需求] [3/4] 输出=需求文档 品牌=%s 页面数=%d 功能数=%d 风格=%s 含报告=%s",
-                       data["brand"].get("name", "?"), len(data.get("pages", [])),
-                       len(feat_names), design_obj.get("style") or data.get("design_style", "?"),
-                       "report" in data)
-        summary = [
-            f"**品牌**: {data['brand'].get('name','?')}",
-            f"**背景**: {goal_obj.get('background') or data.get('target_user','?')}",
-            f"**目标**: " + "；".join(goal_obj.get("objectives", []) or [data.get("target_user", "?")]),
-            f"**页面({len(data.get('pages', []))})**: " + " → ".join(p.get("title", "?") for p in data.get("pages", [])),
-            f"**功能({len(feat_names)})**: " + ", ".join(feat_names),
-            f"**优先级分布**: {prio_txt}",
-            f"**风格**: {design_obj.get('style') or data.get('design_style','?')}",
-            f"**报告**: {'已生成详细 PRD 报告' if 'report' in data else '（未生成）'}",
-        ]
-        yield ev("think", stage="analyst", content="\n".join(summary), agent_id="requirement_agent")
+                       data["brand"].get("name", "?"), n_pages, n_feats, style, "report" in data)
+        # 进度: 文档整理阶段
+        yield ev("node", stage="doc_ready", agent_id="requirement_agent",
+                 content=f"需求文档已生成完成（{n_pages} 个页面 / {n_feats} 项功能 / 风格「{style}」）")
+        # 完成度提示(思考时间线)
+        yield ev("think", stage="analyst",
+                 content=f"✅ 需求分析阶段完成：共 {n_pages} 个页面、{n_feats} 项功能，优先级分布 {prio_txt}。",
+                 agent_id="requirement_agent")
         yield ev("plan", title=data["brand"].get("name", "需求文档"),
                  goal=(goal_obj.get("background") or data.get("target_user", "")),
                  steps=[f"页面: {', '.join(p.get('title','') for p in data.get('pages',[]))}",
                         f"功能: {', '.join(feat_names)} (优先级 {prio_txt})"],
                  agent_id="requirement_agent")
-        data["raw_llm_output"] = raw  # 持久化模型原始输出, 供下载端点拼入报告文件, 避免返回内容单调
+        data["raw_llm_output"] = raw  # 持久化模型原始输出, 供下载端点拼入报告文件
         yield ev("requirement_doc", data=data, agent_id="requirement_agent")
+        # 文字版总结(进入对话主气泡, 修复"只有文件没文字")
+        summary_md = _build_requirement_summary(data)
+        yield ev("refined", data=summary_md, agent_id="requirement_agent")
+        # 主动咨询是否建站 + 持久化 CTA 提示(不依赖脆弱的前端瞬时态)
         yield ev("paused", stage="await_confirm", plan_title=data["brand"].get("name", ""),
+                 content="需求文档已就绪 ✅ 是否现在开始为您建站？点击下方「开始建站」按钮，或直接回复「开始生成 / 帮我做网站」即可。",
+                 cta_label="开始建站",
                  agent_id="requirement_agent")
         AGENT_LOG.info("[需求] [4/4] 需求文档已推送,等待用户确认")
         return

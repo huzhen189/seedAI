@@ -57,16 +57,20 @@ def _mk_candidate(name: str, confidence: float, reason: str) -> SkillCandidate:
 
 def run_tools(level1: str, level2: str, confidence: float,
               industry: str = "other",
-              project_status: str = "draft") -> ToolResult:
+              project_status: str = "draft",
+              has_requirement_doc: bool = False) -> ToolResult:
     """工具模块入口: 意图→技能映射 + 状态路由。"""
     skill_name = INTENT_SKILL_MAP.get((level1, level2))
     if not skill_name:
         logger.info("[工具] 无匹配技能 intent=%s/%s → 降级explain", level1, level2)
         return ToolResult(fallback="explain")
 
-    # 状态路由(draft/planning 项目先走需求分析, 不直奔代码生成)
-    if skill_name == "agent_generate_site" and project_status in ("draft", "planning"):
-        logger.info("[工具] 状态路由 agent_generate_site→agent_requirement (status=%s)", project_status)
+    # 状态路由: 完整建站(agent_generate_site)要求先有需求文档。
+    # 关键修复: 仅当项目确实「没有需求文档」时才改道回需求分析; 一旦文档已存在
+    # (即使 project_status 仍是 draft, 因为全链路从未升级该字段), 直接放行建站。
+    # 否则用户说"那就帮我生成吧"会被无限打回重做需求, 永远建不了站(死亡路由)。
+    if skill_name == "agent_generate_site" and not has_requirement_doc:
+        logger.info("[工具] 状态路由 agent_generate_site→agent_requirement (无需求文档, status=%s)", project_status)
         skill_name = "agent_requirement"
 
     if confidence >= 0.8:

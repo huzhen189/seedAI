@@ -48,6 +48,7 @@ async def classify_v2(
     checkpoint_info: dict | None = None,
     user_id: int | None = None,          # v0.9.0: Chroma 用户偏好
     project_id: int | None = None,       # v0.9.0: Chroma 项目记忆
+    has_requirement_doc: bool = False,   # v1.0.7: 是否已存在需求文档(决定是否放行建站)
 ) -> PipelineResult:
     """v2 意图管道: 语义异步发射 + 4 同步模块重叠执行 + 汇总器决策。
 
@@ -128,7 +129,8 @@ async def classify_v2(
                semantic_result.confidence * 100,
                rule_result.pattern, safety_result.risk_level)
     result = _aggregate(rule_result, semantic_result, context_result, safety_result,
-                      project_status, project_constraints)
+                      project_status, project_constraints,
+                      has_requirement_doc=has_requirement_doc)
 
     # ── [6/6] 多意图拆分门控(轻量规则先行, 命中才调 LLM 深拆) ──
     if result.decision == "route":
@@ -155,6 +157,7 @@ def _aggregate(
     safety: SafetyResult,
     project_status: str,
     project_constraints: list[str] | None = None,
+    has_requirement_doc: bool = False,   # v1.0.7: 已存在需求文档则放行建站
 ) -> PipelineResult:
     """汇总器: 安全优先短路 → 意图融合 → 工具选择 → 二次确认 → 多选项 → 路由。
 
@@ -206,7 +209,8 @@ def _aggregate(
     industry = semantic.industry or rule.industry or "other"
 
     # ── Step 3: 工具选择 ──
-    tools = run_tools(final_l1, final_l2, confidence, industry=industry, project_status=project_status)
+    tools = run_tools(final_l1, final_l2, confidence, industry=industry,
+                      project_status=project_status, has_requirement_doc=has_requirement_doc)
 
     if not tools.skills:
         logger.info("[汇总] 无可用工具 → 降级 explain")

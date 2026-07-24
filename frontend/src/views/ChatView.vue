@@ -127,6 +127,9 @@ const rightCollapsed = ref(false)
 // 方案确认(改文字回复驱动, 不再弹模态框): Planner 产出后暂停等待用户以文字回复续跑
 const awaitingConfirm = ref(false)
 const awaitPlan = ref<{ title: string; goal: string; steps: string[] } | null>(null)
+// v1.0.7: 需求就绪后给用户的「是否建站」咨询文案 + CTA 按钮文案(由后端 paused 事件下发)
+const awaitConfirmMsg = ref('')
+const awaitCtaLabel = ref('开始建站')
 
 // 方案选择(options 事件): 前端弹出单选框, 选中后记录, 下次 send 时一起发送
 const showOptionsModal = ref(false)
@@ -217,6 +220,14 @@ function resumeFromPlan(text: string) {
     q: text,
     cb: makeCallbacks(assistantIdx),
   })
+}
+
+// 需求就绪后: 点「开始建站」→ 复用续跑通道(resume=true)触发建站。
+// 后端 resume 路径会强制 skill=generate_site, 绕过意图重分类(即使刷新后瞬时态丢失也安全,
+// 因为业务侧会按 Redis 的 await_confirm 阶段 + 已落库的需求文档放行)。
+function startBuild() {
+  if (!awaitingConfirm.value) return
+  resumeFromPlan('开始生成')
 }
 
 // 二次确认通过后: 带 confirmed 标记重发(Worker 据此跳过安全拦截, 执行 selected_skill)
@@ -665,6 +676,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planNodes.value = []
       awaitingConfirm.value = false
       awaitPlan.value = null
+      awaitConfirmMsg.value = ''
+      awaitCtaLabel.value = '开始建站'
       clearActiveGen()
       clearDraft()
       loadArtifacts()
@@ -681,6 +694,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planNodes.value = []
       awaitingConfirm.value = false
       awaitPlan.value = null
+      awaitConfirmMsg.value = ''
+      awaitCtaLabel.value = '开始建站'
       errorMsg.value = '已取消'
       clearActiveGen()
       if (projectStore.currentProjectId) {
@@ -738,6 +753,9 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
         finished.value = true
         // 不再弹模态框: 标记为等待文字回复, 由产物链接卡片引导用户回复/改进
         awaitingConfirm.value = true
+        // v1.0.7: 接收后端下发的建站咨询文案与 CTA 文案
+        awaitConfirmMsg.value = d.content || ''
+        awaitCtaLabel.value = d.cta_label || '开始建站'
         awaitPlan.value = {
           title: d.plan_title || '',
           goal: d.plan_goal || '',
@@ -753,6 +771,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planNodes.value = []
       awaitingConfirm.value = false
       awaitPlan.value = null
+      awaitConfirmMsg.value = ''
+      awaitCtaLabel.value = '开始建站'
       errorMsg.value = m
       clearActiveGen()
     },
@@ -1276,6 +1296,8 @@ watch(pendingRetry, (r) => {
         <!-- 方案已就绪: 文字产物链接(替代确认模态框) -->
         <div v-if="awaitingConfirm" class="artifact-links-card">
           <div class="alc-head">📦 需求方案已生成，预览已自动打开</div>
+          <div v-if="awaitConfirmMsg" class="alc-invite">{{ awaitConfirmMsg }}</div>
+          <button class="alc-build-btn" @click="startBuild">{{ awaitCtaLabel }}</button>
           <div class="alc-hint">
             💡 直接回复文字即可：说明改进方向（如「加个博客列表页」），或回复「开始 / 确认」立即生成代码。
           </div>
@@ -1552,6 +1574,25 @@ watch(pendingRetry, (r) => {
   margin: 8px 0;
 }
 .alc-head { font-weight: 600; font-size: 14px; color: #0369a1; margin-bottom: 6px; }
+.alc-invite {
+  font-size: 13px; color: #0f172a; line-height: 1.6;
+  background: #fff; border: 1px solid #bae6fd; border-left: 3px solid #0284c7;
+  border-radius: 8px; padding: 8px 12px; margin-bottom: 10px;
+}
+.alc-build-btn {
+  display: block; width: 100%; margin-bottom: 10px;
+  padding: 11px 16px; border: none; border-radius: 10px; cursor: pointer;
+  font-size: 14px; font-weight: 700; color: #fff;
+  background: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
+  box-shadow: 0 6px 18px rgba(99, 102, 241, .35);
+  transition: transform .18s cubic-bezier(.16, 1, .3, 1), box-shadow .18s, filter .18s;
+}
+.alc-build-btn:hover {
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 10px 26px rgba(99, 102, 241, .45);
+  filter: brightness(1.05);
+}
+.alc-build-btn:active { transform: translateY(0) scale(.99); }
 .alc-hint {
   font-size: 12px; color: #475569; line-height: 1.6;
   background: #fff; border: 1px dashed #bae6fd; border-radius: 8px;

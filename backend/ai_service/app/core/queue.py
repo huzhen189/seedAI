@@ -509,6 +509,7 @@ async def worker_loop(concurrency: int = 1):
                 version = job.get("version")                     # v0.9.x: 产物版本号(COS 版本化)
                 doc = job.get("requirement_doc")
                 proj_status = job.get("project_status", "draft")
+                has_req_doc = bool(doc)  # v1.0.7: 是否已存在需求文档(决定工具路由是否放行建站)
                 # Tier 1/2: 项目系统 prompt + 结构化硬约束(由 business 侧解析后下发)
                 proj_prompt = job.get("project_system_prompt", "") or ""
                 proj_constraints = job.get("project_constraints") or []
@@ -528,7 +529,8 @@ async def worker_loop(concurrency: int = 1):
                                          context_hint=ctx_hint,
                                          project_status=proj_status,
                                          project_constraints=proj_constraints,
-                                         user_id=user_id, project_id=project_id),
+                                         user_id=user_id, project_id=project_id,
+                                         has_requirement_doc=has_req_doc),
                         timeout=35.0,
                     )
                 except asyncio.TimeoutError:
