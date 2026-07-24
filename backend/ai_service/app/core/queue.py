@@ -506,6 +506,7 @@ async def worker_loop(concurrency: int = 1):
                 summary = job.get("conversation_summary", "")
                 user_id = job.get("user_id")                    # v0.9.0
                 project_id = job.get("project_id")              # v0.9.0
+                version = job.get("version")                     # v0.9.x: 产物版本号(COS 版本化)
                 doc = job.get("requirement_doc")
                 proj_status = job.get("project_status", "draft")
                 # Tier 1/2: 项目系统 prompt + 结构化硬约束(由 business 侧解析后下发)
@@ -734,6 +735,7 @@ async def worker_loop(concurrency: int = 1):
                     conversation_summary=summary,
                     project_system_prompt=proj_prompt,
                     project_constraints=proj_constraints,
+                    version=version, user_id=user_id, project_id=project_id,
                 ):
                     # 拦截 done: 先发 QC 再发 done(QC 在 done 前, 不阻塞前端 done 渲染)
                     if event.get("event") == "done":

@@ -28,7 +28,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .analytics import record_error, record_intent_result, record_model_detail, record_skill_outcome, record_user_active, record_intent_decision
@@ -456,7 +456,9 @@ async def _sync_checkpoint_to_mysql(conversation_id: int, stage: str,
 async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
                       terminal_status: str, user_text: str, assistant_text: str,
                       preview_url: str | None = None,
-                      qc_result: dict | None = None) -> None:
+                      qc_result: dict | None = None,
+                      project_id: int | None = None,
+                      requirement_doc: dict | None = None) -> None:
     """后台异步落库(独立 session, 3 次重试, 全失败入 Redis 错误队列兜底)"""
     from .db import SessionLocal as _S
     last_err: Exception | None = None
@@ -477,6 +479,16 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
                         await record_qc(qc_result)
                     except Exception as qc_e:  # noqa: BLE001
                         logger.warning("[chat] QC 落库失败(跳过) trace=%s: %s", tid, qc_e)
+                # 需求文档落库(幂等覆盖, 供前端重启后还原"📋 需求文档"条目)
+                if requirement_doc is not None and project_id:
+                    try:
+                        proj = await s.get(Project, project_id)
+                        if proj is not None:
+                            proj.requirement_doc = json.dumps(requirement_doc, ensure_ascii=False)
+                            await s.commit()
+                            logger.info("[chat] 需求文档已落库 proj=%s", project_id)
+                    except Exception as rd_e:  # noqa: BLE001
+                        logger.warning("[chat] 需求文档落库失败(跳过) trace=%s: %s", tid, rd_e)
                 # 流结束(done/aborted/error)清理 Redis checkpoint; paused 保留供恢复
                 if terminal_status != "paused":
                     await ck_delete(conversation_id)
@@ -624,6 +636,14 @@ async def chat(
         conv = await db.get(Conversation, conversation_id)
         project_id = conv.project_id if conv else None
         if project_id:
+            # 计算产物版本号(第几版): 该项目现有 artifact 数 + 1, 用于 COS 版本化(避免覆盖历史)
+            try:
+                cnt = (await db.execute(
+                    select(func.count()).select_from(Artifact).where(Artifact.project_id == project_id)
+                )).scalar() or 0
+                payload["version"] = cnt + 1
+            except Exception:
+                payload["version"] = 1
             proj = await db.get(Project, project_id)
             if proj:
                 payload["project_status"] = proj.status or "draft"
@@ -683,6 +703,7 @@ async def chat(
         assistant_parts: list[str] = []
         preview_url: str | None = None  # 捕获预览直链(供分享「复制预览链接」使用)
         qc_result: dict | None = None  # 捕获后置 QC 三裁判聚合结果(供落库 + 前端展示)
+        requirement_doc_captured: dict | None = None  # 捕获需求文档(供落库 + 前端重启还原)
         event_seq: int = 0  # 结构化事件序号(供回放重建时间线)
         terminal_status: str = "done"
         captured_level1: str = "unknown"  # 从 intent 事件捕获, 供统计
@@ -811,6 +832,11 @@ async def chat(
                                             "[chat] ◇ QC 结果 trace=%s overall=%s needs_review=%s",
                                             tid, payload_obj.get("overall"), payload_obj.get("needs_review"),
                                         )
+                                    elif event == "requirement_doc" and isinstance(payload_obj, dict):
+                                        # 需求文档(requirement_agent 产出): 捕获供落库, 前端重启后可还原
+                                        # 注意 SSE data 形如 {"data": <文档>}, 取内层 payload
+                                        requirement_doc_captured = payload_obj.get("data")
+                                        logger.info("[chat] ◇ 需求文档已捕获 trace=%s", tid)
                                     logger.info(
                                             "[chat] ◇ SSE #%d type=%s stage=%s data=%.200s",
                                             event_seq, event, stage or "-", data,
@@ -859,6 +885,8 @@ async def chat(
                 assistant_text=assistant_full_text,
                 preview_url=preview_url,
                 qc_result=qc_result,
+                project_id=project_id,
+                requirement_doc=requirement_doc_captured,
             ))
             # v0.9.0: token 统计 + API 延迟记录
             if approx_tokens > 0:

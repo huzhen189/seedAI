@@ -194,8 +194,13 @@ async def _review(model_id: str, html: str) -> Dict:
                        "compliance": 8, "efficiency": 7}, "issues": []}
 
 
-def _deliver(html: str, trace_id: str) -> Optional[str]:
-    """落盘本地产物并上传 COS,返回预览直链(失败返回 None,不阻断主流程)。"""
+def _deliver(html: str, trace_id: str, user_id: int | None = None,
+             project_id: int | None = None, version: int | None = None) -> Optional[str]:
+    """落盘本地产物并上传 COS,返回预览直链(失败返回 None,不阻断主流程)。
+
+    COS key 版本化: previews/{user_id}/{project_id}/v{version}/index.html,
+    使每次生成/调整在云存储留痕、不被覆盖(旧版仍可按 artifact 行点选)。
+    """
     try:
         from ..tools.cos_upload import cos_upload
 
@@ -204,7 +209,11 @@ def _deliver(html: str, trace_id: str) -> Optional[str]:
         site_dir.mkdir(parents=True, exist_ok=True)
         idx = site_dir / "index.html"
         idx.write_text(html, encoding="utf-8")
-        cos_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/anon/{trace_id or 'site'}/1/index.html"
+        # 版本段: 优先用业务下发的语义版本号, 否则降级用 trace_id 保证唯一
+        ver_seg = f"v{version}" if version else (trace_id or "site")
+        uid = user_id if user_id is not None else "anon"
+        pid = project_id if project_id is not None else "anon"
+        cos_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/{uid}/{pid}/{ver_seg}/index.html"
         res = cos_upload(str(idx), cos_key)
         if res.get("ok"):
             return res.get("url")
@@ -218,6 +227,9 @@ async def generate_stream(
     messages: list,
     trace_id: Optional[str] = None,
     is_cancelled=None,
+    version: int | None = None,
+    user_id: int | None = None,
+    project_id: int | None = None,
     intent: Optional[str] = None,
     level2: Optional[str] = None,
     industry: Optional[str] = None,
@@ -309,7 +321,7 @@ async def generate_stream(
 
         # 收尾
         yield ev("node", stage="previewing")
-        url = _deliver(html, trace_id)
+        url = _deliver(html, trace_id, user_id, project_id, version)
         yield ev("preview", url=url, fallback="srcdoc" if not url else None)
         with suppress(Exception):
             await asyncio.to_thread(save_memory, trace_id or "site", plan.get("title", "建站"), html[:1500], plan.get("steps", []))
@@ -455,7 +467,7 @@ async def generate_stream(
 
         # 4) 预览投递(COS 直链,§10)
         yield ev("node", stage="previewing")
-        url = _deliver(html, trace_id)
+        url = _deliver(html, trace_id, user_id, project_id, version)
         GEN_LOG.info("[gen] 预览投递 trace=%s url=%s", trace_id, url or "无(srcdoc 兜底)")
         yield ev("preview", url=url, fallback="srcdoc" if not url else None)
 

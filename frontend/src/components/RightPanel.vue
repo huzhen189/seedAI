@@ -42,7 +42,8 @@ onMounted(() => { if (uploading.value) startRetry() })
 onUnmounted(() => stopRetry())
 
 
-const selectedFile = ref<string | null>(null)
+const selectedArtifactId = ref<number | null>(null)
+const selectedName = ref<string>('')
 
 function ext(name: string) {
   const i = name.lastIndexOf('.')
@@ -71,38 +72,72 @@ function previewMode(name: string): 'html' | 'image' | 'code' | 'requirement' {
   return 'code'
 }
 
-function selectFile(name: string) {
-  selectedFile.value = name
+// 兼容 ChatView 旧调用 selectFile(name) 与文件树精确调用 selectFile(artifactId, name)
+function selectFile(a: number | string | null, b?: string) {
+  if (typeof a === 'number') {
+    selectedArtifactId.value = a
+    selectedName.value = b || ''
+  } else {
+    selectedArtifactId.value = null
+    selectedName.value = (a as string) || ''
+  }
 }
 
-// 所有产物文件展平为统一列表
+// 所有产物文件展平为统一列表(带 artifactId + 版本序号, 用于精确点选历史版本)
 const allFiles = computed(() => {
-  const list: { name: string; size: number; url: string; content?: string; artifact: Artifact }[] = []
-  for (const a of props.artifacts) {
-    if (!a.files) continue
-    for (const [name, info] of Object.entries(a.files)) {
+  const list: { name: string; size: number; url: string; content?: string; artifact: Artifact; artifactId: number; version: number }[] = []
+  props.artifacts.forEach((a, idx) => {
+    if (!a.files) return
+    const version = idx + 1
+    Object.entries(a.files).forEach(([name, info]) => {
       list.push({
         name,
         size: (info as any).size || 0,
         url: (info as any).url || '',
         content: (info as any).content || '',
         artifact: a,
+        artifactId: a.id,
+        version,
       })
-    }
-  }
+    })
+  })
   return list
 })
 
-const currentFile = computed(() =>
-  selectedFile.value
-    ? allFiles.value.find(f => f.name === selectedFile.value)
-    : allFiles.value.find(f => ext(f.name) === 'html') || allFiles.value[0]
-)
+const currentFile = computed(() => {
+  const list = allFiles.value
+  if (selectedName.value) {
+    const matched = list.filter(f => f.name === selectedName.value)
+    if (matched.length) {
+      if (selectedArtifactId.value != null) {
+        return matched.find(f => f.artifactId === selectedArtifactId.value) || matched[matched.length - 1]
+      }
+      return matched[matched.length - 1]  // 仅给 name 时默认最新版本
+    }
+  }
+  return list.find(f => ext(f.name) === 'html') || list[0] || null
+})
 
 const mode = computed(() => {
-  if (selectedFile.value === '__requirement_doc__') return 'requirement'
+  if (selectedName.value === '__requirement_doc__') return 'requirement'
   return currentFile.value ? previewMode(currentFile.value.name) : 'none'
 })
+
+// 需求文档下载为 .txt(走后端 /api/projects/{id}/requirement-doc)
+async function downloadReqDoc() {
+  if (!props.projectId || !props.requirementDoc) return
+  try {
+    const resp = await fetch(`/api/projects/${props.projectId}/requirement-doc`)
+    if (!resp.ok) return
+    const text = await resp.text()
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `requirement_doc_${props.projectId}.txt`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  } catch { /* 下载失败忽略 */ }
+}
 
 // 暴露给父组件(ChatView): 点击文字产物链接时, 联动右侧预览选中对应文件并打开。
 defineExpose({ selectFile })
@@ -115,12 +150,12 @@ defineExpose({ selectFile })
       <div class="tree-head">📋 需求文档</div>
       <div
         class="tree-item"
-        :class="{ active: selectedFile === '__requirement_doc__' }"
+        :class="{ active: selectedName === '__requirement_doc__' }"
         @click="selectFile('__requirement_doc__')"
       >
         <span class="tree-icon">📄</span>
         <span class="tree-name">{{ requirementDoc.brand?.name || '需求文档' }}.txt</span>
-        <span class="tree-size">需求</span>
+        <button class="dl-btn" title="下载 .txt" @click.stop="downloadReqDoc()">⬇</button>
       </div>
     </div>
 
@@ -132,14 +167,15 @@ defineExpose({ selectFile })
         <button class="retry-btn" @click="startRetry(); checkPendingUploads()">重试</button>
       </div>
       <div v-if="generating && !allFiles.length" class="tree-empty">AI 正在生成…</div>
-      <template v-for="f in allFiles" :key="f.name">
+      <template v-for="f in allFiles" :key="f.artifactId + ':' + f.name">
         <div
           class="tree-item"
-          :class="{ active: selectedFile === f.name || (!selectedFile && f === allFiles[0]) }"
-          @click="selectFile(f.name)"
+          :class="{ active: selectedArtifactId === f.artifactId && selectedName === f.name }"
+          @click="selectFile(f.artifactId, f.name)"
         >
           <span class="tree-icon">{{ iconFor(f.name) }}</span>
           <span class="tree-name">{{ f.name }}</span>
+          <span class="tree-ver">v{{ f.version }}</span>
           <span class="tree-size">{{ sizeKB(f.size) }}</span>
         </div>
       </template>
@@ -316,7 +352,18 @@ defineExpose({ selectFile })
 }
 .tree-icon { font-size: 14px; flex-shrink: 0; }
 .tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-ver {
+  font-size: 9px; font-weight: 700; color: var(--accent, #6366f1);
+  background: var(--accent-light, #eef2ff); border-radius: 8px;
+  padding: 0 5px; flex-shrink: 0; margin-right: 2px;
+}
 .tree-size { font-size: 10px; color: var(--muted); flex-shrink: 0; }
+.dl-btn {
+  border: none; background: transparent; cursor: pointer; font-size: 13px;
+  color: var(--accent, #6366f1); flex-shrink: 0; padding: 0 2px;
+  opacity: 0.7; transition: opacity 0.15s;
+}
+.dl-btn:hover { opacity: 1; }
 
 /* ---- 预览区 ---- */
 .preview-area {

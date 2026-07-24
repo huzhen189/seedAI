@@ -25,6 +25,8 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   (e: 'rate', p: { rating: number; comment: string; dimensions: RatingDims }): void
+  /** 点击建站产物里的某个文件: 通知父组件联动右侧预览面板 */
+  (e: 'open-file', name: string): void
 }>()
 
 const expanded = ref(false)
@@ -122,7 +124,14 @@ function fmtTime(t: string): string {
           <a v-if="parsed.download_url" :href="parsed.download_url" class="btn">📥 下载</a>
         </div>
         <div v-if="parsed.files?.length" class="site-files">
-          <span v-for="f in parsed.files" :key="f.name" class="file-tag">{{ f.name }} ({{ (f.size / 1024).toFixed(1) }}KB)</span>
+          <button
+            v-for="f in parsed.files"
+            :key="f.name"
+            type="button"
+            class="file-tag"
+            :title="`点击在右侧预览面板查看 ${f.name}`"
+            @click="emit('open-file', f.name)"
+          >{{ f.name }} ({{ (f.size / 1024).toFixed(1) }}KB)</button>
         </div>
       </div>
       <!-- 代码产物 -->
@@ -279,8 +288,10 @@ function fmtTime(t: string): string {
 .site-files { display: flex; flex-wrap: wrap; gap: 4px; }
 .file-tag {
   font-size: 11px; background: #e2e8f0; padding: 2px 6px; border-radius: 4px;
-  color: #475569;
+  color: #475569; border: none; cursor: pointer; font-family: inherit;
+  transition: background .15s, transform .12s;
 }
+.file-tag:hover { background: #c7d2fe; color: #3730a3; transform: translateY(-1px); }
 
 /* ---- Code Card ---- */
 .code-card { background: #1e1e1e; border-radius: 8px; padding: 10px; }

@@ -99,6 +99,7 @@ class GenerateReq(BaseModel):
     requirement_doc: dict | None = None  # 需求文档
     confirmed: bool = False             # 二次确认已通过(安全 confirm 后由前端带此标记重发)
     confirmed_subtasks: list[str] = []   # 多意图编排: 用户已确认的中风险子任务 id 列表
+    version: int | None = None           # 产物版本号(business 侧按项目 artifact 计数算出, 用于 COS 版本化)
 
 
 @app.get("/health")
@@ -184,6 +185,7 @@ async def generate(req: GenerateReq, after: str | None = None):
             "requirement_doc": req.requirement_doc,
             "confirmed": req.confirmed,
             "confirmed_subtasks": req.confirmed_subtasks,
+            "version": req.version,             # 产物版本号(透传至 _deliver 做 COS key)
         }
         await q.enqueue(job)
         logger.info("[2/3] 新任务入队 trace=%s queue=%s", trace_id, type(q).__name__)

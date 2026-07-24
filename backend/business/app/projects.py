@@ -304,6 +304,35 @@ async def list_artifacts(
     ]
 
 
+@router.get("/projects/{project_id}/requirement-doc")
+async def download_requirement_doc(
+    project_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """下载需求文档为 .txt(requirement_doc 落库于 projects 表, 未单独传 COS)。"""
+    import json
+    from fastapi.responses import Response
+
+    proj = await project_repo.get_by(db, id=project_id, user_id=user.id)
+    if proj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    doc = proj.requirement_doc
+    if not doc:
+        raise HTTPException(status_code=404, detail="no requirement doc")
+    if isinstance(doc, str):
+        try:
+            doc = json.loads(doc)
+        except Exception:
+            pass
+    text = json.dumps(doc, ensure_ascii=False, indent=2) if isinstance(doc, (dict, list)) else str(doc)
+    return Response(
+        content=text,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="requirement_doc_{project_id}.txt"'},
+    )
+
+
 @router.post("/projects/{project_id}/retry-upload")
 async def retry_upload(
     project_id: int,

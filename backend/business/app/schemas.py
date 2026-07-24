@@ -70,6 +70,7 @@ class ProjectResp(BaseModel):
     share_id: str | None = None
     is_public: bool = False
     preview_url: str | None = None
+    requirement_doc: str | None = None  # 需求分析文档(JSON 字符串, 前端重启后还原)
 
 
 class MessageResp(BaseModel):

@@ -109,6 +109,7 @@ export interface Project {
   name: string
   created_at: string
   updated_at: string
+  requirement_doc?: string | null  // 需求文档(JSON 字符串), 重启后还原右侧"📋 需求文档"
 }
 
 export interface Message {

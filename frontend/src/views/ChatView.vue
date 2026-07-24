@@ -324,12 +324,25 @@ async function loadArtifacts() {
   const pid = projectStore.currentProjectId
   if (pid == null) {
     projectArtifacts.value = []
+    requirementDoc.value = null
     return
   }
   try {
     projectArtifacts.value = await listArtifacts(pid)
   } catch {
     projectArtifacts.value = []
+  }
+  // 还原需求文档: 后端已落库到 projects.requirement_doc, 重启后仍能展示右侧条目。
+  // 不覆盖本轮已流式下发(live)的值, 避免 _do_persist 落库延迟导致被清空。
+  if (requirementDoc.value == null) {
+    const proj = projectStore.projects.find((p) => p.id === pid)
+    if (proj?.requirement_doc) {
+      try {
+        requirementDoc.value = JSON.parse(proj.requirement_doc)
+      } catch {
+        requirementDoc.value = null
+      }
+    }
   }
 }
 const traceId = ref('')
@@ -373,6 +386,23 @@ function openArtifact(name: string, kind: 'requirement' | 'file') {
   if (rightCollapsed.value) rightCollapsed.value = false
   const target = kind === 'requirement' ? '__requirement_doc__' : name
   nextTick(() => rightPanel.value?.selectFile(target))
+}
+
+// 需求文档下载为 .txt(走后端 /api/projects/{id}/requirement-doc)
+async function downloadReqDoc() {
+  const pid = projectStore.currentProjectId
+  if (pid == null) return
+  try {
+    const resp = await fetch(`/api/projects/${pid}/requirement-doc`)
+    if (!resp.ok) return
+    const text = await resp.text()
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `requirement_doc_${pid}.txt`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  } catch { /* 下载失败忽略 */ }
 }
 
 const pendingSend = ref(false)
@@ -1018,6 +1048,7 @@ watch(
   () => projectStore.currentProjectId,
   async (id) => {
     if (id != null) {
+      requirementDoc.value = null  // 切换项目, 先清空旧项目的需求文档
       await convStore.loadConversations(id)
       await loadArtifacts()
       await nextTick(() => { setupScrollLoading(); scrollToBottom(false) })
@@ -1136,8 +1167,31 @@ watch(pendingRetry, (r) => {
             :my-comment="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].comment : null"
             :can-rate="!!auth.user"
             @rate="(p) => m.trace_id && onRate(m.trace_id, p)"
+            @open-file="(name) => openArtifact(name, 'file')"
           />
         </template>
+
+        <!-- 生成完成的产物清单: 文字反馈 + 点击在右侧预览面板打开 -->
+        <div v-if="finished && artifactLinks.length" class="artifact-summary-card">
+          <div class="asc-head">✅ 生成完成 · 共 {{ artifactLinks.length }} 项产物</div>
+          <div class="asc-hint">
+            点击下方任意文件，即可在右侧预览面板查看（HTML 实时渲染 · 需求文档原文 · 代码高亮）。
+          </div>
+          <div class="asc-list">
+            <button
+              v-for="link in artifactLinks"
+              :key="link.name + link.kind"
+              type="button"
+              class="asc-item"
+              @click="openArtifact(link.name, link.kind)"
+            >
+              <span class="asc-icon">{{ link.icon }}</span>
+              <span class="asc-name">{{ link.name }}</span>
+              <span v-if="link.kind === 'requirement'" class="asc-dl" title="下载 .txt" @click.stop="downloadReqDoc()">⬇</span>
+              <span class="asc-open">打开 ↗</span>
+            </button>
+          </div>
+        </div>
       </div>
 
       <div
@@ -1234,6 +1288,7 @@ watch(pendingRetry, (r) => {
             >
               <span class="alc-icon">{{ link.icon }}</span>
               <span class="alc-name">{{ link.name }}</span>
+              <span v-if="link.kind === 'requirement'" class="alc-dl" title="下载 .txt" @click.stop="downloadReqDoc()">⬇</span>
               <span class="alc-open">打开 ↗</span>
             </button>
           </div>
@@ -1516,6 +1571,8 @@ watch(pendingRetry, (r) => {
 .alc-icon { font-size: 14px; }
 .alc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
 .alc-open { font-size: 11px; color: #0284c7; font-weight: 600; }
+.alc-dl, .asc-dl { margin-left: auto; font-size: 13px; color: #6366f1; cursor: pointer; opacity: 0.7; padding: 0 2px; }
+.alc-dl:hover, .asc-dl:hover { opacity: 1; }
 .alc-plan {
   margin-top: 10px; background: #fff; border: 1px solid #e0f2fe;
   border-radius: 8px; padding: 8px 12px;
@@ -1524,6 +1581,34 @@ watch(pendingRetry, (r) => {
 .alc-goal { font-size: 12px; color: #475569; margin-bottom: 6px; }
 .alc-steps { margin: 0; padding-left: 18px; }
 .alc-steps li { font-size: 12px; color: #64748b; line-height: 1.7; }
+
+/* ── 生成产物清单卡片(对话框内, 点击联动右侧预览) ── */
+.artifact-summary-card {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-top: 2px;
+}
+.asc-head { font-weight: 700; font-size: 14px; color: #15803d; margin-bottom: 4px; }
+.asc-hint { font-size: 12px; color: #475569; line-height: 1.6; margin-bottom: 10px; }
+.asc-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.asc-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid #bbf7d0; background: #fff; border-radius: 8px;
+  padding: 5px 10px; cursor: pointer; font-size: 12px; color: #0f172a;
+  font-family: inherit;
+  transition: background .15s, transform .12s, box-shadow .15s;
+}
+.asc-item:hover {
+  background: #dcfce7; transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(22,163,74,.18);
+}
+.asc-icon { font-size: 14px; }
+.asc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.asc-open { font-size: 11px; color: #16a34a; font-weight: 600; }
+.alc-dl, .asc-dl { margin-left: auto; font-size: 13px; color: #6366f1; cursor: pointer; opacity: 0.7; padding: 0 2px; }
+.alc-dl:hover, .asc-dl:hover { opacity: 1; }
 
 /* ── 方案选择弹窗 ── */
 .options-modal-backdrop {
