@@ -115,10 +115,21 @@ async def requirement_agent_handler(
                 for m in messages if m.get("role") == "user"]
     user_input = req_msgs[-1]["content"][:100] if req_msgs else "(无)"
     AGENT_LOG.info("[需求] [2/4] 调用LLM需求分析 model=%s input=%.100s", model_id, user_input)
+    # 预思考事件: 长文档生成期间保持 SSE 活跃, 避免前端误判无响应
+    yield ev("think", stage="analyst", content="正在为您生成详细的需求文档（产品经理视角）…",
+             agent_id="requirement_agent")
 
     t0 = time.time()
-    chat = get_chat_model(model_id, streaming=False)
-    resp = await asyncio.to_thread(chat.invoke, [{"role": "system", "content": full_sys}, *req_msgs])
+    try:
+        chat = get_chat_model(model_id, streaming=False)
+        resp = await asyncio.to_thread(chat.invoke, [{"role": "system", "content": full_sys}, *req_msgs])
+    except Exception as e:
+        AGENT_LOG.warning("[需求] [2/4] LLM调用失败/超时: %s", e)
+        yield ev("think", stage="analyst",
+                 content="⚠️ 需求文档生成超时或被中断。您可以稍后重试，或直接用一句话描述需求"
+                         "（如「做一个餐厅官网，要有菜单和在线预订」），我也可以跳过详细文档直接为您生成。",
+                 agent_id="requirement_agent")
+        return
     raw = (resp.content or "").strip()
     AGENT_LOG.info("[需求] [2/4] LLM完成 耗时=%.0fms 输出长度=%d", (time.time() - t0) * 1000, len(raw))
 

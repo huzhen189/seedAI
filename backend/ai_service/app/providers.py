@@ -130,9 +130,9 @@ def get_chat_model(model_id: str, streaming: bool = True) -> ChatOpenAI:
         base_url=p.base_url,
         streaming=streaming,
         temperature=0.7,
-        max_tokens=4096,
-        request_timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0),
-        max_retries=1,
+        max_tokens=8192,
+        request_timeout=httpx.Timeout(connect=15.0, read=120.0, write=15.0, pool=10.0),
+        max_retries=2,
     )
 
 

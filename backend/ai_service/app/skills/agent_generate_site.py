@@ -564,6 +564,9 @@ async def generate_stream(
                 plan.get("steps", []),
             )
 
+        # 文字汇总: 让后端在返回文件的同时, 以文字形式给出本次生成结果说明(前端气泡展示)
+        yield ev("refined", data=_build_generation_summary(plan, review, url, version, project_id, intent))
+
         yield ev("node", stage="done")
         GEN_LOG.info("[gen] 完成 trace=%s html=%schars", trace_id, len(html))
 
