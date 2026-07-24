@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     chroma_collection_project_memory: str = "project_memory"
     chroma_collection_project_code: str = "project_code"
     chroma_collection_error_patterns: str = "error_patterns"
+    # v1.2.0 混合级联意图识别: 意图向量索引集合
+    chroma_collection_intents: str = "intents"
+    # 意图识别模式(cascade=混合级联v1.2.0 默认 | sir=状态化SIR v1.1.0)
+    intent_mode: str = "cascade"
     rag_top_k: int = 5
 
     # 对象存储(COS 预览投递,§10 / §5.9 tool:cos_upload)

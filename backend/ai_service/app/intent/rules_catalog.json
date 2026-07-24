@@ -1,0 +1,78 @@
+{
+  "version": "1.2.0",
+  "description": "规则目录(混合级联第①步: 强信号直路由)。strength: strong(置信≥0.9, 可触发向量 super-fast 直通跳过 LLM) | medium(置信~0.82, 仍需 LLM 终判确认)。target 必须指向 intent_catalog.json 的 id。",
+  "rules": [
+    {
+      "id": "r_site",
+      "strength": "strong",
+      "target": "build_site",
+      "patterns": ["帮我生成网站", "帮我建", "生成一个网站", "做个网站", "建一个网站", "建站", "生成一个站点", "做一个官网", "企业官网", "做个博客", "建个博客", "电商网站", "做一个落地页网站", "生成完整网站", "帮我搭建网站"]
+    },
+    {
+      "id": "r_page",
+      "strength": "strong",
+      "target": "build_page",
+      "patterns": ["做一个落地页", "生成单页", "做一个页面", "做一个产品页", "加一个页面", "做个登录页", "做个介绍页", "生成一个单页"]
+    },
+    {
+      "id": "r_requirement",
+      "strength": "strong",
+      "target": "build_requirement",
+      "patterns": ["需求分析", "规划一下", "梳理需求", "帮我做需求", "先出个方案", "我还不确定做什么", "帮我规划", "想做个网站但没想好"]
+    },
+    {
+      "id": "r_doc",
+      "strength": "strong",
+      "target": "build_doc",
+      "patterns": ["写一份readme", "写一份README", "生成部署文档", "写个使用说明", "出一份方案书", "写项目文档", "帮我写文档", "写个说明文档"]
+    },
+    {
+      "id": "r_fix",
+      "strength": "strong",
+      "target": "build_fix",
+      "patterns": ["修个bug", "帮我修", "这段代码报错", "页面白屏", "修复一下", "有bug", "兼容性问题", "运行报错", "报错了"]
+    },
+    {
+      "id": "r_review",
+      "strength": "strong",
+      "target": "build_review",
+      "patterns": ["代码评审", "审查代码", "做个review", "帮我review", "看看代码有没有问题", "帮我审查"]
+    },
+    {
+      "id": "r_game",
+      "strength": "strong",
+      "target": "build_game",
+      "patterns": ["贪吃蛇", "俄罗斯方块", "小游戏", "互动游戏", "网页游戏", "做个游戏", "来个游戏", "生成个游戏"]
+    },
+    {
+      "id": "r_modify",
+      "strength": "strong",
+      "target": "build_modify",
+      "patterns": ["修改一下代码", "改一下导航", "改一下首页", "优化一下首页", "修改这个页面", "改个配色", "换个颜色", "调整布局", "改下样式", "优化这段代码"]
+    },
+    {
+      "id": "r_search",
+      "strength": "medium",
+      "target": "chat_search",
+      "patterns": ["帮我搜索", "查一下", "帮我查", "搜索", "最新", "最近有什么", "查一查最新"]
+    },
+    {
+      "id": "r_translate",
+      "strength": "medium",
+      "target": "chat_translate",
+      "patterns": ["翻译", "译成", "翻成", "translate", "译一下"]
+    },
+    {
+      "id": "r_design",
+      "strength": "medium",
+      "target": "chat_design",
+      "patterns": ["配色", "设计风格", "布局建议", "字体推荐", "动效方案", "设计一下", "推荐配色"]
+    },
+    {
+      "id": "r_explain",
+      "strength": "medium",
+      "target": "chat_explain",
+      "patterns": ["解释一下", "什么是", "讲讲", "怎么理解", "如何理解", "讲解一下", "说说"]
+    }
+  ]
+}

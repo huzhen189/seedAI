@@ -1,0 +1,160 @@
+{
+  "version": "1.2.0",
+  "description": "意图目录(分类与多意图拆分共用单一来源)。字段: id/level1/level2/skill/category/title/description/examples/required_slots。skill 必须与 INTENT_SKILL_MAP 实际注册名一致(根治 SKILL_WHITELIST vs INTENT_SKILL_MAP 两处维护的 R3 风险)。",
+  "intents": [
+    {
+      "id": "chat_casual",
+      "level1": "chat",
+      "level2": "casual",
+      "skill": "agent_chat",
+      "category": "chat",
+      "title": "闲聊",
+      "description": "打招呼、情感表达、无明确任务的日常闲聊",
+      "examples": ["你好", "你好呀", "在吗", "谢谢", "辛苦了", "你是谁", "今天天气不错", "哈哈", "好的", "明白了"],
+      "required_slots": []
+    },
+    {
+      "id": "chat_explain",
+      "level1": "chat",
+      "level2": "explain",
+      "skill": "agent_chat",
+      "category": "chat",
+      "title": "概念解释",
+      "description": "解释技术概念、原理答疑、知识讲解",
+      "examples": ["解释一下什么是闭包", "什么是React hooks", "什么是HTTP缓存", "讲讲CSS Grid", "怎么理解异步编程", "什么是JWT"],
+      "required_slots": ["topic"]
+    },
+    {
+      "id": "chat_compare",
+      "level1": "chat",
+      "level2": "compare",
+      "skill": "agent_chat",
+      "category": "chat",
+      "title": "技术对比",
+      "description": "对比两种或多种技术方案、框架、选型建议",
+      "examples": ["Vue和React哪个好", "对比一下SQL和NoSQL", "React和Vue区别", "比较一下不同部署方案", "前后端分离和全栈哪种好"],
+      "required_slots": ["topics"]
+    },
+    {
+      "id": "chat_search",
+      "level1": "chat",
+      "level2": "search",
+      "skill": "agent_search",
+      "category": "chat",
+      "title": "联网搜索",
+      "description": "联网检索资料、查最新资讯、查找外部信息",
+      "examples": ["帮我搜索最新的前端框架", "查一下2024设计趋势", "搜索一下CSS新特性", "帮我查最新价格", "最近有什么AI新闻"],
+      "required_slots": ["query"]
+    },
+    {
+      "id": "chat_design",
+      "level1": "chat",
+      "level2": "design",
+      "skill": "agent_design",
+      "category": "chat",
+      "title": "设计咨询",
+      "description": "UI设计、配色、布局、字体、动效方案建议",
+      "examples": ["帮我设计一下配色", "推荐一个科技感配色", "这个页面布局怎么改", "字体推荐", "给个动效方案", "设计风格建议"],
+      "required_slots": ["topic"]
+    },
+    {
+      "id": "chat_translate",
+      "level1": "chat",
+      "level2": "translate",
+      "skill": "agent_chat",
+      "category": "chat",
+      "title": "翻译",
+      "description": "文本互译、中英翻译、多语言转换",
+      "examples": ["把这段翻译成英文", "帮我翻译这段话", "translate this to English", "译成中文", "翻译成日文"],
+      "required_slots": ["text", "target_lang"]
+    },
+    {
+      "id": "build_requirement",
+      "level1": "build",
+      "level2": "requirement",
+      "skill": "agent_requirement",
+      "category": "build",
+      "title": "需求分析",
+      "description": "梳理建站需求、规划功能方案、产出需求文档",
+      "examples": ["帮我做需求分析", "规划一下网站功能", "我想做个网站但没想好", "帮我梳理需求", "先出个方案"],
+      "required_slots": ["goal"]
+    },
+    {
+      "id": "build_site",
+      "level1": "build",
+      "level2": "site",
+      "skill": "agent_generate_site",
+      "category": "build",
+      "title": "完整网站",
+      "description": "生成完整多页网站(多Agent管线)",
+      "examples": ["帮我生成一个网站", "做个企业官网", "建一个博客", "生成一个电商网站", "做一个落地页网站", "建个完整站点"],
+      "required_slots": ["goal", "pages", "style"]
+    },
+    {
+      "id": "build_page",
+      "level1": "build",
+      "level2": "page",
+      "skill": "agent_build",
+      "category": "build",
+      "title": "单页/落地页",
+      "description": "生成单个页面、落地页、产品介绍页",
+      "examples": ["做一个落地页", "生成单页", "帮我做一个页面", "做一个产品介绍页", "加一个登录页"],
+      "required_slots": ["goal", "style"]
+    },
+    {
+      "id": "build_modify",
+      "level1": "build",
+      "level2": "modify",
+      "skill": "agent_build",
+      "category": "build",
+      "title": "修改已有",
+      "description": "修改已有代码、调整样式布局、局部优化",
+      "examples": ["帮我修改一下代码", "改一下导航栏", "把颜色换成蓝色", "优化一下首页", "改一下这个页面"],
+      "required_slots": ["target"]
+    },
+    {
+      "id": "build_game",
+      "level1": "build",
+      "level2": "game",
+      "skill": "agent_build",
+      "category": "build",
+      "title": "互动游戏",
+      "description": "生成网页小游戏、互动娱乐页面",
+      "examples": ["做一个贪吃蛇游戏", "生成一个俄罗斯方块", "做个小游戏", "来个互动游戏", "网页小游戏"],
+      "required_slots": ["goal", "style"]
+    },
+    {
+      "id": "build_doc",
+      "level1": "build",
+      "level2": "doc",
+      "skill": "agent_doc",
+      "category": "build",
+      "title": "文档生成",
+      "description": "生成README、部署文档、使用说明、方案书",
+      "examples": ["帮我写一份README", "生成部署文档", "写个使用说明", "出一份方案书", "写项目文档"],
+      "required_slots": ["doc_type"]
+    },
+    {
+      "id": "build_fix",
+      "level1": "build",
+      "level2": "fix",
+      "skill": "agent_review",
+      "category": "build",
+      "title": "修复Bug",
+      "description": "排查并修复代码报错、兼容性问题、白屏",
+      "examples": ["帮我修个bug", "这段代码报错了", "页面白屏了", "修复一下这个错误", "有个兼容性问题"],
+      "required_slots": ["symptom"]
+    },
+    {
+      "id": "build_review",
+      "level1": "build",
+      "level2": "review",
+      "skill": "agent_review",
+      "category": "build",
+      "title": "代码评审",
+      "description": "代码评审、审查实现、给出改进建议",
+      "examples": ["帮我代码评审", "审查一下这段代码", "做个review", "帮我review", "看看代码有没有问题"],
+      "required_slots": ["target"]
+    }
+  ]
+}

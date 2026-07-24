@@ -66,6 +66,12 @@ async def lifespan(app: FastAPI):
         ensure_collections()
     except Exception as e:
         logger.warning("lifespan: ensure_collections 失败(可忽略): %s", e)
+    # v1.2.0 混合级联: 构建意图向量索引(幂等, 无 Chroma 时降级离线 bigram)
+    try:
+        from .intent.vector_store import ensure_intent_index
+        ensure_intent_index()
+    except Exception as e:
+        logger.warning("lifespan: ensure_intent_index 失败(可忽略): %s", e)
     # 启动 Worker 池(消费 queue:generate,发布进度)
     _worker_task = __import__("asyncio").ensure_future(
         worker_loop(concurrency=settings.worker_concurrency)

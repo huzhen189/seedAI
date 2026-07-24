@@ -71,6 +71,7 @@ _ALL_COLLECTIONS = [
     settings.chroma_collection_project_memory,
     settings.chroma_collection_project_code,
     settings.chroma_collection_error_patterns,
+    settings.chroma_collection_intents,
     CTX_COLLECTION,
 ]
 

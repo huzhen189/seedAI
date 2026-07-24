@@ -20,19 +20,17 @@ from typing import Optional
 
 from ..core.models import RISK_HIGH, RISK_LOW, RISK_MEDIUM, SplitResult, SubTask
 from ..providers import get_chat_model, resolve_fallback_order
+from .catalog import skill_whitelist
 from .common import VALID_INDUSTRIES, VALID_LEVEL1, VALID_LEVEL2
 from .tools import run_tools
 
 logger = logging.getLogger("ai_service.intent.splitter")
 
-# 可用 skill 白名单(供 LLM 映射到具体 skill, 单一来源)
-SKILL_WHITELIST = (
-    "explain(解释/闲聊/对比/排查), write_code(写代码/组件/跨语言翻译), "
-    "fix_agent(修Bug), review_agent(代码评审/重构), design_agent(UI设计/配色建议), "
-    "search_agent(联网搜索查资料), generate_site(生成网站/页面/游戏/修改已有站), "
-    "requirement_agent(需求分析), generate_doc(写文档/README/教程/方案), "
-    "rag_retrieve(检索知识库)"
-)
+# 可用 skill 白名单(供 LLM 映射到具体 skill)。
+# v1.2.0: 改为从 intent_catalog.json 派生(单一来源), 根治旧 SKILL_WHITELIST
+# 与 INTENT_SKILL_MAP 两处维护漂移的 R3 风险(旧名 explain/write_code/fix_agent
+# 等均已失效, 会导致拆分后 skill 落空被兜底成 explain)。
+SKILL_WHITELIST = skill_whitelist()
 
 MAX_SUBTASKS = 3  # 拆分粒度上限(约束 3)
 
