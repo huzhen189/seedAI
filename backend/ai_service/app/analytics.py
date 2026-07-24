@@ -7,8 +7,9 @@
 - 编排: 总次数 / 策略分布 / 子任务数分布 / 成功率 / 总耗时
 - 子任务: per-skill 成功/失败/拦截/跳过 + per-risk 分布 + 耗时 p50/p90/p99
 - v0.9.0 新增: 修复(repair) / 蒸馏(distill) / 代码索引(code_index) / 精炼(refine) / 闲聊重答(chat_retry)
+- v1.2.0 新增: 意图识别(混合级联 classify_v3) —— 分类总次数 / 决策分布(route·clarify·split·block) / 来源分布(selection·reset·superfast·novelty·llm_ruling·block) / 成功率 / 耗时 p50/p90/p99
 
-键前缀: an:orch:* / an:subtask:* / an:v090:*
+键前缀: an:orch:* / an:subtask:* / an:v090:* / an:intent:*
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ P_ORCH = "an:orch"
 P_SUB = "an:subtask"
 P_GEN = "an:generate"  # 后端核心总生成请求数
 P_V090 = "an:v090"      # v0.9.0 新增功能统计
+P_INTENT = "an:intent"   # v1.2.0 混合级联意图识别分类统计
 
 # 模块级懒加载 Redis 客户端
 _redis_client = None
@@ -275,3 +277,30 @@ async def record_chat_retry(success: bool) -> None:
         await r.hincrby(f"{P_V090}:chat_retry", "success" if success else "failed", 1)
     except Exception as e:
         logger.debug("[统计] chat_retry 失败: %s", e)
+
+
+async def record_intent_classify(
+    decision: str,
+    source: str,
+    duration_ms: float,
+    success: bool = True,
+) -> None:
+    """混合级联意图识别(v1.2.0)每次分类的统计。
+
+    decision ∈ {route, clarify, split, block}
+    source   ∈ {selection, reset, superfast, novelty, llm_ruling, block}
+    与 cascade.py 的 observe_record 调用点一一对应, 保证可观测 + 可统计双轨。
+    """
+    try:
+        r = _get_redis()
+        if r is None:
+            return
+        await r.hincrby(f"{P_INTENT}:total", "count", 1)
+        await r.hincrby(f"{P_INTENT}:decision", decision, 1)
+        await r.hincrby(f"{P_INTENT}:source", source, 1)
+        await r.hincrby(f"{P_INTENT}:success", "ok" if success else "fail", 1)
+        zkey = f"{P_INTENT}:duration"
+        await r.zadd(zkey, {uuid.uuid4().hex: duration_ms})
+        await r.zremrangebyrank(zkey, 0, -(LATENCY_MAX + 1))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("AI analytics record_intent_classify failed: %s", e)

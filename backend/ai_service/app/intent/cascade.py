@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from ..core.models import SubTask
 from ..providers import get_chat_model, resolve_fallback_order
 from ..registry import SkillRegistry
+from ..analytics import record_intent_classify
 from .catalog import catalog_for_llm, get_intent, skill_whitelist
 from .common import normalize_industry
 from .observation import record as observe_record
@@ -257,6 +258,7 @@ async def classify_v3(
         logger.info("[级联] [0] 命中选项选择 → 短路 skill=%s", _chosen)
         clear_pending_options(conversation_id)
         reset_slots(conversation_id)
+        await record_intent_classify("route", "selection", (time.time() - t0) * 1000)
         return _emit_route(
             {"level1": "chat", "level2": "casual"}, 1.0, decision="route",
             selected_skill=_chosen, industry="other", reason="用户选择/指定",
@@ -268,6 +270,7 @@ async def classify_v3(
     if _is_reset_signal(current_user_msg):
         logger.info("[级联] RESET 信号 → 闲聊")
         reset_slots(conversation_id)
+        await record_intent_classify("route", "reset", (time.time() - t0) * 1000)
         return _emit_route(
             get_intent(_CHAT_CASUAL) or {"level1": "chat", "level2": "casual"}, 0.3,
             decision="route", selected_skill="agent_chat", industry="other",
@@ -299,6 +302,7 @@ async def classify_v3(
                        latency_ms=(time.time() - t0) * 1000, tokens_used=0,
                        specialist_routed=intent["skill"], outcome="pending",
                        extra={"source": "superfast"})
+        await record_intent_classify("route", "superfast", (time.time() - t0) * 1000)
         return _emit_route(
             intent, strong_rule.confidence, decision="route",
             selected_skill=intent["skill"], industry="other",
@@ -323,6 +327,7 @@ async def classify_v3(
                        latency_ms=(time.time() - t0) * 1000, tokens_used=0,
                        specialist_routed="agent_chat", outcome="pending",
                        extra={"source": "novelty"})
+        await record_intent_classify("route", "novelty", (time.time() - t0) * 1000)
         return _emit_route(
             chat_intent, max(top_score, 0.3), decision="route",
             selected_skill="agent_chat", industry="other", reason="novelty_fallback",
@@ -346,6 +351,7 @@ async def classify_v3(
                        belief_before=0.0, belief_after=0.0, decision="block",
                        latency_ms=(time.time() - t0) * 1000, tokens_used=0,
                        specialist_routed=None, outcome="blocked")
+        await record_intent_classify("block", "block", (time.time() - t0) * 1000)
         return _emit_route(
             {"level1": "chat", "level2": "casual"}, 0.0, decision="block",
             selected_skill="agent_chat", industry="other",
@@ -459,4 +465,5 @@ async def classify_v3(
         questions=questions, rounds=new_rounds, reason=ruling.reason, evidence=evidence,
         safety=safety_result, sub_tasks=sub_tasks, split_reason=split_reason, request_id=req_id,
     )
+    await record_intent_classify(result.decision, evidence["source"], (time.time() - t0) * 1000)
     return result
