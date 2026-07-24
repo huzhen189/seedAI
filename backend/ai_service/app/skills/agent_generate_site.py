@@ -303,6 +303,99 @@ def _build_generation_summary(plan: dict, review: dict | None, url: str | None,
     return "\n".join(lines)
 
 
+# ── 需求来源解析(修复 RC1: 建站时必须读取对话真实需求, 而非首条闲聊消息) ──
+_BUILD_KW = ("网站", "官网", "站点", "建站", "生成网站", "做个网站", "首页", "主页",
+             "落地页", "页面", "网页", "h5", "H5", "landing", "单页")
+_CONTENT_KW = ("天气", "美食", "地图", "定位", "展示", "列表", "预约", "价格", "商品",
+               "联系", "关于", "模块", "功能", "板块", "轮播", "表单", "导航", "评论",
+               "搜索", "登录", "注册", "新闻", "博客", "案例", "团队", "服务", "产品",
+               "介绍", "详情", "订单", "购物车", "支付", "会员", "课程", "视频", "图片",
+               "下载", "分享", "日历", "日程", "签到", "排行", "统计", "图表", "特色",
+               "活动", "资讯", "动态", "留言", "客服", "品牌", "风格", "配色", "主题")
+
+
+def _req_doc_to_text(doc: dict) -> str:
+    """把结构化需求文档(dict)可读序列化(无 report 字段时的兜底)。"""
+    try:
+        parts: list[str] = []
+        brand = doc.get("brand") or {}
+        if isinstance(brand, dict):
+            if brand.get("name"):
+                parts.append(f"品牌: {brand['name']}")
+            if brand.get("intro"):
+                parts.append(f"定位: {brand['intro']}")
+        goal = doc.get("project_goal") or {}
+        if isinstance(goal, dict):
+            if goal.get("background"):
+                parts.append(f"背景: {goal['background']}")
+            if goal.get("objectives"):
+                parts.append("目标: " + "；".join(goal["objectives"]))
+        pages = doc.get("pages") or []
+        if pages:
+            plist = []
+            for p in pages:
+                if isinstance(p, dict):
+                    secs = [s.get("name") for s in p.get("sections", []) if isinstance(s, dict)]
+                    plist.append(f"{p.get('title', '')}({'/'.join(secs)})")
+            parts.append("页面: " + "；".join(plist))
+        feats = doc.get("features") or []
+        if feats:
+            fnames = [f.get("name") if isinstance(f, dict) else str(f) for f in feats]
+            parts.append("功能: " + "；".join(fnames))
+        design = doc.get("design") or {}
+        if isinstance(design, dict):
+            if design.get("style"):
+                parts.append(f"风格: {design['style']}")
+            cs = design.get("color_scheme")
+            if isinstance(cs, dict):
+                parts.append("配色: " + " ".join(f"{k}={v}" for k, v in cs.items() if k != "meaning"))
+        if not parts:
+            return json.dumps(doc, ensure_ascii=False, indent=2)
+        return "\n".join(parts)
+    except Exception:
+        return json.dumps(doc, ensure_ascii=False, indent=2)
+
+
+def _select_requirement(requirement_doc, conversation_summary, messages):
+    """从 需求文档 → 对话摘要 → 最近含需求语义的用户消息 挑选最优需求文本。
+
+    返回 (text, source)。修复 RC1: 当用户说"按我刚刚的要求生成网站"时,
+    必须取对话里真正描述需求的消息(如"首页天气+附近美食+地图定位"),
+    而不是首条闲聊(如"今天天气怎么样")。
+    """
+    # 1) 结构化需求文档(最权威)
+    if isinstance(requirement_doc, dict) and requirement_doc:
+        report = requirement_doc.get("report")
+        if isinstance(report, str) and report.strip():
+            return report.replace("\\n", "\n"), "requirement_doc"
+        return _req_doc_to_text(requirement_doc), "requirement_doc"
+    # 2) 对话摘要(business 层 get_summary 产出)
+    if isinstance(conversation_summary, str) and conversation_summary.strip():
+        return conversation_summary.strip(), "conversation_summary"
+    # 3) 从消息里找"含建站语义且内容最丰富"的用户消息(排除纯指令句如"帮我做个网站")
+    candidates = []
+    for m in messages:
+        if m.get("role") != "user":
+            continue
+        c = m.get("content") or ""
+        if not isinstance(c, str):
+            continue
+        if any(kw in c for kw in _BUILD_KW):
+            score = sum(1 for kw in _CONTENT_KW if kw in c) * 2 + len(c) // 40
+            candidates.append((c, score))
+    if candidates:
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return candidates[0][0], "user_message"
+    # 4) 兜底: 最后一条用户消息
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content") or ""
+            if isinstance(c, str) and c.strip():
+                return c, "user_message"
+            break
+    return "", "none"
+
+
 async def generate_stream(
     model_id: str,
     messages: list,
@@ -317,11 +410,19 @@ async def generate_stream(
     checkpoint: Optional[dict] = None,
     resume_mode: str = "resume",
     project_system_prompt: Optional[str] = None,
+    requirement_doc: Optional[dict] = None,
+    conversation_summary: Optional[str] = None,
     **kwargs,
 ) -> AsyncGenerator[Dict, None]:
     # 根据意图选 Coder 系统提示(游戏 vs 建站), 并注入项目约束(Tier 1)
     base_coder = SYS_CODER_GAME if intent == "game" else SYS_CODER
     coder_prompt = build_skill_sys(base_coder, project_system_prompt)
+
+    # ① 需求来源(修复 RC1): 优先 结构化需求文档 → 对话摘要 → 最近含需求语义的用户消息,
+    #    而非取首条闲聊消息。供下方 RAG / Planner / Coder 统一使用。
+    req_text, req_source = _select_requirement(requirement_doc, conversation_summary, messages)
+    first_user_msg = req_text or (messages[-1].get("content", "") if messages else "")
+    GEN_LOG.info("[gen] 需求来源=%s 长度=%d trace=%s", req_source, len(req_text), trace_id)
 
     # 断点恢复入口(§7): 跳过已完成阶段
     if checkpoint:
@@ -351,7 +452,10 @@ async def generate_stream(
         if stage == "planner_done":
             yield ev("node", stage="enter_planner_done")
             plan_msgs = [{"role": "user", "content": plan.get("goal", "")}]
-            user_msgs = [{"role": "user", "content": f"需求规格:\n{json.dumps(plan, ensure_ascii=False)}"}] + messages
+            user_msgs = [{"role": "user", "content": f"需求规格:\n{json.dumps(plan, ensure_ascii=False)}"}]
+            if req_text:
+                user_msgs.append({"role": "user", "content": f"【用户原始需求(来源: {req_source})】\n{req_text}"})
+            user_msgs = user_msgs + list(messages)
             # 重新执行 Coder
             html_parts = []
             async for chunk, _ in astream_with_fallback(model_id, user_msgs, system=coder_prompt):
@@ -413,12 +517,8 @@ async def generate_stream(
 
     # ---------- 正常流程 ----------
 
-    # ②-a RAG 增强:带超时保护,Chroma 不可达时 5s 后跳过,不阻塞生成
-    first_user_msg = ""
-    for m in messages:
-        if m.get("role") == "user":
-            first_user_msg = m.get("content", "") or ""
-            break
+    # ②-a RAG 增强: 需求文本已在上文 first_user_msg 准备好(含对话真实需求),
+    #    带超时保护, Chroma 不可达时 5s 后跳过, 不阻塞生成
     rag_ctx = ""
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -466,6 +566,8 @@ async def generate_stream(
             plan_title=plan.get("title", ""),
             plan_goal=plan.get("goal", ""),
             plan_steps=plan.get("steps", []),
+            content="已根据您的需求生成建站方案，确认后开始设计与开发。点击「确认并生成」，或直接回复「开始生成 / 帮我做网站」即可。",
+            cta_label="确认并生成",
         )
         return  # 暂停, 等待前端发起 resume/confirm 续接
         # 检查取消(断点保存点 1: planner_done)
@@ -481,7 +583,10 @@ async def generate_stream(
         # 2) Coder(流式,模型不可用时不自动降级,由前端确认后重发)
         yield ev("node", stage="enter_coder")
         GEN_LOG.info("[gen] Coder 开始 trace=%s model=%s", trace_id, model_id)
-        user_msgs = [{"role": "user", "content": f"需求规格:\n{spec}"}] + messages
+        user_msgs = [{"role": "user", "content": f"需求规格:\n{spec}"}]
+        if req_text:
+            user_msgs.append({"role": "user", "content": f"【用户原始需求(来源: {req_source})】\n{req_text}"})
+        user_msgs = user_msgs + list(messages)
         html_parts: list = []
         token_count = 0
         async for chunk, _ in astream_with_fallback(model_id, user_msgs, system=coder_prompt):

@@ -23,6 +23,42 @@ from ..core.models import SubTask
 
 logger = logging.getLogger("ai_service.intent.pipeline")
 
+# ── F2/F3 共用: 当前用户消息 & 对话需求探测 ──
+_SITE_KW = ("网站", "官网", "站点", "建站", "生成网站", "门户", "整站", "主页", "首页")
+_BUILD_KW = ("网站", "官网", "站点", "建站", "生成网站", "页面", "网页", "落地页",
+             "h5", "H5", "主页", "首页", "landing")
+_CONTENT_KW = ("天气", "美食", "地图", "定位", "展示", "列表", "预约", "价格", "商品", "联系",
+               "关于", "模块", "功能", "板块", "轮播", "表单", "导航", "评论", "搜索", "登录",
+               "注册", "新闻", "博客", "案例", "团队", "服务", "产品", "介绍", "详情", "订单",
+               "购物车", "支付", "会员", "课程", "视频", "图片", "下载", "分享", "日历", "日程",
+               "签到", "排行", "统计", "图表", "特色", "活动", "资讯", "动态", "留言", "客服",
+               "品牌", "风格", "配色", "主题")
+
+
+def _last_user_message(messages: list[dict]) -> str:
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content") or ""
+            return c if isinstance(c, str) else ""
+    return ""
+
+
+def _has_conversation_requirement(messages: list[dict]) -> bool:
+    """对话里是否存在『可读取的建站需求』(供死亡路由放行判断)。
+
+    判定: 存在某条用户消息同时含 建站关键词(网站/页面…) 与 内容关键词(天气/美食/地图…),
+    说明用户在对话中已描述过具体需求, 无需再打回需求分析(修复 RC3 死亡路由)。
+    """
+    for m in reversed(messages):
+        if m.get("role") != "user":
+            continue
+        c = m.get("content") or ""
+        if not isinstance(c, str):
+            continue
+        if any(kw in c for kw in _BUILD_KW) and any(kw in c for kw in _CONTENT_KW):
+            return True
+    return False
+
 
 @dataclass
 class PipelineResult:
@@ -130,7 +166,9 @@ async def classify_v2(
                rule_result.pattern, safety_result.risk_level)
     result = _aggregate(rule_result, semantic_result, context_result, safety_result,
                       project_status, project_constraints,
-                      has_requirement_doc=has_requirement_doc)
+                      has_requirement_doc=has_requirement_doc,
+                      current_user_msg=_last_user_message(messages),
+                      has_conversation_requirement=_has_conversation_requirement(messages))
 
     # ── [6/6] 多意图拆分门控(轻量规则先行, 命中才调 LLM 深拆) ──
     if result.decision == "route":
@@ -158,6 +196,8 @@ def _aggregate(
     project_status: str,
     project_constraints: list[str] | None = None,
     has_requirement_doc: bool = False,   # v1.0.7: 已存在需求文档则放行建站
+    current_user_msg: str = "",          # F2: 当前用户消息(防 site→page 降级)
+    has_conversation_requirement: bool = False,  # F3: 对话含可读需求则放行建站
 ) -> PipelineResult:
     """汇总器: 安全优先短路 → 意图融合 → 工具选择 → 二次确认 → 多选项 → 路由。
 
@@ -192,13 +232,22 @@ def _aggregate(
     # 上下文修正: 如果上下文明确指示不同意图, 可以翻转
     if context.correction and context.source != "none":
         ctx_correction = context.correction
-        logger.info("[汇总] 上下文修正 %s/%s → %s/%s (原因: %s)",
-                   final_l1, final_l2,
-                   ctx_correction.get("level1"), ctx_correction.get("level2"),
-                   ctx_correction.get("reason"))
-        final_l1 = ctx_correction.get("level1", final_l1)
-        final_l2 = ctx_correction.get("level2", final_l2)
-        confidence = min(confidence * 0.85, 0.85)  # 上下文修正降低置信度
+        target_l1 = ctx_correction.get("level1", final_l1)
+        target_l2 = ctx_correction.get("level2", final_l2)
+        # F2 修复 RC2: 当前用户消息明确表达"整站"意图(网站/官网/建站…)时,
+        # 不允许上下文修正把 build/site 降级为 build/page(单页), 保留用户明确意图。
+        if (final_l1 == "build" and final_l2 == "site"
+                and target_l2 == "page"
+                and any(kw in current_user_msg for kw in _SITE_KW)):
+            logger.info("[汇总] 上下文修正跳过(当前消息明确整站意图, 防 site→page 降级) %s/%s → %s/%s",
+                       final_l1, final_l2, target_l1, target_l2)
+        else:
+            logger.info("[汇总] 上下文修正 %s/%s → %s/%s (原因: %s)",
+                       final_l1, final_l2, target_l1, target_l2,
+                       ctx_correction.get("reason"))
+            final_l1 = target_l1
+            final_l2 = target_l2
+            confidence = min(confidence * 0.85, 0.85)  # 上下文修正降低置信度
 
     # 规则与语义冲突时降低置信度
     if rule.pattern and rule.confidence > 0.5:
@@ -210,7 +259,8 @@ def _aggregate(
 
     # ── Step 3: 工具选择 ──
     tools = run_tools(final_l1, final_l2, confidence, industry=industry,
-                      project_status=project_status, has_requirement_doc=has_requirement_doc)
+                      project_status=project_status, has_requirement_doc=has_requirement_doc,
+                      has_conversation_requirement=has_conversation_requirement)
 
     if not tools.skills:
         logger.info("[汇总] 无可用工具 → 降级 explain")
