@@ -33,6 +33,7 @@ from ..providers import (
 from ..intent.common import build_skill_sys
 from ..knowledge.chroma import build_rag_context, save_memory
 from ..registry import register_skill
+logger = logging.getLogger("ai_service.skills.agent_generate_site")
 
 
 GEN_LOG = logging.getLogger("ai_service.generate")

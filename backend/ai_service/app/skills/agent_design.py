@@ -9,6 +9,7 @@ from typing import Dict
 from ..events import ev
 from ..providers import astream_with_fallback
 from ..registry import register_skill
+logger = logging.getLogger("ai_service.skills.agent_design")
 
 AGENT_LOG = logging.getLogger("ai_service.design")
 

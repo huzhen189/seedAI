@@ -5,6 +5,8 @@ rules.py / semantic.py 原先各自重复定义 VALID_LEVEL1/2/INDUSTRIES,
 """
 
 from __future__ import annotations
+import logging
+logger = logging.getLogger("ai_service.intent.common")
 
 # 有效的意图值域(v1.0: Chat/Build 两大方向)
 VALID_LEVEL1 = frozenset({"chat", "build", "unsupported"})

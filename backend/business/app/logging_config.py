@@ -14,7 +14,7 @@
 
 覆盖范围
 ------
-- 应用内所有 `logging.getLogger(...)` 日志(如 business.cache / business.metrics / proxy);
+- 应用内所有 `logging.getLogger(...)` 日志(如 business.cache / business.metrics / business.proxy);
 - uvicorn 自身的访问日志(uvicorn.access,含每行请求方法/路径/状态码/耗时)与
   错误日志(uvicorn.error),一并落盘,便于事后核对请求链路。
 

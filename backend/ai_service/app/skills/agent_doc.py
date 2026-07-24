@@ -13,6 +13,7 @@ from ..providers import (
     resolve_fallback_order,
 )
 from ..registry import register_skill
+logger = logging.getLogger("ai_service.skills.agent_doc")
 
 
 SYS_DOC = (

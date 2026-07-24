@@ -6,10 +6,12 @@
 """
 
 from __future__ import annotations
+import logging
 
 from html.parser import HTMLParser
 
 from ..registry import tool
+logger = logging.getLogger("ai_service.tools.html_validate")
 
 
 class _HTMLValidator(HTMLParser):

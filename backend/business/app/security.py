@@ -1,4 +1,5 @@
 """鉴权工具:bcrypt 密码哈希 + JWT 签发/校验 + 当前用户依赖。"""
+import logging
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -9,6 +10,7 @@ from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import settings
+logger = logging.getLogger("business.security")
 
 
 _bearer = HTTPBearer(auto_error=False)

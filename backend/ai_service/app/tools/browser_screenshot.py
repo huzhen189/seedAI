@@ -7,11 +7,13 @@ risk=dangerous:会启动浏览器进程,占用资源;经 ToolRegistry risk 字�
 """
 
 from __future__ import annotations
+import logging
 
 from pathlib import Path
 
 from ..config import settings
 from ..registry import tool
+logger = logging.getLogger("ai_service.tools.browser_screenshot")
 
 
 @tool(

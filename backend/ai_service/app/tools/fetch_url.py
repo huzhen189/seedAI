@@ -5,10 +5,12 @@
 """
 
 from __future__ import annotations
+import logging
 
 import httpx
 
 from ..registry import tool
+logger = logging.getLogger("ai_service.tools.fetch_url")
 
 
 @tool(

@@ -10,9 +10,11 @@ SkillEntry 字段严格对齐设计文档 §5.8:
 """
 
 from __future__ import annotations
+import logging
 
 from dataclasses import dataclass
 from typing import Any, Callable
+logger = logging.getLogger("ai_service.registry.skill_registry")
 
 
 @dataclass

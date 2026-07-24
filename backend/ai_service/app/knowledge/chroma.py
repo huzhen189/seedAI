@@ -17,7 +17,7 @@ import logging
 from ..config import settings
 
 
-logger = logging.getLogger("ai_service.rag")
+logger = logging.getLogger("ai_service.chroma")
 
 # 注入 Planner 的 RAG 上下文上限,防 prompt 过长
 _RAG_INJECT_MAX_CHARS = 4000

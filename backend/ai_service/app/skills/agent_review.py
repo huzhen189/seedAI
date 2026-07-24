@@ -17,6 +17,7 @@ from typing import Optional
 from ..events import ev
 from ..providers import get_chat_model, astream_with_fallback
 from ..registry import register_skill
+logger = logging.getLogger("ai_service.skills.agent_review")
 
 AGT = logging.getLogger("ai_service.agent_review")
 

@@ -24,9 +24,11 @@
 """
 
 from __future__ import annotations
+import logging
 
 import json
 from typing import Any, Dict
+logger = logging.getLogger("ai_service.events")
 
 
 # 终止事件:收到即结束 SSE 流

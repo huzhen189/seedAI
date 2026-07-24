@@ -5,11 +5,13 @@
 """
 
 from __future__ import annotations
+import logging
 
 from pathlib import Path
 
 from ..config import settings
 from ..registry import tool
+logger = logging.getLogger("ai_service.tools.file_io")
 
 
 @tool(

@@ -4,6 +4,7 @@
 token;EventSource / 页面同源时浏览器自动携带 Cookie。另兼容 Bearer(便于
 API 调试 / 非浏览器客户端)。
 """
+import logging
 
 from typing import Literal, Optional, TypedDict
 
@@ -26,6 +27,8 @@ from .security import (
     hash_password,
     verify_password,
 )
+
+logger = logging.getLogger("business.auth")
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])

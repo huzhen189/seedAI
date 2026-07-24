@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from .config import settings
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("business.db")
 
 # 异步引擎:
 #  - echo=False:不打 SQL 日志(避免刷屏,排查时临时改 True);

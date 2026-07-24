@@ -20,6 +20,7 @@ from ..events import ev
 from ..intent.common import build_skill_sys
 from ..providers import get_chat_model
 from ..registry import register_skill
+logger = logging.getLogger("ai_service.skills.agent_requirement")
 
 AGENT_LOG = logging.getLogger("ai_service.requirement")
 

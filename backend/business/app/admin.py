@@ -7,6 +7,7 @@
 管理页作为 Vue 内 `/admin` 路由,与用户前台共享登录态、彼此隔离(前端 §10)。
 admin 进入后控制面板置灰 / 隐藏,仅 super_admin 可见可执行。
 """
+import logging
 
 import asyncio
 import json
@@ -37,6 +38,8 @@ from .security import (
     require_admin,
     require_super_admin,
 )
+
+logger = logging.getLogger("business.admin")
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])

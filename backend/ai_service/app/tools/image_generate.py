@@ -7,11 +7,13 @@ scope=user_exposed:用户可在 UI 显式触发"生成配图"。
 """
 
 from __future__ import annotations
+import logging
 
 import httpx
 
 from ..config import settings
 from ..registry import tool
+logger = logging.getLogger("ai_service.tools.image_generate")
 
 
 @tool(

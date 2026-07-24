@@ -38,7 +38,7 @@ from ..analytics import (  # v0.9.0 新增功能统计
 _JOB_QUEUE = "queue:generate"
 _STREAM_PREFIX = "gen:stream:"  # + trace_id -> Redis Stream(可回放进度)
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("ai_service.queue")
 
 
 async def _commit_after_done(trace_id: str, skill_name: str, user_text: str) -> None:
@@ -440,7 +440,7 @@ def get_queue() -> QueueBackend:
     except Exception as e:  # 缺 redis 库或连不上 → 退内存兜底,保证可跑
         import logging
 
-        logging.warning("Redis 不可用,回退内存队列: %s", e)
+        logger.warning("Redis 不可用,回退内存队列: %s", e)
         _backend = MemoryBackend()
     return _backend
 

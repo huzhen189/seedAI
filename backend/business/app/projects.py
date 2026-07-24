@@ -4,6 +4,7 @@
 - 所有写操作先校验归属(user_id),非本人 404。
 - 删除项目级联删会话与消息;删除会话级联删消息。
 """
+import logging
 
 import json
 import uuid
@@ -27,6 +28,7 @@ from .schemas import (
     SearchItemResp,
 )
 from .security import CurrentUser, get_current_user
+logger = logging.getLogger("business.projects")
 
 
 def _fix_content(content: str) -> str:

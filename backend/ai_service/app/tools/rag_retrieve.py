@@ -10,9 +10,11 @@
 """
 
 from __future__ import annotations
+import logging
 
 from ..config import settings
 from ..registry import tool
+logger = logging.getLogger("ai_service.tools.rag_retrieve")
 
 
 @tool(

@@ -12,10 +12,12 @@ ToolEntry 字段严格对齐设计文档 §5.9:
 """
 
 from __future__ import annotations
+import logging
 
 import inspect
 from dataclasses import dataclass
 from typing import Any, Callable
+logger = logging.getLogger("ai_service.registry.tool_registry")
 
 
 @dataclass

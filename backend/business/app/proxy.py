@@ -103,7 +103,7 @@ _PROVIDER_BY_MODEL = {
 
 router = APIRouter(prefix="/api", tags=["generate"])
 
-logger = logging.getLogger("proxy")
+logger = logging.getLogger("business.proxy")
 
 _bearer = HTTPBearer(auto_error=False)
 

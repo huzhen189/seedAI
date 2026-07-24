@@ -10,6 +10,7 @@ from typing import Dict
 from ..events import ev
 from ..providers import astream_with_fallback, get_chat_model
 from ..registry import register_skill
+logger = logging.getLogger("ai_service.skills.agent_search")
 
 AGENT_LOG = logging.getLogger("ai_service.search")
 

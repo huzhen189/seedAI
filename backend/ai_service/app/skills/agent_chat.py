@@ -8,6 +8,7 @@ import time
 
 from ..providers import ModelUnavailableError, get_chat_model, resolve_fallback_order
 from ..registry import register_skill
+logger = logging.getLogger("ai_service.skills.agent_chat")
 
 
 # 按 level2 子意图切换 System Prompt
