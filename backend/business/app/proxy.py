@@ -376,7 +376,7 @@ async def get_summary(conversation_id: int) -> str:
                 resp = await client.post(
                     "https://api.deepseek.com/v1/chat/completions",
                     headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
-                    json={"model": "deepseek-chat",
+                    json={"model": "deepseek-v4-flash",
                           "messages": [{"role":"user","content":
                               f"把对话压缩成 ≤200字 摘要(主题/决策/进度)。\n{raw}"}],
                           "max_tokens": 200, "temperature": 0.3},
@@ -424,7 +424,7 @@ async def maybe_compress_summary(conversation_id: int, model: str, latest_user: 
                 resp = await client.post(
                     "https://api.deepseek.com/v1/chat/completions",
                     headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
-                    json={"model": "deepseek-chat", "messages": [{"role":"user","content":compress_prompt}],
+                    json={"model": "deepseek-v4-flash", "messages": [{"role":"user","content":compress_prompt}],
                           "max_tokens": 200, "temperature": 0.3},
                 )
                 data = resp.json()
@@ -553,6 +553,7 @@ async def chat(
         except Exception:
             token = None
     user: CurrentUser | None = None
+    new_token: str | None = None
     if token:
         try:
             payload = decode_token(token)
@@ -563,7 +564,11 @@ async def chat(
     if user is None:
         logger.info("[chat] 鉴权失败 — 未登录或 token 无效")
         return _sse_auth_error()
-    logger.info("[chat] [1/8] 鉴权通过 user=%s role=%s", user.id, user.role)
+    # 滑动过期(产品需求): 每次有效对话操作都重新签发 token, 刷新过期时间。
+    # 双通道回传: StreamingResponse 挂 X-Access-Token 头(非浏览器客户端轮换),
+    # 并 Set-Cookie(浏览器同源 SSE/页面自动携带)。
+    new_token = create_access_token(user.id, user.role)
+    logger.info("[chat] [1/8] 鉴权通过 user=%s role=%s (滑动续期已签发新 token)", user.id, user.role)
 
     # --- 2) 从 DB 取最近 20 条消息 + 当前 q ---
     messages = await _build_messages_from_db(db, conversation_id, request)
@@ -658,12 +663,19 @@ async def chat(
                 payload["project_constraints"] = _parse_project_forbid(proj.system_prompt)
     except Exception as e:
         logger.warning("[chat] 项目上下文获取失败 conv=%s: %s", conversation_id, e)
+    # 站已生成信号: 该对话历史中曾产出预览 → 迭代修改类消息应走建站(意图纠偏)
+    try:
+        payload["site_generated"] = bool(await cache_get(f"site_generated:{conversation_id}"))
+    except Exception:
+        payload["site_generated"] = False
     # 断点续跑: 方案确认后→锁死 generate_site, 防止重新进需求分析
     use_skill_override = False
     if resume:
         ck_redis = await ck_get(conversation_id)
         if ck_redis and ck_redis.get("stage") == "await_confirm":
-            payload["skill"] = "generate_site"
+            # 🔧 修正: 注册名是 agent_generate_site(带 agent_ 前缀), 原 "generate_site" 在
+            #   技能注册表里不存在 → 续跑时 Worker 报 "Skill 'generate_site' 不存在"。
+            payload["skill"] = "agent_generate_site"
             use_skill_override = True
     if after:
         from urllib.parse import urlencode
@@ -763,8 +775,10 @@ async def chat(
                                         if event == "node" and isinstance(payload_obj, dict):
                                             if payload_obj.get("stage") == "preview" and payload_obj.get("url"):
                                                 preview_url = payload_obj["url"]
+                                                await cache_set(f"site_generated:{conversation_id}", "1", ttl=86400)
                                         if event == "preview" and isinstance(payload_obj, dict) and payload_obj.get("url"):
                                             preview_url = payload_obj["url"]
+                                            await cache_set(f"site_generated:{conversation_id}", "1", ttl=86400)
                                         event_seq += 1
                                         # trace_event 暂存, 由 finally 批量写入
                                         if event == "aborted":
@@ -894,15 +908,19 @@ async def chat(
             _elapsed = (time.time() - t_start_chat) * 1000
             asyncio.create_task(record_api_latency("/api/chat", _elapsed))
 
-    return StreamingResponse(
+    resp = StreamingResponse(
         publisher(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
             "X-Trace-Id": tid,  # 便于前端在没自带 trace_id 时也能取消
+            "X-Access-Token": new_token,  # 滑动续期: 非浏览器客户端据此轮换 token
         },
     )
+    # Set-Cookie: 浏览器同源客户端(SSE/页面)自动携带, 无需手动处理
+    _set_access_cookie(resp, new_token)
+    return resp
 
 
 def _normalize_assistant_text(text: str) -> str:

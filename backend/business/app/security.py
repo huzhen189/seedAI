@@ -66,8 +66,10 @@ class CurrentUser:
         self.role = role
 
 
-# 滑动过期阈值(秒): token 剩余不足此值时自动续期
-RENEW_THRESHOLD = 600  # 10 分钟
+# 滑动过期: 每次有效操作都会重新签发 token(见 get_current_user)。
+# 保留阈值常量仅作文档参考, 实际改为「每次操作必续」以满足产品需求:
+# 用户有新操作时即刷新过期时间, 避免长会话(如 e2e 全流程)中途掉线。
+RENEW_THRESHOLD = 600  # 10 分钟(仅作历史参考, 不再作为续期门控)
 
 
 def _set_access_cookie(response: Response, token: str) -> None:
@@ -80,6 +82,18 @@ def _set_access_cookie(response: Response, token: str) -> None:
         samesite="lax",
         domain=settings.cookie_domain or None,
     )
+
+
+def _renew_access_token(response: Response, user: CurrentUser) -> str:
+    """滑动续期: 每次有效操作重新签发 access_token, 双通道回传。
+
+    - Set-Cookie: 浏览器同源客户端(SSE/页面)自动携带
+    - X-Access-Token 响应头: 非浏览器客户端(?token= / Bearer)据此轮换本地 token
+    """
+    new_token = create_access_token(user.id, user.role)
+    _set_access_cookie(response, new_token)
+    response.headers["X-Access-Token"] = new_token
+    return new_token
 
 
 def get_current_user(
@@ -102,12 +116,9 @@ def get_current_user(
         if payload.get("type") != "access":
             raise ValueError("not an access token")
         user = CurrentUser(int(payload["sub"]), payload.get("role", "user"))
-        # 滑动过期: token 剩余 <10min 自动续期, 活跃用户不会断线
-        exp = payload.get("exp", 0)
-        now_ts = datetime.now(timezone.utc).timestamp()
-        if exp - now_ts < RENEW_THRESHOLD:
-            new_token = create_access_token(user.id, user.role)
-            _set_access_cookie(response, new_token)
+        # 滑动过期(产品需求): 每次有效操作都重新签发 token, 刷新过期时间,
+        # 双通道回传(Set-Cookie + X-Access-Token), 活跃用户不会断线。
+        _renew_access_token(response, user)
         return user
     except Exception:
         raise HTTPException(
