@@ -179,3 +179,61 @@ def parse_project_constraints(system_prompt: str | None) -> list[str]:
             if tok:
                 out.append(tok.lower())
     return out
+
+
+# ── 意图辅助常量与函数(从 pipeline 收敛到 common, 单一来源, 供 cascade/router 复用) ──
+# 这些原本定义在已废弃的 SIR 分类器 pipeline.py 里, 但混合级联 classify_v3 也依赖它们,
+# 抽到共享模块避免「活跃代码路径依赖废弃模块」。
+_BUILD_KW = ("网站", "官网", "站点", "建站", "生成网站", "页面", "网页", "落地页",
+            "h5", "H5", "主页", "首页", "landing")
+_CONTENT_KW = ("天气", "美食", "地图", "定位", "展示", "列表", "预约", "价格", "商品", "联系",
+              "关于", "模块", "功能", "板块", "轮播", "表单", "导航", "评论", "搜索", "登录",
+              "注册", "新闻", "博客", "案例", "团队", "服务", "产品", "介绍", "详情", "订单",
+              "购物车", "支付", "会员", "课程", "视频", "图片", "下载", "分享", "日历", "日程",
+              "签到", "排行", "统计", "图表", "特色", "活动", "资讯", "动态", "留言", "客服",
+              "品牌", "风格", "配色", "主题")
+# 显式建站触发语(用户明确要「现在开始生成」)
+_BUILD_TRIGGER = ("开始生成", "生成网站", "开始建站", "建站吧", "直接生成", "帮我生成")
+
+# 缺失规格 → 动态追问模板
+_MISSING_Q: dict[str, str] = {
+    "page_count": "需要多少个页面？例如首页、产品页、关于页等。",
+    "tech_stack": "有偏好的技术栈吗？例如 React、Vue、WordPress 或纯 HTML/CSS。",
+    "style": "希望什么样的视觉风格？例如科技感、简约、活泼、商务。",
+    "audience": "面向什么受众？例如 B 端企业客户、C 端个人用户。",
+    "deadline": "有上线时间预期吗？",
+    "features": "需要哪些核心功能模块？例如表单、搜索、地图定位、支付。",
+}
+_GENERIC_Q = [
+    "为了更精准地帮你, 请问这是什么类型的网站？个人博客、企业官网、电商、还是其他？",
+    "大概需要哪些页面和功能？有技术栈偏好吗？",
+]
+
+
+def _last_user_message(messages: list[dict]) -> str:
+    """取最近一条用户消息文本。"""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content") or ""
+            return c if isinstance(c, str) else ""
+    return ""
+
+
+def _has_conversation_requirement(messages: list[dict]) -> bool:
+    """对话里是否存在『可读取的建站需求』(供死亡路由放行判断, RC3)。
+
+    🔧 放宽: 除「建站词 + 内容词」组合外, 显式建站触发语(如「开始生成网站吧」)
+       也视为已具备需求上下文 —— 否则「开始生成」类明确指令因仅含建站词而被判
+       为「无对话需求」, 导致 build 意图被死亡路由打回需求分析(建站全流程断裂)。
+    """
+    for m in reversed(messages):
+        if m.get("role") != "user":
+            continue
+        c = m.get("content") or ""
+        if not isinstance(c, str):
+            continue
+        if any(kw in c for kw in _BUILD_KW) and any(kw in c for kw in _CONTENT_KW):
+            return True
+        if any(t in c for t in _BUILD_TRIGGER):
+            return True
+    return False

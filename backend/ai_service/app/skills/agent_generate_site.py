@@ -33,6 +33,7 @@ from ..providers import (
 from ..intent.common import build_skill_sys
 from ..knowledge.chroma import build_rag_context, save_memory
 from ..registry import register_skill
+from ..scoring import parse_scores, SCORING_DIMENSIONS, needs_review
 logger = logging.getLogger("ai_service.skills.agent_generate_site")
 
 
@@ -40,7 +41,10 @@ GEN_LOG = logging.getLogger("ai_service.generate")
 
 
 SYS_PLANNER = (
-    "你是一名资深产品设计师兼前端架构师,负责把建站需求拆解成可直接指导『高级开发』的结构化规格。"
+    "你是一名资深产品设计师兼前端架构师,负责把建站需求拆解成可直接指导前端开发的结构化规格。\n\n"
+    "⚠️ 重要说明：本平台仅支持纯静态前端页面（HTML + CSS + JavaScript），"
+    "无法接入后端服务、数据库、用户系统或服务端 API。"
+    "请在设计时确保所有功能均可通过前端技术实现，涉及数据存储/登录/支付等需求应在 reasoning 中友好提示用户。\n\n"
     "请**只输出一个 JSON 对象**(不要代码块围栏、不要多余解释),字段如下:\n"
     "{\n"
     '  "title": "网站标题(简短,≤12字)",\n'
@@ -60,9 +64,20 @@ SYS_PLANNER = (
 )
 SYS_CODER = (
     "你是一名顶级前端创意开发工程师(Expert Frontend / Creative Developer)。"
-    "根据用户需求与上方需求规格(含 design_spec),生成一个【单文件 HTML】,"
-    "CSS 与 JS 全部内联在 <style> 和 <script> 中,可直接用 iframe 预览。"
-    "只输出完整 HTML 代码,不要解释、不要 markdown 代码块围栏(```)。\n\n"
+    "根据用户需求与上方需求规格(含 design_spec),生成一个完整的静态网站。\n\n"
+    "⚠️ 平台限制（请务必遵守）：\n"
+    "• 仅支持纯前端技术：HTML、CSS、JavaScript（含内联或独立 .css/.js 文件）\n"
+    "• 不支持：后端服务、数据库、Node.js 服务端、PHP、Python 后端、第三方 API 代理、用户登录/注册、文件上传、支付\n"
+    "• 如需「联系我们」表单，可使用 mailto: 链接或静态表单 + 提示文字「本功能需后端支持，此处为演示界面」\n"
+    "• 如需求中包含后端功能，用友好文案告知用户：「这个功能需要后端服务才能完整实现，目前为您展示了静态前端的模拟效果」\n\n"
+    "【输出格式——多文件规范】\n"
+    "每个文件用 `<!-- FILE: 文件名 -->` 标记开头。示例:\n"
+    "<!-- FILE: index.html -->\n<html>...</html>\n"
+    "<!-- FILE: style.css -->\n/* CSS 内容 */\n"
+    "<!-- FILE: script.js -->\n// JS 内容\n"
+    "主入口 HTML 必须命名为 index.html; CSS/JS 文件按实际用途命名(如 style.css / main.js 等)。"
+    "如果内容较少可全内联在 HTML 中(此时仅输出 index.html 一个文件)。"
+    "不要输出 markdown 代码块围栏(```)、不要输出多余解释。\n\n"
     "【高级视觉与交互硬标准——必须满足】\n"
     "1. 视觉质感: 使用玻璃拟态(glassmorphism)、柔和分层阴影、渐变光晕/微噪点质感、克制留白;"
     "杜绝大色块平涂与廉价渐变。配色须经设计且符合 WCAG AA 对比度。\n"
@@ -90,12 +105,12 @@ SYS_REVIEWER = (
     "你是严格的资深前端评审 + 设计总监。检查给定 HTML 是否:① 以 <html 开头且结构基本完整;"
     "② 标签基本闭合;③ 不含明显会白屏的致命错误(eval / 未定义脚本、外部不可达资源);"
     "④ 视觉与交互是否达到『高级感』: 有层次/留白/微交互/缓动,而非平涂色块或简陋排版;"
-    "⑤ 颜色/排版/响应式/可访问性有无问题。\\n"
+    "⑤ 颜色/排版/响应式/可访问性有无问题;⑥ 是否含危险内容/外部不可控脚本(safety)。\n"
     "输出 JSON(不要代码块围栏):\\n"
     '{"passed": true/false, "comment": "..., 最多60字", '
     '"scores": {"correctness": 1-10, "completeness": 1-10, "readability": 1-10, '
-    '"compliance": 1-10, "efficiency": 1-10, "craft": 1-10}, '
-    '"issues": ["问题1", "问题2"]}'  # passed=false 时列出具体问题; craft=视觉/交互精致度
+    '"compliance": 1-10, "efficiency": 1-10, "craft": 1-10, "safety": 1-10}, '
+    '"issues": ["问题1", "问题2"]}'  # passed=false 时列出具体问题; craft=视觉/交互精致度; safety=安全性
 )
 
 # 行业→设计约束(注入 Planner)——升级为高级视觉方向
@@ -187,63 +202,112 @@ def _parse_plan(raw: str) -> dict:
 
 
 async def _review(model_id: str, html: str) -> Dict:
-    """3-C: 静态分析 + LLM 自审(v0.9.0: 扩展为6维自评)。"""
+    """3-C: 静态分析 + LLM 自审(7 维, v1.2.0 统一打分)。
+
+    返回含 needs_review 的评审结果, 供:
+      - 生成内 Reflexion 修复循环(passed=False 时回退 Coder 重生成);
+      - 后置 QC 按需触发(passed=True 但 needs_review=True 时升级三裁判复核, 见 core/queue.py)。
+
+    🔧 C7 修复: LLM 自审异常不再静默放过(passed=True 默认高分), 改为:
+      - 调用失败(模型不可用)→ passed=False + needs_review=True, 触发修复循环 + QC 升级;
+      - 输出无法解析(偶发脏输出)→ passed=True + needs_review=True, 放行但由 QC 二次复核。
+      两者都不让缺陷被「静默放过」。
+    """
     # 静态分析(快速硬规则)
     low = html.lower()
     if "<html" not in low or len(html) < 50:
         return {"passed": False, "comment": "缺少 <html 根标签或内容过短",
                 "scores": {"correctness": 0, "completeness": 0, "readability": 0,
-                           "compliance": 5, "efficiency": 5, "craft": 0}, "issues": ["缺少<html根标签"]}
+                           "compliance": 5, "efficiency": 5, "craft": 0, "safety": 8},
+                "issues": ["缺少<html根标签"], "needs_review": True}
     if low.count("<script") > low.count("</script") or low.count("<style") > low.count("</style>"):
         return {"passed": False, "comment": "标签未闭合(<script>/<style>)",
                 "scores": {"correctness": 2, "completeness": 5, "readability": 5,
-                           "compliance": 5, "efficiency": 5, "craft": 3}, "issues": ["标签未闭合"]}
-    # LLM 自审(给 JSON 结论,失败则按静态结果放过)
+                           "compliance": 5, "efficiency": 5, "craft": 3, "safety": 8},
+                "issues": ["标签未闭合"], "needs_review": True}
+    # LLM 自审(给 JSON 结论)
     try:
         out = await asyncio.to_thread(_chat, model_id, SYS_REVIEWER, [{"role": "user", "content": html[:6000]}])
         m = re.search(r"\{.*\}", out, re.DOTALL)
         if m:
             data = json.loads(m.group(0))
+            scores = parse_scores(data)  # 7 维, 缺失/异常填 0
             return {
                 "passed": bool(data.get("passed")),
                 "comment": data.get("comment", ""),
-                "scores": {k: max(1, min(10, int(data.get("scores", {}).get(k, 5))))
-                          for k in ["correctness", "completeness", "readability", "compliance", "efficiency", "craft"]},
-                "issues": data.get("issues", []),
+                "scores": scores,
+                "issues": data.get("issues", []) or [],
+                "needs_review": (not bool(data.get("passed"))) or needs_review(scores),
             }
-    except Exception:
-        pass
-    return {"passed": True, "comment": "静态检查通过",
-            "scores": {"correctness": 7, "completeness": 7, "readability": 7,
-                       "compliance": 8, "efficiency": 7, "craft": 8}, "issues": []}
+        # 输出无 JSON: 不放行, 但也不强制重生成(偶发脏输出), 标记待 QC 复核
+        logger.warning("[gen] Reviewer 输出无解析 JSON, 标记待复核")
+        return {"passed": True, "comment": "评审输出无法解析, 已标记待复核",
+                "scores": {"correctness": 5, "completeness": 5, "readability": 5,
+                           "compliance": 6, "efficiency": 6, "craft": 5, "safety": 6},
+                "issues": ["评审输出异常"], "needs_review": True}
+    except Exception as e:
+        # 🔧 C7 修复: 调用失败 → 标记未通过, 触发修复循环 + QC 升级(不再静默 passed=True)
+        logger.warning("[gen] Reviewer LLM 自审失败, 标记未通过待复核: %s", e)
+        return {"passed": False, "comment": "评审模型调用失败, 已标记待复核",
+                "scores": {"correctness": 5, "completeness": 5, "readability": 5,
+                           "compliance": 6, "efficiency": 6, "craft": 5, "safety": 6},
+                "issues": ["评审模型调用失败"], "needs_review": True}
+
+
+def _parse_multi_files(raw: str) -> dict[str, str]:
+    """解析多文件输出: 按 `<!-- FILE: 文件名 -->` 标记拆分。
+    若未检测到标记, 则整个作为 index.html 返回(兼容旧单文件格式)。
+    """
+    import re
+    pattern = re.compile(r'<!--\s*FILE:\s*(.+?)\s*-->\n?', re.IGNORECASE)
+    parts = pattern.split(raw)
+    files: dict[str, str] = {}
+    if not parts or not pattern.search(raw):
+        # 旧格式: 单文件 index.html
+        files['index.html'] = raw.strip()
+        return files
+    # parts[0] 是第一个标记前的内容(应忽略), parts[1]=文件名, parts[2]=内容, ...
+    for i in range(1, len(parts), 2):
+        fname = parts[i].strip()
+        content = parts[i + 1].strip() if i + 1 < len(parts) else ''
+        if fname and content:
+            files[fname] = content
+    if not files:
+        files['index.html'] = raw.strip()
+    return files
 
 
 def _deliver(html: str, trace_id: str, user_id: int | None = None,
-             project_id: int | None = None, version: int | None = None) -> Optional[str]:
-    """落盘本地产物并上传 COS,返回预览直链(失败返回 None,不阻断主流程)。
+             project_id: int | None = None, version: int | None = None) -> dict[str, str]:
+    """落盘本地产物并上传 COS,返回各文件预览直链 dict{文件名: url}(失败返回 {},不阻断主流程)。
 
-    COS key 版本化: previews/{user_id}/{project_id}/v{version}/index.html,
+    COS key 版本化: previews/{user_id}/{project_id}/v{version}/{filename},
     使每次生成/调整在云存储留痕、不被覆盖(旧版仍可按 artifact 行点选)。
     """
+    result_urls: dict[str, str] = {}
     try:
         from ..tools.cos_upload import cos_upload
 
+        files = _parse_multi_files(html)
         art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
-        site_dir = art_dir / "anon" / (trace_id or "site")
-        site_dir.mkdir(parents=True, exist_ok=True)
-        idx = site_dir / "index.html"
-        idx.write_text(html, encoding="utf-8")
-        # 版本段: 优先用业务下发的语义版本号, 否则降级用 trace_id 保证唯一
         ver_seg = f"v{version}" if version else (trace_id or "site")
         uid = user_id if user_id is not None else "anon"
         pid = project_id if project_id is not None else "anon"
-        cos_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/{uid}/{pid}/{ver_seg}/index.html"
-        res = cos_upload(str(idx), cos_key)
-        if res.get("ok"):
-            return res.get("url")
+        base_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/{uid}/{pid}/{ver_seg}"
+
+        for fname, content in files.items():
+            site_dir = art_dir / "anon" / (trace_id or "site") / fname.replace('/', '_')
+            site_dir.parent.mkdir(parents=True, exist_ok=True)
+            site_dir.write_text(content, encoding="utf-8")
+
+            cos_key = f"{base_key}/{fname}"
+            res = cos_upload(str(site_dir), cos_key)
+            if res.get("ok") and res.get("url"):
+                result_urls[fname] = res["url"]
+
     except Exception:
         pass
-    return None
+    return result_urls
 
 
 # 评分维度中文标签(用于生成结果汇总文案)
@@ -284,7 +348,7 @@ def _build_generation_summary(plan: dict, review: dict | None, url: str | None,
         if ds_strategy:
             line += ("" if not ds_mood else "；") + ds_strategy
         lines.append(line)
-    lines.append("- 交付产物：单文件 `index.html`（CSS/JS 全内联，可直接预览与部署）")
+    lines.append("- 交付产物：主入口 `index.html`（CSS/JS 可按需独立为 style.css / script.js 等文件）")
     if scores:
         try:
             avg = sum(float(v) for v in scores.values()) / len(scores)
@@ -506,13 +570,15 @@ async def generate_stream(
                 html = _extract_html("".join(hp))
 
         # 收尾
+        yield ev("review", data=review)   # 评审结果(7维+needs_review), 供后置 QC 按需复核
         yield ev("node", stage="previewing")
-        url = _deliver(html, trace_id, user_id, project_id, version)
-        yield ev("preview", url=url, fallback="srcdoc" if not url else None)
+        urls = _deliver(html, trace_id, user_id, project_id, version)
+        main_url = urls.get('index.html', '')
+        yield ev("preview", url=main_url, fallback="srcdoc" if not main_url else None, files=urls)
         with suppress(Exception):
             await asyncio.to_thread(save_memory, trace_id or "site", plan.get("title", "建站"), html[:1500], plan.get("steps", []))
         # 文字汇总: 让后端在返回文件的同时, 以文字形式给出本次生成结果说明(前端气泡展示)
-        yield ev("refined", data=_build_generation_summary(plan, review, url, version, project_id, intent))
+        yield ev("refined", data=_build_generation_summary(plan, review, main_url, version, project_id, intent))
         yield ev("node", stage="done")
         return
 
@@ -570,16 +636,11 @@ async def generate_stream(
             content="已根据您的需求生成建站方案，确认后开始设计与开发。点击「确认并生成」，或直接回复「开始生成 / 帮我做网站」即可。",
             cta_label="确认并生成",
         )
-        return  # 暂停, 等待前端发起 resume/confirm 续接
-        # 检查取消(断点保存点 1: planner_done)
-        if await _cancelled_now(is_cancelled):
-            yield ev("checkpoint", stage="planner_done", data={
-                "plan": plan, "rag_ctx": rag_ctx,
-                "messages": messages[:10],  # 只保留最近 10 条
-            })
-            yield ev("paused", stage="planner_done", progress=25)
-            yield ev("done")
-            return
+        # 暂停, 等待前端发起 resume/confirm 续接。
+        # 注意: 业务代理 proxy.py 收到 paused(await_confirm) 时会 ck_set 持久化
+        # {title,goal,steps}, resume 时注入 checkpoint → handler 从 planner_done 续跑 Coder,
+        # 因此此处只需 return, 无需 emit checkpoint(那会进入 dead 分支)。
+        return
 
         # 2) Coder(流式,模型不可用时不自动降级,由前端确认后重发)
         yield ev("node", stage="enter_coder")
@@ -656,9 +717,10 @@ async def generate_stream(
 
         # 4) 预览投递(COS 直链,§10)
         yield ev("node", stage="previewing")
-        url = _deliver(html, trace_id, user_id, project_id, version)
-        GEN_LOG.info("[gen] 预览投递 trace=%s url=%s", trace_id, url or "无(srcdoc 兜底)")
-        yield ev("preview", url=url, fallback="srcdoc" if not url else None)
+        urls = _deliver(html, trace_id, user_id, project_id, version)
+        main_url = urls.get('index.html', '')
+        GEN_LOG.info("[gen] 预览投递 trace=%s files=%d url=%s", trace_id, len(urls), main_url or "无(srcdoc 兜底)")
+        yield ev("preview", url=main_url, fallback="srcdoc" if not main_url else None, files=urls)
 
         # ②-a 记忆闭环:生成成功后回写 memory 集合(供未来检索增强)
         with suppress(Exception):
@@ -671,7 +733,7 @@ async def generate_stream(
             )
 
         # 文字汇总: 让后端在返回文件的同时, 以文字形式给出本次生成结果说明(前端气泡展示)
-        yield ev("refined", data=_build_generation_summary(plan, review, url, version, project_id, intent))
+        yield ev("refined", data=_build_generation_summary(plan, review, main_url, version, project_id, intent))
 
         yield ev("node", stage="done")
         GEN_LOG.info("[gen] 完成 trace=%s html=%schars", trace_id, len(html))
@@ -707,5 +769,8 @@ register_skill(
     ],
     handler=generate_stream,
     is_graph=True,
+    display_name="网站生成",
+    avatar="🏗️",
+    role="建站专家",
     description="生成单文件 HTML 网站/页面(Planner→Coder→Reviewer 多 agent,支持 RAG 增强与回退)",
 )

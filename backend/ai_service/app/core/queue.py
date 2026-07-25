@@ -55,7 +55,7 @@ async def _commit_after_done(trace_id: str, skill_name: str, user_text: str) -> 
             logger.warning("[Worker] §8 git 提交失败(跳过) trace=%s: %s", trace_id, e)
 
 
-async def _refine_assistant_dialog(raw_text: str, model_id: str = "deepseek-chat") -> str:
+async def _refine_assistant_dialog(raw_text: str, model_id: str = "deepseek") -> str:
     """L2 对话精炼(v0.9.0): done 后 LLM 去冗余→保留完整信息→结构清晰。失败返回原文。"""
     if not raw_text.strip():
         return raw_text
@@ -93,24 +93,26 @@ async def _distill_memories(trace_id: str, user_id: int | None, project_id: int 
             '"user_prefs":[{"type":"style|constraint|habit","content":"...","importance":1-5}]}\\n'
             f"对话:\\n{refined_text[:2000]}"
         )
-        chat = get_chat_model("deepseek-chat", streaming=False)
+        chat = get_chat_model("deepseek", streaming=False)
         resp = await chat.ainvoke([{"role": "user", "content": prompt}])
         raw = resp.content if hasattr(resp, "content") else str(resp)
         import json, re
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
             data = json.loads(m.group(0))
-            # 写项目记忆
+            # 写项目记忆(🔧 Chroma upsert 为同步阻塞调用, 隔离到线程池避免冻结 worker loop)
             for pm in data.get("project_memories", []):
                 if project_id and user_id and pm.get("content"):
-                    upsert_project_memory(
+                    await asyncio.to_thread(
+                        upsert_project_memory,
                         project_id, user_id, pm.get("type", "fact"),
                         pm["content"], int(pm.get("importance", 3)),
                     )
             # 写用户偏好
             for up in data.get("user_prefs", []):
                 if user_id and up.get("content"):
-                    upsert_user_preference(
+                    await asyncio.to_thread(
+                        upsert_user_preference,
                         user_id, up.get("type", "style"),
                         up["content"], int(up.get("importance", 3)), "distill",
                     )
@@ -530,11 +532,19 @@ async def worker_loop(concurrency: int = 1):
                                          project_status=proj_status,
                                          project_constraints=proj_constraints,
                                          user_id=user_id, project_id=project_id,
-                                         has_requirement_doc=has_req_doc),
+                                         has_requirement_doc=has_req_doc,
+                                         site_generated=bool(job.get("site_generated", False)),
+                                         ),
                         timeout=35.0,
                     )
                 except asyncio.TimeoutError:
                     logger.error("[Worker] [3/6] 意图分类超时(35s) → 降级")
+                    intent = {"level1": "learn", "level2": "casual", "confidence": 0.3,
+                              "industry": "other", "checkpoint_relation": "none",
+                              "selected_skill": "agent_chat", "decision": "fallback"}
+                except Exception as e:  # 🔧 兜底: 非超时异常(如 classify 内部报错)也会静默杀死 Worker,
+                    # 导致后续所有任务卡死且无日志。这里捕获并打全栈, 降级响应, 保证 Worker 不挂。
+                    logger.exception("[Worker] [3/6] 意图分类异常(非超时) → 降级: %s", e)
                     intent = {"level1": "learn", "level2": "casual", "confidence": 0.3,
                               "industry": "other", "checkpoint_relation": "none",
                               "selected_skill": "agent_chat", "decision": "fallback"}
@@ -551,6 +561,15 @@ async def worker_loop(concurrency: int = 1):
                            decision, intent.get("risk_level", "?"), intent.get("selected_skill"),
                            skill_name, intent.get("confidence", 0) * 100,
                            (time.time() - t_job) * 1000)
+
+                # 🔧 断点续跑 / 强制技能(resume): 跳过意图决策门控, 直接路由执行。
+                #    否则对续跑短消息(如"确认并开始生成网站")的 clarify/learn 决策会拦截,
+                #    导致 checkpoint 注入后永不执行建站 → 无限 await_confirm 暂停循环。
+                if (skill or job.get("checkpoint")) and decision != "block":
+                    if decision != "route":
+                        logger.info("[Worker] [4.5] 强制技能续跑: decision=%s → route (skill=%s, checkpoint=%s)",
+                                    decision, skill_name, "有" if job.get("checkpoint") else "无")
+                    decision = "route"
 
                 # ── [5/6] 决策分流(switch on decision) ──
                 # 1) 高危拦截: 死红线, 即便用户确认也不可绕过
@@ -656,6 +675,7 @@ async def worker_loop(concurrency: int = 1):
                         qc_user_text = user_text
                         qc_assistant_buf = []
                         done_event = None
+                        review_needs = False
                         async for event in orch.execute(
                             sub_tasks, model_id, messages,
                             trace_id=trace_id, is_cancelled=_cancelled,
@@ -672,6 +692,11 @@ async def worker_loop(concurrency: int = 1):
                                 data = event.get("data", "")
                                 if isinstance(data, str):
                                     qc_assistant_buf.append(data)
+                            # 捕获 reviewer 评审结果(7维+needs_review), 供后置 QC 按需触发(任一子任务需复核即触发)
+                            if event.get("event") == "review":
+                                _rev = event.get("data") or {}
+                                if _rev.get("needs_review"):
+                                    review_needs = True
                             # 子任务级统计: 记录开始/完成耗时与状态
                             ev_name = event.get("event")
                             if ev_name == "subtask_start":
@@ -709,10 +734,11 @@ async def worker_loop(concurrency: int = 1):
                             )
                         except Exception as oe:  # noqa: BLE001
                             logger.warning("[Worker] 编排统计失败(跳过): %s", oe)
-                        # 后置 QC(合并文本)
+                        # 后置 QC(合并文本, 按需触发)
+                        # 编排场景: 仅当任一子任务 reviewer 标记 needs_review 才跑三裁判(省 LLM 成本)。
                         qc_assistant_text = "".join(qc_assistant_buf)
-                        if qc_assistant_text.strip() and done_event is not None:
-                            qc_result = None
+                        qc_result = None
+                        if qc_assistant_text.strip() and done_event is not None and review_needs:
                             try:
                                 from ..qc import run_qc
                                 from .safety import run_safety
@@ -721,7 +747,7 @@ async def worker_loop(concurrency: int = 1):
                                     run_qc(qc_user_text, qc_assistant_text,
                                            project_constraints=project_constraints,
                                            safety_risk=safety_risk),
-                                    timeout=60.0,
+                                    timeout=settings.qc_timeout_seconds,
                                 )
                                 await q.publish(trace_id, {"event": "qc", "data": qc_result})
                             except Exception as qc_err:  # noqa: BLE001
@@ -744,6 +770,7 @@ async def worker_loop(concurrency: int = 1):
                         break
                 qc_assistant_buf: list[str] = []
                 done_event: dict | None = None
+                review_needs = False
                 async for event in run_skill(
                     skill_name, model_id, messages,
                     trace_id=trace_id, is_cancelled=_cancelled,
@@ -754,21 +781,33 @@ async def worker_loop(concurrency: int = 1):
                     project_system_prompt=proj_prompt,
                     project_constraints=proj_constraints,
                     version=version, user_id=user_id, project_id=project_id,
+                    checkpoint=job.get("checkpoint"),      # 断点续跑: 透传至 handler 跳过已完成阶段
+                    resume_mode=job.get("resume_mode", "resume"),
+                    confirmed=confirmed,                   # 透传确认标志(agent_delete 等依赖此字段)
+                    site_generated=job.get("site_generated", False),
                 ):
                     # 拦截 done: 先发 QC 再发 done(QC 在 done 前, 不阻塞前端 done 渲染)
                     if event.get("event") == "done":
                         done_event = event
                         continue
+                    if event.get("event") == "review":
+                        _rev = event.get("data") or {}
+                        if _rev.get("needs_review"):
+                            review_needs = True
+                        # 不 continue: review 卡片需透传给前端展示(7维评分)
                     if event.get("event") == "token":
                         data = event.get("data", "")
                         if isinstance(data, str):
                             qc_assistant_buf.append(data)
                     await q.publish(trace_id, event)
                     event_cnt += 1
-                # ── [6/6] 后置 QC 三裁判(默认全量, v0.8.5 M1) ──
+                # ── [6/6] 后置 QC 三裁判(按需触发) ──
+                # 生成类技能: 仅当 reviewer 标记 needs_review 才跑三裁判(省 LLM 成本)。
+                # 闲聊(agent_chat) 无 reviewer, 始终 QC 兜底以保证对话质量 + 支撑低分重答(Phase D)。
                 qc_assistant_text = "".join(qc_assistant_buf)
-                if qc_assistant_text.strip() and done_event is not None:
-                    qc_result = None
+                qc_result = None
+                force_qc = skill_name == "agent_chat"
+                if qc_assistant_text.strip() and done_event is not None and (review_needs or force_qc):
                     try:
                         from ..qc import run_qc
                         from .safety import run_safety
@@ -777,7 +816,7 @@ async def worker_loop(concurrency: int = 1):
                             run_qc(qc_user_text, qc_assistant_text,
                                    project_constraints=project_constraints,
                                    safety_risk=safety_risk),
-                            timeout=60.0,
+                            timeout=settings.qc_timeout_seconds,
                         )
                         await q.publish(trace_id, {"event": "qc", "data": qc_result})
                         logger.info("[Worker] [6/6] QC 完成 trace=%s overall=%.2f needs_review=%s partial=%s",

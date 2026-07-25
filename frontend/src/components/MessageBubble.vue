@@ -82,6 +82,15 @@ function parseContent(c: string): ContentData {
 
 const parsed = computed(() => parseContent(props.content))
 
+// 兼容两种 files 格式: 旧版数组 [{name, size}] / 新版对象 {name: {name, size}}
+const normalizedFiles = computed(() => {
+  const f = (parsed.value as any).files
+  if (!f) return []
+  if (Array.isArray(f)) return f
+  if (typeof f === 'object') return Object.values(f)
+  return []
+})
+
 const isExpandable = computed(() =>
   parsed.value.type === 'plain' && parsed.value.text.length > 2000,
 )
@@ -119,13 +128,17 @@ function fmtTime(t: string): string {
       <!-- 建站产物 -->
       <div v-else-if="parsed.type === 'site'" class="site-card">
         <div class="site-title">🌐 {{ parsed.title }}</div>
+        <!-- 文字总结(v1.2.2): 持久化, 刷新后也能看到 AI 的反馈说明 -->
+        <div v-if="parsed.summary" class="site-summary">
+          <MarkdownView :content="parsed.summary" />
+        </div>
         <div class="site-links">
-          <a :href="parsed.preview_url" target="_blank" class="btn">🔗 预览</a>
+          <button type="button" class="btn btn-preview" @click="emit('open-file', 'index.html')">🔗 预览</button>
           <a v-if="parsed.download_url" :href="parsed.download_url" class="btn">📥 下载</a>
         </div>
-        <div v-if="parsed.files?.length" class="site-files">
+        <div v-if="normalizedFiles.length" class="site-files">
           <button
-            v-for="f in parsed.files"
+            v-for="f in normalizedFiles"
             :key="f.name"
             type="button"
             class="file-tag"

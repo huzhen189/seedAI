@@ -11,7 +11,7 @@
 相对 SIR(v1.1.0)的优化:
   - 删掉易出 bug 的 update_belief 粘性算术, 多轮一致性靠「显式上下文 + 持久化槽位(store.py)」。
   - 分类与拆分共用 intent_catalog.json(单一来源), 根治 SKILL_WHITELIST 两处维护的 R3 风险。
-  - 产出与 classify_v2 同形状的 PipelineResult, router/queue/worker 零改动。
+  - 产出统一 PipelineResult 契约(intent/models.py), router/queue/worker 零改动。
 
 外部依赖: knowledge.chroma(向量) / analytics._get_redis(槽位) / providers(LLM) 均已就绪可复用。
 """
@@ -30,20 +30,21 @@ from ..core.models import SubTask
 from ..providers import get_chat_model, resolve_fallback_order
 from ..registry import SkillRegistry
 from ..analytics import record_intent_classify
+from ..config import settings
 from .catalog import catalog_for_llm, get_intent, skill_whitelist
-from .common import normalize_industry
-from .observation import record as observe_record
-from .pipeline import (
-    PipelineResult,
+from .common import (
+    normalize_industry,
     _GENERIC_Q,
     _MISSING_Q,
     _has_conversation_requirement,
-    _is_reset_signal,
     _last_user_message,
 )
+from .observation import record as observe_record
+from .models import PipelineResult
 from .rulesmatcher import match_rules
 from .safety import SafetyResult, run_safety
 from .selection import clear_pending_options, resolve_selection
+from .signals import is_delete_signal, is_reset_signal
 from .splitter import _lightweight_multi_check, maybe_split
 from .store import load_slots, reset_slots, save_slots
 from .tools import SkillCandidate, ToolResult, run_tools
@@ -51,12 +52,12 @@ from .vector_store import retrieve_intents
 
 logger = logging.getLogger("ai_service.intent.cascade")
 
-# ── 阈值(集中可调) ──
-SUPER_FAST = 0.90       # 强规则 + 向量 top1 相似度 ≥ 此值 → 跳过 LLM
-NOVELTY = 0.45          # top5 最高相似度 < 此值 且无规则命中 → 闲聊兜底
-COMMIT = 0.80           # 置信度 ≥ 此值 → 直接路由
-CLARIFY_LO = 0.45       # 低于此值进入澄清/兜底判定
-CLARIFY_MAX_ROUNDS = 2  # 最多追问轮次(≤2)
+# ── 阈值(单一来源: config.settings.intent_*) ──
+SUPER_FAST = settings.intent_super_fast
+NOVELTY = settings.intent_novelty
+COMMIT = settings.intent_commit
+CLARIFY_LO = settings.intent_clarify_lo
+CLARIFY_MAX_ROUNDS = settings.intent_clarify_max_rounds
 
 # 兜底闲聊意图
 _CHAT_CASUAL = "chat_casual"
@@ -237,15 +238,17 @@ async def classify_v3(
     user_id: int | None = None,
     project_id: int | None = None,
     has_requirement_doc: bool = False,
+    site_generated: bool = False,
 ) -> PipelineResult:
-    """混合级联意图识别 v1.2.0(对外契约兼容 classify_v2)。"""
+    """混合级联意图识别 v1.2.0(统一契约见 intent/models.PipelineResult)。"""
     t0 = time.time()
     req_id = uuid.uuid4().hex
     current_user_msg = _last_user_message(messages)
     has_conv_req = _has_conversation_requirement(messages)
 
-    logger.info("[级联] [开始] conv=%s %d条消息 model=%s project=%s doc=%s",
-                conversation_id, len(messages), model_id, project_status, "有" if has_requirement_doc else "无")
+    logger.info("[级联][%s] [开始] conv=%s %d条消息 model=%s project=%s doc=%s",
+                req_id, conversation_id, len(messages), model_id, project_status,
+                "有" if has_requirement_doc else "无")
 
     # ── [0] 选项选择短路(用户在回复待选项 / 显式指定 skill) ──
     _sel = resolve_selection(
@@ -266,9 +269,26 @@ async def classify_v3(
             request_id=req_id,
         )
 
-    # ── RESET: 用户显式退出建站/澄清 ──
-    if _is_reset_signal(current_user_msg):
-        logger.info("[级联] RESET 信号 → 闲聊")
+    # ── [+0] 删除操作 → 路由到 agent_delete skill ──
+    #   skill 内部处理: 分析删除目标 → 确认弹窗 → 执行 → 反馈结果。
+    #   关键词来源: intent/signals.py(load_control_signals, 单一来源)。
+    if is_delete_signal(current_user_msg):
+        logger.info("[级联][%s] 删除操作 → 路由 agent_delete %s", req_id, current_user_msg[:40])
+        reset_slots(conversation_id)
+        await record_intent_classify("route", "delete", (time.time() - t0) * 1000)
+        return _emit_route(
+            get_intent("manage_delete") or {
+                "level1": "manage", "level2": "delete", "skill": "agent_delete", "id": "manage_delete",
+            },
+            0.98, decision="route",
+            selected_skill="agent_delete", industry="other",
+            reason="delete", request_id=req_id,
+            evidence={"delete_op": True},
+        )
+
+    # ── RESET: 用户显式退出建站/澄清(关键词来源: intent/signals.py) ──
+    if is_reset_signal(current_user_msg):
+        logger.info("[级联][%s] RESET 信号 → 闲聊", req_id)
         reset_slots(conversation_id)
         await record_intent_classify("route", "reset", (time.time() - t0) * 1000)
         return _emit_route(
@@ -283,7 +303,12 @@ async def classify_v3(
     strong_rule = next((h for h in rule_hits if h.strength == "strong"), None)
 
     # ── [2] 向量召回 top5 ──
-    candidates = retrieve_intents(current_user_msg, top_k=5)
+    # 🔧 P0 修复: retrieve_intents 内部含 Chroma 同步阻塞查询(col.query),
+    #   若直接在 async 事件循环内调用会冻结整个 loop, 导致外层
+    #   asyncio.wait_for(timeout=35.0) 永远无法触发(现象: 首条消息永久卡在[3/6])。
+    #   改用 asyncio.to_thread 把阻塞 I/O 隔离到线程池, 事件循环保持响应,
+    #   超时保护与并发请求均恢复正常。
+    candidates = await asyncio.to_thread(retrieve_intents, current_user_msg, 5)
     top_score = candidates[0]["score"] if candidates else 0.0
     top_intent_id = candidates[0]["intent_id"] if candidates else ""
 
@@ -343,7 +368,7 @@ async def classify_v3(
     except Exception as e:
         logger.warning("[级联] run_safety 异常: %s", e)
     if safety_result.risk_level == "critical":
-        logger.warning("[级联] 安全检查→拦截")
+        logger.warning("[级联][%s] 安全检查→拦截 reason=%s", req_id, safety_result.block_reason)
         reset_slots(conversation_id)
         observe_record(request_id=req_id, conversation_id=conversation_id, user_id=user_id,
                        raw_input=current_user_msg, llm_intent="chat/casual",
@@ -386,7 +411,14 @@ async def classify_v3(
     clarify_rounds = int(prior.get("clarify_rounds", 0) or 0)
     new_rounds = clarify_rounds
 
-    if conf >= COMMIT:
+    # 🔧 建站意图 + 已具备需求(需求文档或对话上下文)→ 直接提交生成, 不再追问。
+    #   否则 build/site / build/page / build/modify / build/fix 等中置信意图(0.6~0.7)会
+    #   落入 clarify 分支, 导致「开始生成网站吧」及所有建站迭代永不真正触发生成(建站全流程断裂)。
+    if intent.get("level1") == "build" and (has_requirement_doc or has_conv_req):
+        logger.info("[级联] 门控: 建站意图且需求已具备 → 强制提交生成(跳过追问) intent=%s/%s",
+                    intent.get("level1"), intent.get("level2"))
+        decision = "route"
+    elif conf >= COMMIT:
         decision = "route"
     elif intent.get("level1") == "chat":
         # 闲聊类: 即使低置信也不追问, 直接闲聊(避免对"你好"反复质问)
@@ -434,8 +466,8 @@ async def classify_v3(
         "slots": {"rounds": new_rounds, "prior_intent": prior_intent_id},
         "source": "llm_ruling",
     }
-    logger.info("[级联] 门控: conf=%.2f intent=%s/%s decision=%s rounds=%d",
-                conf, intent["level1"], intent["level2"], decision, new_rounds)
+    logger.info("[级联][%s] 门控: conf=%.2f intent=%s/%s decision=%s rounds=%d",
+                req_id, conf, intent["level1"], intent["level2"], decision, new_rounds)
 
     # ── [6] 多意图拆分(build 类且轻量门控命中) ──
     sub_tasks: list = []

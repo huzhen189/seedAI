@@ -33,6 +33,7 @@ from ..providers import (
 from ..intent.common import build_skill_sys
 from ..knowledge.chroma import build_rag_context, save_memory
 from ..registry import register_skill
+from ..scoring import parse_scores, SCORING_DIMENSIONS, needs_review
 logger = logging.getLogger("ai_service.skills.agent_build")
 
 
@@ -90,12 +91,12 @@ SYS_REVIEWER = (
     "你是严格的资深前端评审 + 设计总监。检查给定 HTML 是否:① 以 <html 开头且结构基本完整;"
     "② 标签基本闭合;③ 不含明显会白屏的致命错误(eval / 未定义脚本、外部不可达资源);"
     "④ 视觉与交互是否达到『高级感』: 有层次/留白/微交互/缓动,而非平涂色块或简陋排版;"
-    "⑤ 颜色/排版/响应式/可访问性有无问题。\\n"
+    "⑤ 颜色/排版/响应式/可访问性有无问题;⑥ 是否含危险内容/外部不可控脚本(safety)。\\n"
     "输出 JSON(不要代码块围栏):\\n"
     '{"passed": true/false, "comment": "..., 最多60字", '
     '"scores": {"correctness": 1-10, "completeness": 1-10, "readability": 1-10, '
-    '"compliance": 1-10, "efficiency": 1-10, "craft": 1-10}, '
-    '"issues": ["问题1", "问题2"]}'  # passed=false 时列出具体问题; craft=视觉/交互精致度
+    '"compliance": 1-10, "efficiency": 1-10, "craft": 1-10, "safety": 1-10}, '
+    '"issues": ["问题1", "问题2"]}'  # passed=false 时列出具体问题; craft=视觉/交互精致度; safety=安全性
 )
 
 # 行业→设计约束(注入 Planner)——升级为高级视觉方向
@@ -187,35 +188,48 @@ def _parse_plan(raw: str) -> dict:
 
 
 async def _review(model_id: str, html: str) -> Dict:
-    """3-C: 静态分析 + LLM 自审(v0.9.0: 扩展为6维自评)。"""
-    # 静态分析(快速硬规则)
+    """3-C: 静态分析 + LLM 自审(7 维, v1.2.0 统一打分)。
+
+    返回含 needs_review 的评审结果, 供生成内 Reflexion 修复循环与后置 QC 按需触发。
+    🔧 C7 修复: LLM 自审异常不再静默放过(passed=True 默认高分), 改为:
+      - 调用失败 → passed=False + needs_review=True, 触发修复循环 + QC 升级;
+      - 输出无法解析 → passed=True + needs_review=True, 放行但由 QC 二次复核。
+    """
     low = html.lower()
     if "<html" not in low or len(html) < 50:
         return {"passed": False, "comment": "缺少 <html 根标签或内容过短",
                 "scores": {"correctness": 0, "completeness": 0, "readability": 0,
-                           "compliance": 5, "efficiency": 5, "craft": 0}, "issues": ["缺少<html根标签"]}
+                           "compliance": 5, "efficiency": 5, "craft": 0, "safety": 8},
+                "issues": ["缺少<html根标签"], "needs_review": True}
     if low.count("<script") > low.count("</script") or low.count("<style") > low.count("</style>"):
-        return {"passed": False, "comment": "标签未闭合(<script>/<style>)",
+        return {"passed": False, "comment": "标签未闭合(<script>/</style>)",
                 "scores": {"correctness": 2, "completeness": 5, "readability": 5,
-                           "compliance": 5, "efficiency": 5, "craft": 3}, "issues": ["标签未闭合"]}
-    # LLM 自审(给 JSON 结论,失败则按静态结果放过)
+                           "compliance": 5, "efficiency": 5, "craft": 3, "safety": 8},
+                "issues": ["标签未闭合"], "needs_review": True}
     try:
         out = await asyncio.to_thread(_chat, model_id, SYS_REVIEWER, [{"role": "user", "content": html[:6000]}])
         m = re.search(r"\{.*\}", out, re.DOTALL)
         if m:
             data = json.loads(m.group(0))
+            scores = parse_scores(data)  # 7 维, 缺失/异常填 0
             return {
                 "passed": bool(data.get("passed")),
                 "comment": data.get("comment", ""),
-                "scores": {k: max(1, min(10, int(data.get("scores", {}).get(k, 5))))
-                          for k in ["correctness", "completeness", "readability", "compliance", "efficiency", "craft"]},
-                "issues": data.get("issues", []),
+                "scores": scores,
+                "issues": data.get("issues", []) or [],
+                "needs_review": (not bool(data.get("passed"))) or needs_review(scores),
             }
-    except Exception:
-        pass
-    return {"passed": True, "comment": "静态检查通过",
-            "scores": {"correctness": 7, "completeness": 7, "readability": 7,
-                       "compliance": 8, "efficiency": 7, "craft": 8}, "issues": []}
+        logger.warning("[gen] Reviewer 输出无解析 JSON, 标记待复核")
+        return {"passed": True, "comment": "评审输出无法解析, 已标记待复核",
+                "scores": {"correctness": 5, "completeness": 5, "readability": 5,
+                           "compliance": 6, "efficiency": 6, "craft": 5, "safety": 6},
+                "issues": ["评审输出异常"], "needs_review": True}
+    except Exception as e:
+        logger.warning("[gen] Reviewer LLM 自审失败, 标记未通过待复核: %s", e)
+        return {"passed": False, "comment": "评审模型调用失败, 已标记待复核",
+                "scores": {"correctness": 5, "completeness": 5, "readability": 5,
+                           "compliance": 6, "efficiency": 6, "craft": 5, "safety": 6},
+                "issues": ["评审模型调用失败"], "needs_review": True}
 
 
 def _deliver(html: str, trace_id: str, user_id: int | None = None,
@@ -506,6 +520,7 @@ async def generate_stream(
                 html = _extract_html("".join(hp))
 
         # 收尾
+        yield ev("review", data=review)   # 评审结果(7维+needs_review), 供后置 QC 按需复核
         yield ev("node", stage="previewing")
         url = _deliver(html, trace_id, user_id, project_id, version)
         yield ev("preview", url=url, fallback="srcdoc" if not url else None)
@@ -655,6 +670,7 @@ async def generate_stream(
             html = _extract_html("".join(html_parts))
 
         # 4) 预览投递(COS 直链,§10)
+        yield ev("review", data=review)   # 评审结果(7维+needs_review), 供后置 QC 按需复核
         yield ev("node", stage="previewing")
         url = _deliver(html, trace_id, user_id, project_id, version)
         GEN_LOG.info("[gen] 预览投递 trace=%s url=%s", trace_id, url or "无(srcdoc 兜底)")
@@ -707,5 +723,8 @@ register_skill(
     ],
     handler=generate_stream,
     is_graph=True,
-    description="生成单文件 HTML 网站/页面(Planner→Coder→Reviewer 多 agent,支持 RAG 增强与回退)",
+    display_name="网站迭代",
+    avatar="🔧",
+    role="建站迭代",
+    description="修改/迭代已有网站(Planner→Coder→Reviewer 多 agent)",
 )

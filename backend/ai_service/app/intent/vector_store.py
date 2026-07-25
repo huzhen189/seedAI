@@ -63,8 +63,19 @@ def ensure_intent_index() -> None:
                     "title": it.get("title", ""),
                 })
         if ids:
-            col.upsert(ids=ids, documents=docs, metadatas=metas)
-            logger.info("[向量] 意图索引已构建 %d 条(集合=%s)", len(ids), _INTENT_COLLECTION)
+            # 🔧 修复: Qwen text-embedding 限单批 upsert ≤ 10 条, 超过报
+            #   "batch size is invalid, it should not be larger than 10",
+            #   导致整个意图索引构建失败、intents 集合为空、向量召回失效。
+            #   改为按 ≤10 分批写入。
+            BATCH = 10
+            for start in range(0, len(ids), BATCH):
+                col.upsert(
+                    ids=ids[start:start + BATCH],
+                    documents=docs[start:start + BATCH],
+                    metadatas=metas[start:start + BATCH],
+                )
+            logger.info("[向量] 意图索引已构建 %d 条(集合=%s, 分%d批)",
+                        len(ids), _INTENT_COLLECTION, (len(ids) + BATCH - 1) // BATCH)
     except Exception as e:  # pragma: no cover
         logger.warning("[向量] 意图索引构建失败(可忽略): %s", e)
 

@@ -1,8 +1,6 @@
 """错误队列对账器(Write-Behind 兜底)。
 
 定时取出 queue:error 中的失败写操作并重试落 MySQL。
-M0 用后台 asyncio 任务(简单 sleep 循环);M2 抽成独立 Worker(APScheduler)。
-这里仅演示骨架:取出后打印,真正重试逻辑按业务 payload 实现。
 """
 
 import asyncio
@@ -10,21 +8,43 @@ import logging
 
 from .cache import pop_write_errors
 
-
 logger = logging.getLogger("business.reconciler")
 
 _running = False
 
 
 async def _retry_one(payload: dict) -> bool:
-    """按 payload 类型重试写 MySQL。M0 占位:成功返回 True。
+    """按 payload 类型重试写 MySQL。
 
-    约定 payload 结构:
-      {"kind": "upsert_user"|"append_message"|..., "data": {...}}
+    payload 结构:
+      {"type": "persist_chat", "trace_id": ..., "user_id": ..., ...}
     """
-    logger.info("reconcile retry payload=%s", payload.get("kind"))
-    # TODO(M2):实现真实回写。当前骨架直接标记成功,避免堆积。
-    return True
+    kind = payload.get("type", "")
+    if kind == "persist_chat":
+        try:
+            from .db import SessionLocal
+            from .proxy import _persist_conversation
+            from .tracing import finish_trace
+            async with SessionLocal() as session:
+                await finish_trace(session, payload["trace_id"], payload.get("terminal_status", "error"),
+                                   max(0, len(payload.get("assistant_text", "")) // 4))
+                await _persist_conversation(
+                    session,
+                    user_id=payload["user_id"],
+                    conversation_id=payload["conversation_id"],
+                    model=payload.get("model", "unknown"),
+                    user_text=payload.get("user_text", ""),
+                    assistant_text=payload.get("assistant_text", ""),
+                    trace_id=payload["trace_id"],
+                    preview_url=payload.get("preview_url"),
+                )
+            logger.info("reconciler 重试成功 trace=%s", payload.get("trace_id"))
+            return True
+        except Exception as e:
+            logger.warning("reconciler 重试失败 trace=%s: %s", payload.get("trace_id"), e)
+            return False
+    logger.warning("reconciler 未知 payload 类型: %s", kind)
+    return True  # 跳过未知类型，避免永久堆积
 
 
 async def run_reconciler(interval: float = 30.0) -> None:

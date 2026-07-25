@@ -25,6 +25,10 @@ logger = logging.getLogger("ai_service.intent.observation")
 _LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "logs")
 _LOG_PATH = os.path.join(_LOG_DIR, "intent_observations.jsonl")
 
+# 体积上限 + 备份数, 防止长时间运行磁盘被写满(不限制单条, 仅整体轮转)
+_MAX_BYTES = 10 * 1024 * 1024  # 10MB
+_BACKUPS = 2
+
 # 内存去重标记, 避免同进程重复建目录(无状态)
 _dir_ensured = False
 
@@ -38,6 +42,25 @@ def _ensure_dir() -> None:
         _dir_ensured = True
     except Exception as e:  # pragma: no cover
         logger.warning("[可观测] 日志目录创建失败: %s", e)
+
+
+def _maybe_rotate() -> None:
+    """超过上限则轮转: 当前 → .1 → .2(最多保留 _BACKUPS 份), 避免文件无限增长。"""
+    try:
+        if not os.path.exists(_LOG_PATH):
+            return
+        if os.path.getsize(_LOG_PATH) < _MAX_BYTES:
+            return
+        oldest = _LOG_PATH + f".{_BACKUPS}"
+        if os.path.exists(oldest):
+            os.remove(oldest)
+        for i in range(_BACKUPS - 1, 0, -1):
+            src = _LOG_PATH + f".{i}"
+            if os.path.exists(src):
+                os.rename(src, _LOG_PATH + f".{i + 1}")
+        os.rename(_LOG_PATH, _LOG_PATH + ".1")
+    except Exception as e:  # pragma: no cover
+        logger.debug("[可观测] 轮转失败(忽略): %s", e)
 
 
 def record(
@@ -60,6 +83,7 @@ def record(
 ) -> None:
     """追加一条意图识别观测 JSONL。失败静默(不阻塞主流程)。"""
     _ensure_dir()
+    _maybe_rotate()
     rec = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "request_id": request_id,
@@ -89,6 +113,7 @@ def record(
 def mark_outcome(request_id: str, outcome: str) -> None:
     """异步回填一次识别的最终结果(成功/失败/用户退出/忽略)。"""
     _ensure_dir()
+    _maybe_rotate()
     try:
         with open(_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps({

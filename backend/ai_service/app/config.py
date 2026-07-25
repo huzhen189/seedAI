@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     hy3_base_url: str = "https://tokenhub.tencentmaas.com/v1"
     hy3_model: str = "hy3"
 
+    # agent_delete 回调业务服务
+    business_service_url: str = "http://business:7101"
+
     # 服务
     ai_service_port: int = 7102
     # 默认降级序(2-C / #31):HY3 → Qwen → DeepSeek,用户请求可覆盖
@@ -55,9 +58,19 @@ class Settings(BaseSettings):
     chroma_collection_error_patterns: str = "error_patterns"
     # v1.2.0 混合级联意图识别: 意图向量索引集合
     chroma_collection_intents: str = "intents"
-    # 意图识别模式(cascade=混合级联v1.2.0 默认 | sir=状态化SIR v1.1.0)
-    intent_mode: str = "cascade"
     rag_top_k: int = 5
+
+    # ── 意图识别阈值(混合级联, 集中可调, 单一来源) ──
+    intent_super_fast: float = 0.90        # 强规则 + 向量 top1 相似度 ≥ 此值 → 跳过 LLM
+    intent_novelty: float = 0.45           # top5 最高相似度 < 此值 且无规则命中 → 闲聊兜底
+    intent_commit: float = 0.80            # 置信度 ≥ 此值 → 直接路由
+    intent_clarify_lo: float = 0.45        # 低于此值进入澄清/兜底判定
+    intent_clarify_max_rounds: int = 2     # 最多追问轮次(≤2)
+
+    # ── 后置质检(QC)配置(单一来源) ──
+    qc_judges: str = "deepseek,qwen,hy3"    # 三裁判模型(逗号分隔, 顺序即 scores 下标)
+    qc_needs_review_variance: float = 4.0   # 任一维方差 ≥ 此值 → needs_review(分歧大)
+    qc_timeout_seconds: float = 60.0        # 单次 QC 调用超时(由调用方 asyncio.wait_for 控制)
 
     # 对象存储(COS 预览投递,§10 / §5.9 tool:cos_upload)
     cos_secret_id: str = ""

@@ -31,35 +31,33 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .providers import get_chat_model
+from .config import settings
+from .scoring import (
+    SCORING_DIMENSIONS, LLM_SCORING_DIMS, parse_scores,
+)
 
 logger = logging.getLogger("ai_service.qc")
 
-# 6 维度定义(顺序即雷达图轴序)
-QC_DIMENSIONS: List[str] = [
-    "correctness",   # 正确性
-    "completeness",  # 完整性
-    "compliance",    # 合规性
-    "efficiency",    # 效率
-    "readability",   # 可读性
-    "safety",        # 安全性
-]
+# 7 维度定义(顺序即雷达图轴序), 与 scoring.SCORING_DIMENSIONS 对齐(单一来源)
+QC_DIMENSIONS: List[str] = list(SCORING_DIMENSIONS)
 
-# 默认三裁判(全量);顺序即 scores 数组下标
-QC_JUDGES: List[str] = ["deepseek", "qwen", "hy3"]
+# 默认三裁判(全量);顺序即 scores 数组下标。来源: config.qc_judges(单一来源)
+QC_JUDGES: List[str] = [m.strip() for m in settings.qc_judges.split(",") if m.strip()]
 
-# 走 LLM 三裁判的维度(其余走确定性地板)
-_LLM_DIMS = ("correctness", "completeness", "readability")
+# 走 LLM 三裁判的维度(其余走确定性地板); 与 scoring.LLM_SCORING_DIMS 对齐
+_LLM_DIMS = tuple(LLM_SCORING_DIMS)
 
 _SYSTEM_PROMPT = """你是一名严格的中文内容质量评审专家。
-请基于「用户请求」与「AI 助手的最终输出」, 从以下 3 个维度独立打分(1-10 整数, 10 为最佳):
+请基于「用户请求」与「AI 助手的最终输出」, 从以下 4 个维度独立打分(1-10 整数, 10 为最佳):
 - correctness(正确性): 事实 / 逻辑 / 技术是否准确, 是否答其所问、有无明显错误。
 - completeness(完整性): 是否覆盖用户需求的核心点, 有无明显遗漏。
 - readability(可读性): 结构清晰、表达易懂、格式规范。
+- craft(精致度): 视觉层次 / 留白 / 微交互 / 缓动 / 响应式等是否达到『高级感』。
 
 (注: compliance / efficiency / safety 由系统确定性规则自动评估, 无需你打分。)
 
 仅输出一个 JSON 对象, 不要任何解释或 Markdown 代码块, 格式如下:
-{"correctness": <int>, "completeness": <int>, "readability": <int>, "comment": "<简短中文总评, 不超过40字>"}
+{"correctness": <int>, "completeness": <int>, "readability": <int>, "craft": <int>, "comment": "<简短中文总评, 不超过40字>"}
 """
 
 _USER_TEMPLATE = """【用户请求】
@@ -72,7 +70,10 @@ _USER_TEMPLATE = """【用户请求】
 
 
 def _parse_judge_output(raw: str) -> Optional[Dict[str, Any]]:
-    """从模型输出中解析 6 维评分 JSON; 缺失 / 异常维度填 0(标记为无效)。"""
+    """从模型输出中解析 7 维评分 JSON; 缺失 / 异常维度填 0(标记为无效)。
+
+    复用 scoring.parse_scores 保证与 reviewer 维度定义完全一致(单一来源)。
+    """
     try:
         s = (raw or "").strip()
         if not s:
@@ -82,15 +83,7 @@ def _parse_judge_output(raw: str) -> Optional[Dict[str, Any]]:
         if start < 0 or end < 0 or end <= start:
             return None
         obj = json.loads(s[start : end + 1])
-        dims: Dict[str, int] = {}
-        for d in QC_DIMENSIONS:
-            v = obj.get(d)
-            if isinstance(v, bool):
-                v = int(v)
-            if isinstance(v, (int, float)):
-                dims[d] = max(1, min(10, int(round(v))))
-            else:
-                dims[d] = 0  # 无效
+        dims: Dict[str, int] = parse_scores(obj)  # 7 维, 缺失/异常填 0
         dims["comment"] = str(obj.get("comment", ""))[:60]
         return dims
     except Exception as e:  # noqa: BLE001
@@ -162,9 +155,10 @@ def _aggregate(judges: List[Dict[str, Any]], safety_risk: str = "low") -> Dict[s
     means = [dimensions[d]["mean"] for d in QC_DIMENSIONS if dimensions[d]["mean"] > 0]
     overall = round(sum(means) / len(means), 2) if means else 0.0
 
-    # 最大方差(任一维方差 >= 4 ≈ 标准差 >= 2 即分歧大) → 标注需人工复核
+    # 最大方差(任一维方差 >= 阈值 ≈ 标准差 >= 2 即分歧大) → 标注需人工复核
+    # 阈值来源: config.qc_needs_review_variance(单一来源)
     max_var = max((dimensions[d]["variance"] for d in QC_DIMENSIONS), default=0.0)
-    needs_review = max_var >= 4.0
+    needs_review = max_var >= settings.qc_needs_review_variance
 
     # 确定性地板: 安全 / 合规 / 效率(零成本, 来自 run_safety + 规则)
     if safety_risk in ("high", "critical"):

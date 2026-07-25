@@ -251,7 +251,10 @@ async def requirement_agent_handler(
         return
 
     # 需求文档
-    if "brand" in data and data.get("status") == "confirmed":
+    # 🔧 放宽门控: 只要 LLM 输出了结构化需求文档(含 brand 等核心字段)即视为可建站,
+    #   不再强依赖 status=="confirmed"(多轮增量采集时模型很少主动置 confirmed, 会导致
+    #   需求文档永不产出 → has_requirement_doc 恒为 False → 建站触发被死亡路由打回)。
+    if "brand" in data:
         feats = data.get("features", [])
         feat_names = [f["name"] if isinstance(f, dict) else str(f) for f in feats]
         prio_summary: Dict[str, int] = {}

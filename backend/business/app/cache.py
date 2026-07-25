@@ -173,11 +173,15 @@ async def cache_delete(key: str) -> None:
 
 
 async def cache_invalidate(pattern: str) -> None:
-    """按 pattern 批量清缓存。"""
+    """按 pattern 批量清缓存(用 SCAN 替代 KEYS, 避免阻塞 Redis)。"""
     try:
         r = await get_redis()
-        keys = await r.keys(pattern)
-        if keys:
-            await r.delete(*keys)
+        cursor = 0
+        while True:
+            cursor, keys = await r.scan(cursor, match=pattern, count=100)
+            if keys:
+                await r.delete(*keys)
+            if cursor == 0:
+                break
     except Exception as e:
         logger.warning("cache_invalidate failed pattern=%s: %s", pattern, e)

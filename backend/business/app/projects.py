@@ -13,10 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .cache import cache_get, cache_set, cache_invalidate
+from .cache import cache_delete, cache_get, cache_invalidate, cache_set
 from .config import settings
 from .db import get_db
-from .models import Artifact, Conversation, Message, Project
+from .models import Artifact, Conversation, Message, Project, Trace
 from .repos.business_repos import artifact_repo, conv_repo, message_repo, project_repo
 from .schemas import (
     ConversationResp,
@@ -283,6 +283,62 @@ async def search(
     return results
 
 
+# ---------- 消息内容深度搜索 ----------
+@router.get("/search/messages")
+async def search_messages(
+    q: str = Query(..., min_length=1),
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """搜索消息内容: 匹配用户消息 + AI 回复, 返回相匹配的 Q&A 对以及上下文(项目名/会话标题)."""
+    like = f"%{q}%"
+    # 查找匹配的 user 消息(仅搜索用户发送的内容, 避免匹配过于泛化)
+    rows = (await db.execute(
+        select(Message, Conversation.title, Conversation.project_id, Project.name)
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .join(Project, Conversation.project_id == Project.id)
+        .where(
+            Conversation.user_id == user.id,
+            Message.role == "user",
+            Message.content.like(like),
+        )
+        .order_by(Message.created_at.desc())
+        .limit(30)
+    )).all()
+
+    results = []
+    for msg, conv_title, project_id, project_name in rows:
+        # 找紧随其后的第一条 AI 回复(AI 对这条问题的回答)
+        ai_reply_row = (await db.execute(
+            select(Message.content)
+            .where(
+                Message.conversation_id == msg.conversation_id,
+                Message.role == "assistant",
+                Message.id > msg.id,
+            )
+            .order_by(Message.id.asc())
+            .limit(1)
+        )).first()
+        ai_reply = ai_reply_row[0] if ai_reply_row else ""
+
+        # 截断过长的内容用于列表展示
+        user_snippet = _fix_content(msg.content)[:120]
+        ai_snippet = _fix_content(ai_reply)[:120]
+
+        results.append({
+            "message_id": msg.id,
+            "conversation_id": msg.conversation_id,
+            "project_id": project_id,
+            "project_name": project_name or "",
+            "conv_title": conv_title or "(未命名)",
+            "user_text": user_snippet,
+            "ai_reply": ai_snippet,
+            "created_at": msg.created_at.isoformat() if msg.created_at else "",
+        })
+
+    return results
+
+
 # ---------- 生成产物(Artifact) ----------
 @router.get("/projects/{project_id}/artifacts")
 async def list_artifacts(
@@ -304,6 +360,59 @@ async def list_artifacts(
         }
         for a in rows
     ]
+
+
+@router.get("/conversations/{conversation_id}/status")
+async def get_conversation_status(
+    conversation_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """会话状态查询: 前端刷新后据此判断生成中/已完成/空闲, 恢复 UI 状态。
+
+    优先级: 活跃 Trace(RUNNING) > 断点暂停 > 产物落库(已完成) > 空闲。
+    """
+    # ① 查活跃 Trace: 是否有进行中的生成
+    active_trace = (await db.execute(
+        select(Trace).where(
+            Trace.conversation_id == conversation_id,
+            Trace.user_id == user.id,
+            Trace.status == "processing",
+        ).order_by(Trace.started_at.desc()).limit(1)
+    )).scalar_one_or_none()
+
+    if active_trace:
+        return {
+            "status": "processing",
+            "active_trace_id": active_trace.trace_id,
+            "started_at": active_trace.started_at.isoformat() if active_trace.started_at else None,
+        }
+
+    # ② 查断点暂停
+    from .cache import ck_get
+    try:
+        ck = await ck_get(conversation_id)
+        if ck and ck.get("status") == "paused":
+            return {
+                "status": "paused",
+                "stage": ck.get("stage", "?"),
+            }
+    except Exception:
+        pass
+
+    # ③ 查产物落库: 有 artifact → 已完成
+    try:
+        conv = await conv_repo.get_by(db, id=conversation_id, user_id=user.id)
+        if conv:
+            count = (await db.execute(
+                select(Artifact).where(Artifact.project_id == conv.project_id)
+            )).scalars().all()
+            if len(count) > 0:
+                return {"status": "done", "has_artifacts": True}
+    except Exception:
+        pass
+
+    return {"status": "idle", "has_artifacts": False}
 
 
 def _doc_to_markdown(doc: dict) -> str:
@@ -504,3 +613,50 @@ async def update_project_prompt(
         proj.system_prompt = (existing + "\n" + content)[:4000]
     await db.commit()
     return {"ok": True, "len": len(proj.system_prompt or "")}
+
+
+# ---------- 删除产物(高危操作) ----------
+@router.delete("/projects/{project_id}/artifacts")
+async def delete_all_artifacts(
+    project_id: int,
+    confirmed: bool = Query(False),
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """删除项目下所有产物(需 confirmed=true 确认)。"""
+    if not confirmed:
+        raise HTTPException(status_code=400, detail="高频操作需 confirmed=true 确认")
+    proj = await project_repo.get_by(db, id=project_id, user_id=user.id)
+    if proj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    count = await artifact_repo.delete_all(db, project_id=project_id)
+    logger.info("已删除项目 %s 的全部 %s 个产物", project_id, count)
+    # 清除 site_generated 缓存, 防止删除后 cascade 仍认为站点已生成导致空弹窗
+    try:
+        conversations = await conv_repo.list_by(db, project_id=project_id)
+        for c in conversations:
+            await cache_delete(f"site_generated:{c.id}")
+    except Exception:
+        pass
+    return {"ok": True, "deleted": count}
+
+
+@router.delete("/projects/{project_id}/artifacts/files")
+async def delete_single_file(
+    project_id: int,
+    name: str = Query(..., description="要删除的文件名(如 index.html)"),
+    confirmed: bool = Query(False),
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """删除项目中特定文件的产物记录(需 confirmed=true 确认)。仅允许删除自家项目文件。"""
+    if not confirmed:
+        raise HTTPException(status_code=400, detail="请确认后再执行")
+    proj = await project_repo.get_by(db, id=project_id, user_id=user.id)
+    if proj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    deleted = await artifact_repo.delete_file(db, project_id=project_id, filename=name)
+    if not deleted:
+        return {"ok": True, "deleted": 0, "note": f"未找到文件 {name}"}
+    logger.info("已删除项目 %s 的文件 %s", project_id, name)
+    return {"ok": True, "deleted": 1, "name": name}

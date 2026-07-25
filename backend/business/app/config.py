@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -56,8 +57,16 @@ class Settings(BaseSettings):
     # 否则任何人可用该已知密钥伪造 token。HS256 为对称签名,签发与校验共用此密钥。
     jwt_secret: str = "dev-secret-change-me"
     jwt_algorithm: str = "HS256"
-    access_token_ttl: int = 3600  # 60 min（滑动过期:每次有效操作都会重新签发,见 security.get_current_user / proxy /api/chat）
-    refresh_token_ttl: int = 7 * 24 * 3600  # 7 days
+    access_token_ttl: int = 3600
+    refresh_token_ttl: int = 7 * 24 * 3600
+
+    @model_validator(mode="after")
+    def _check_jwt_secret(self) -> "Settings":
+        import os, sys
+        if self.jwt_secret == "dev-secret-change-me" and os.environ.get("ENV", "") not in ("dev", "local", ""):
+            sys.stderr.write("FATAL: JWT_SECRET 仍为默认值,生产环境拒绝启动。请在 .env 中覆盖为随机强值。\n")
+            sys.exit(1)
+        return self
 
     # 超级管理员种子(文档 §2.3):首次启动把该用户名的角色置为 super_admin。
     # 避免角色自举漏洞 —— 不允许自助注册成 super_admin,只能由种子/已有 super_admin 赋予。

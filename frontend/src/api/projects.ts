@@ -24,5 +24,19 @@ export const deleteConversation = (id: number): Promise<null> =>
 export const search = (q: string): Promise<SearchItem[]> =>
   get(`/api/search?q=${encodeURIComponent(q)}`)
 
+export interface MessageSearchResult {
+  message_id: number
+  conversation_id: number
+  project_id: number
+  project_name: string
+  conv_title: string
+  user_text: string
+  ai_reply: string
+  created_at: string
+}
+
+export const searchMessages = (q: string): Promise<MessageSearchResult[]> =>
+  get(`/api/search/messages?q=${encodeURIComponent(q)}`)
+
 export const listArtifacts = (projectId: number): Promise<Artifact[]> =>
   get(`/api/projects/${projectId}/artifacts`)

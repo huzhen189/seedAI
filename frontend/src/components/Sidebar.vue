@@ -1,13 +1,19 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { useProjectStore } from '../stores/project'
+import { searchMessages, type MessageSearchResult } from '../api/projects'
 
 defineProps<{ collapsed: boolean }>()
-const emit = defineEmits<{ toggle: [] }>()
+const emit = defineEmits<{
+  toggle: []
+  'navigate-message': [result: MessageSearchResult]
+}>()
 const projectStore = useProjectStore()
 
 const showSearch = ref(false)
 const searchText = ref('')
+const msgResults = ref<MessageSearchResult[]>([])
+const searching = ref(false)
 
 async function newProject() {
   const name = prompt('项目名称：', '我的项目')
@@ -17,16 +23,58 @@ async function newProject() {
 function selectProject(id: number) {
   projectStore.currentProjectId = id
 }
+
+let _searchTimer: ReturnType<typeof setTimeout> | null = null
 async function onSearch() {
-  await projectStore.search(searchText.value)
+  const q = searchText.value.trim()
+  // 同时调用旧搜索(项目/会话名) + 新搜索(消息内容)
+  if (_searchTimer) clearTimeout(_searchTimer)
+  if (!q) {
+    projectStore.searchResults = []
+    msgResults.value = []
+    return
+  }
+  _searchTimer = setTimeout(async () => {
+    searching.value = true
+    try {
+      await projectStore.search(q)
+      msgResults.value = await searchMessages(q)
+    } finally {
+      searching.value = false
+    }
+  }, 300)
 }
+
 function pickSearch(item: any) {
   searchText.value = ''
   projectStore.searchResults = []
+  msgResults.value = []
   if (item.type === 'project') projectStore.currentProjectId = item.id
   else if (item.project_id != null) projectStore.currentProjectId = item.project_id
   showSearch.value = false
 }
+
+function pickMessage(r: MessageSearchResult) {
+  searchText.value = ''
+  projectStore.searchResults = []
+  msgResults.value = []
+  showSearch.value = false
+  // 存储导航目标, ChatView 读取后滚动到指定消息
+  sessionStorage.setItem('nav_conv', String(r.conversation_id))
+  sessionStorage.setItem('nav_msg', String(r.message_id))
+  // 先切项目, ChatView watch 到 projectId 变化后会读取 sessionStorage
+  projectStore.currentProjectId = r.project_id
+}
+
+// 展开搜索框时聚焦
+watch(showSearch, (v) => {
+  if (v) {
+    setTimeout(() => {
+      const inp = document.querySelector('.searchbox input') as HTMLInputElement
+      inp?.focus()
+    }, 50)
+  }
+})
 </script>
 
 <template>
@@ -42,8 +90,11 @@ function pickSearch(item: any) {
     </div>
 
     <div v-if="showSearch && !collapsed" class="searchbox">
-      <input v-model="searchText" placeholder="搜索项目 / 会话" @input="onSearch" />
+      <input v-model="searchText" placeholder="搜索消息 / 项目 / 会话" @input="onSearch" />
+      <div v-if="searching" class="search-hint">搜索中…</div>
+      <!-- 旧搜索: 项目/会话名 -->
       <div v-if="projectStore.searchResults.length" class="sres">
+        <div class="sres-label">匹配的项目/会话</div>
         <div
           v-for="r in projectStore.searchResults"
           :key="r.type + r.id"
@@ -53,6 +104,21 @@ function pickSearch(item: any) {
           {{ r.type === 'project' ? '📁' : '💬' }} {{ r.title }}
         </div>
       </div>
+      <!-- 消息搜索: 匹配的 Q&A 对 -->
+      <div v-if="msgResults.length" class="sres msg-results">
+        <div class="sres-label">匹配的消息 ({{ msgResults.length }})</div>
+        <div
+          v-for="r in msgResults"
+          :key="'m' + r.message_id"
+          class="sitem msg-item"
+          @click="pickMessage(r)"
+        >
+          <div class="msg-meta">📁 {{ r.project_name }} · 💬 {{ r.conv_title }}</div>
+          <div class="msg-user">🙋 {{ r.user_text }}</div>
+          <div v-if="r.ai_reply" class="msg-ai">🤖 {{ r.ai_reply }}</div>
+        </div>
+      </div>
+      <div v-if="!searching && !projectStore.searchResults.length && !msgResults.length && searchText" class="search-hint">无匹配结果</div>
     </div>
 
     <div v-if="!collapsed" class="plist">
@@ -83,13 +149,16 @@ function pickSearch(item: any) {
 
 <style scoped>
 .sidebar {
-  width: 210px;
+  width: 220px;
   border-right: 1px solid var(--border);
   background: var(--panel);
   display: flex;
   flex-direction: column;
   min-height: 0;
-  transition: width 0.15s;
+  transition: width var(--transition-smooth);
+  box-shadow: var(--shadow-sm);
+  position: relative;
+  z-index: 2;
 }
 .sidebar.collapsed {
   width: 52px;
@@ -103,17 +172,23 @@ function pickSearch(item: any) {
 .act {
   flex: 1;
   border: 1px solid var(--border);
-  background: #fff;
-  border-radius: 8px;
-  padding: 6px 0;
+  background: var(--panel);
+  border-radius: var(--radius-sm);
+  padding: 8px 0;
   cursor: pointer;
   font-size: 14px;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+}
+.act:hover {
+  background: var(--hover-bg);
+  border-color: var(--brand);
+  color: var(--brand);
 }
 .act.toggle-btn {
   flex: 0;
-  font-size: 18px;
-  font-weight: bold;
-  padding: 8px 12px;
+  font-size: 16px;
+  padding: 8px 10px;
 }
 .sidebar.collapsed .actions {
   flex-direction: column;
@@ -146,6 +221,48 @@ function pickSearch(item: any) {
 .sitem:hover {
   background: #f3f4f6;
 }
+.sres-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  padding: 6px 8px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.search-hint {
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 10px 0;
+}
+/* 消息搜索结果 */
+.msg-results {
+  max-height: 300px;
+}
+.msg-item {
+  line-height: 1.4;
+  border-bottom: 1px solid var(--border);
+}
+.msg-item:last-child { border-bottom: none; }
+.msg-meta {
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.msg-user {
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.msg-ai {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .plist {
   flex: 1;
   overflow: auto;
@@ -159,17 +276,20 @@ function pickSearch(item: any) {
   margin-bottom: 4px;
 }
 .pitem:hover {
-  background: #f3f4f6;
+  background: var(--hover-bg);
+  color: var(--text);
 }
 .pitem.active {
-  background: #eef2ff;
+  background: var(--brand-bg);
   color: var(--brand);
   font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--brand);
 }
 .empty {
   color: var(--muted);
-  font-size: 12px;
-  padding: 10px;
+  font-size: var(--text-sm);
+  padding: 12px;
+  text-align: center;
 }
 .pdot {
   text-align: center;

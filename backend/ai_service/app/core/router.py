@@ -1,6 +1,6 @@
-"""Router:意图管道v2 + Skill 分发。
+"""Router:意图管道 + Skill 分发。
 
-- detect_intent_v2: 语义异步发射 + 4 同步模块重叠执行 → PipelineResult → 兼容旧 dict
+- detect_intent_v2: 混合级联意图识别(classify_v3) → PipelineResult → 兼容旧 dict
 - skill_for: (level1, level2) → skill_name 查表
 """
 
@@ -13,7 +13,6 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from ..intent.pipeline import classify_v2
 from ..intent.cascade import classify_v3
 from ..intent.tools import INTENT_SKILL_MAP
 from ..registry import SkillRegistry
@@ -45,27 +44,18 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
                            checkpoint_info: dict | None = None,
                            user_id: int | None = None,
                            project_id: int | None = None,
-                           has_requirement_doc: bool = False) -> dict:
-    """v2 意图管道: 5模块并行 → PipelineResult → 兼容旧 dict。
+                           has_requirement_doc: bool = False,
+                           site_generated: bool = False) -> dict:
+    """意图识别入口: 统一走混合级联 classify_v3(自 v1.2.0 起为唯一分类器)。
+
     v0.9.0: 新增 user_id/project_id 用于 Chroma 上下文增强。
     v1.0.7: 新增 has_requirement_doc, 透传给工具路由决定是否放行建站。
-    v1.2.0: 按 settings.intent_mode 分支 —— cascade(混合级联, 默认) | sir(状态化SIR)。"""
+    v1.2.0: 收敛为单一分类器(cascade), 移除 SIR(classify_v2)双轨分支。
+    """
     t0 = time.time()
-    # 混合级联 v1.2.0(默认) / 状态化 SIR v1.1.0(可选回退)
-    if settings.intent_mode == "cascade":
-        result = await classify_v3(
-            messages, model_id,
-            conversation_id=conversation_id,
-            context_hint=context_hint,
-            project_status=project_status,
-            project_constraints=project_constraints,
-            checkpoint_info=checkpoint_info,
-            user_id=user_id,
-            project_id=project_id,
-            has_requirement_doc=has_requirement_doc,
-        )
-    else:
-        result = await classify_v2(
+    logger.info("[意图] ENTER 混合级联 msgs=%d model=%s", len(messages), model_id)
+    # 单一分类器: 混合级联(不再有 SIR 回退分支, 避免双轨不一致)
+    result = await classify_v3(
         messages, model_id,
         conversation_id=conversation_id,
         context_hint=context_hint,
@@ -75,6 +65,7 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
         user_id=user_id,
         project_id=project_id,
         has_requirement_doc=has_requirement_doc,
+        site_generated=site_generated,
     )
     l1 = result.intent["level1"]
     l2 = result.intent["level2"]

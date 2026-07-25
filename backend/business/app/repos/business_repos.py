@@ -151,6 +151,79 @@ class ArtifactRepo(BaseRepo[Artifact]):
     async def list_by_project(self, db: AsyncSession, project_id: int) -> list[Artifact]:
         return await self.list_by(db, project_id=project_id)
 
+    async def get_by_trace(self, db: AsyncSession, trace_id: str) -> Optional[Artifact]:
+        """同一 trace_id 的 SSE 重连/续传/重试只应对应一条 Artifact。"""
+        stmt = select(Artifact).where(Artifact.trace_id == trace_id)
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def upsert_by_trace(
+        self, db: AsyncSession, trace_id: str, *, project_id: int,
+        conversation_id: int, title: str, repo: str, files: dict,
+        preview_url: str,
+    ) -> Artifact:
+        """幂等 upsert Artifact(重连/续传/重试防重复落库 → 根治'一口气生成多条')。
+
+        首次: 新建; 同 trace 再次落库: 原地更新 files/预览(不新增行),
+        避免 1 次对话产出 N 条相同 artifact。
+        """
+        existing = await self.get_by_trace(db, trace_id)
+        if existing:
+            existing.files = files
+            existing.preview_url = preview_url
+            existing.download_url = preview_url
+            existing.title = title
+            existing.status = "done"
+            await db.commit()
+            await db.refresh(existing)
+            return existing
+        art = Artifact(
+            project_id=project_id,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            title=title,
+            repo=repo,
+            files=files,
+            preview_url=preview_url,
+            download_url=preview_url,
+            status="done",
+        )
+        db.add(art)
+        await db.commit()
+        await db.refresh(art)
+        return art
+
+    async def delete_all(self, db: AsyncSession, project_id: int) -> int:
+        """删除项目下全部产物, 返回删除条数。"""
+        stmt = sqldelete(Artifact).where(Artifact.project_id == project_id)
+        result = await db.execute(stmt)
+        await db.commit()
+        return result.rowcount
+
+    async def delete_file(self, db: AsyncSession, project_id: int, filename: str) -> bool:
+        """删除项目中某个文件记录(从 artifact.files 字典中移除指定 key 或删除整条 artifact)。
+
+        若删除后 artifact 的 files 为空则删整条 artifact, 否则更新 files dict。
+        """
+        rows = await self.list_by_project(db, project_id)
+        for art in rows:
+            if not isinstance(art.files, dict):
+                continue
+            if filename not in art.files:
+                continue
+            new_files = {k: v for k, v in art.files.items() if k != filename}
+            if new_files:
+                art.files = new_files
+                await db.commit()
+                await self._cache_put(art)  # 更新缓存
+                return True
+            else:
+                await db.delete(art)
+                await db.commit()
+                await self._cache_del(art)  # 清理缓存
+                return True
+        return False
+
 
 # 模块级单例
 project_repo = ProjectRepo()

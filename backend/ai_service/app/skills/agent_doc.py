@@ -75,6 +75,9 @@ register_skill(
     name="agent_doc",
     intent_tags=["文档", "doc", "说明", "教程", "readme", "wiki", "方案", "计划"],
     handler=generate_doc_skill,
-    is_graph=True,  # 改为异步生成器
+    is_graph=True,
+    display_name="文档生成",
+    avatar="📝",
+    role="文档工程师",
     description="生成文档/说明(Markdown, 流式输出)",
 )

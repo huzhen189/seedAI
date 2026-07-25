@@ -159,32 +159,42 @@ async def _seed_super_admin() -> None:
 
 
 async def _seed_default_user() -> None:
-    """自动创建默认超管用户(账号:huzhen, 每次 init_db 若不存在则创建)。"""
+    """从环境变量创建默认超管(不再硬编码)。
+
+    需设置: SEED_ADMIN_USERNAME / SEED_ADMIN_PASSWORD / SEED_ADMIN_EMAIL
+    若 SEED_ADMIN_USERNAME 为空则跳过。
+    """
+    import os
     from .models import User
     from .security import hash_password
 
-    username = "huzhen"
+    username = os.getenv("SEED_ADMIN_USERNAME", "").strip()
+    password = os.getenv("SEED_ADMIN_PASSWORD", "").strip()
+    email = os.getenv("SEED_ADMIN_EMAIL", "").strip()
+    if not username or not password:
+        logger.info("未设置 SEED_ADMIN_USERNAME/SEED_ADMIN_PASSWORD, 跳过种子用户创建")
+        return
     try:
         async with SessionLocal() as session:
             existing = (
                 await session.execute(select(User).where(User.username == username))
             ).scalar_one_or_none()
             if existing is not None:
-                logger.debug("默认用户 '%s' 已存在,跳过", username)
+                logger.debug("种子用户 '%s' 已存在,跳过", username)
                 return
             user = User(
                 username=username,
-                nickname="小胡",
-                email="785297147@qq.com",
-                password_hash=hash_password("huzhen189"),
+                nickname=username,
+                email=email or None,
+                password_hash=hash_password(password),
                 role="super_admin",
                 plan="enterprise",
             )
             session.add(user)
             await session.commit()
-            logger.info("已创建默认超管用户: %s (super_admin)", username)
+            logger.info("已通过环境变量创建超管用户: %s", username)
     except Exception as e:
-        logger.warning("默认用户创建失败(已跳过): %s", e)
+        logger.warning("种子用户创建失败(已跳过): %s", e)
 
 
 async def reset_db() -> dict:

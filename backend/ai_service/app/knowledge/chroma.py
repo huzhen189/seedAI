@@ -27,13 +27,20 @@ CTX_COLLECTION = "conversation_context"
 CTX_SIMILARITY_THRESHOLD = 0.55  # 余弦相似度 < 0.55 视为无关
 
 
+_CLIENT = None  # 进程内单例: 复用同一 HTTP 连接, 避免每次调用重建客户端
+
+
 def _client():
+    global _CLIENT
+    if _CLIENT is not None:
+        return _CLIENT
     from urllib.parse import urlparse
 
     import chromadb
 
     p = urlparse(settings.chroma_url)
-    return chromadb.HttpClient(host=p.hostname or "localhost", port=p.port or 8000)
+    _CLIENT = chromadb.HttpClient(host=p.hostname or "localhost", port=p.port or 8000)
+    return _CLIENT
 
 
 def _ef():

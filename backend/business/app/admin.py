@@ -259,9 +259,12 @@ async def list_traces(
             params = {f"c{i}": cid for i, cid in enumerate(conv_ids)}
             mrows = (await db.execute(
                 sa_text(
-                    f"SELECT DISTINCT ON (conversation_id) conversation_id, content FROM messages "
+                    # MySQL 兼容: DISTINCT ON 是 PG 专有, 改用 GROUP BY + 子查询取每会话第一条 user 消息
+                    f"SELECT m.conversation_id, m.content FROM messages m "
+                    f"JOIN (SELECT conversation_id, MIN(id) AS min_id FROM messages "
                     f"WHERE conversation_id IN ({placeholders}) AND role='user' "
-                    f"ORDER BY conversation_id, id ASC"
+                    f"GROUP BY conversation_id) sub "
+                    f"ON m.conversation_id = sub.conversation_id AND m.id = sub.min_id"
                 ), params,
             )).fetchall()
             for cid, content in mrows:

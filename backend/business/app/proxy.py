@@ -54,6 +54,11 @@ _SENSITIVE_PATTERNS: list[re.Pattern] = [
     re.compile(r"<script[^>]*>.*?</script>", re.I | re.S),
     re.compile(r"javascript\s*:", re.I),
     re.compile(r"on\w+\s*=", re.I),
+    re.compile(r"<iframe[^>]*>", re.I),
+    re.compile(r"<object[^>]*>", re.I),
+    re.compile(r"<embed[^>]*>", re.I),
+    re.compile(r"data\s*:\s*text/html", re.I),
+    re.compile(r"expression\s*\(.*\)", re.I),
 ]
 _INPUT_MAX_LEN = 8000
 
@@ -456,6 +461,8 @@ async def _sync_checkpoint_to_mysql(conversation_id: int, stage: str,
 async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
                       terminal_status: str, user_text: str, assistant_text: str,
                       preview_url: str | None = None,
+                      files_dict: dict[str, str] | None = None,
+                      refined_summary: str = "",
                       qc_result: dict | None = None,
                       project_id: int | None = None,
                       requirement_doc: dict | None = None) -> None:
@@ -467,7 +474,7 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
             logger.info("[chat] [8/8] 后台落库 trace=%s attempt=%d", tid, attempt + 1)
             async with _S() as s:
                 await finish_trace(s, tid, terminal_status, max(0, len(assistant_text) // 4))
-                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url)
+                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url, files_dict, refined_summary)
                 # 后置 QC 三裁判结果落库(幂等 upsert by trace_id)
                 if qc_result is not None:
                     try:
@@ -622,6 +629,11 @@ async def chat(
     if confirmed_subtasks:
         payload["confirmed_subtasks"] = [s.strip() for s in confirmed_subtasks.split(",") if s.strip()]
         logger.info("[chat] 已确认中风险子任务: %s", payload["confirmed_subtasks"])
+    # 前端指定 skill(confirm 确认后回传: agent_delete/agent_generate_site 等)
+    skill_param = request.query_params.get("skill")
+    if skill_param:
+        payload["skill"] = skill_param
+        logger.info("[chat] 前端指定 skill=%s", skill_param)
     # 前端上下文检测 + Redis 对话摘要
     ctx = request.query_params.get("context_hint")
     if ctx:
@@ -714,6 +726,8 @@ async def chat(
         timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
         assistant_parts: list[str] = []
         preview_url: str | None = None  # 捕获预览直链(供分享「复制预览链接」使用)
+        files_dict: dict[str, str] = {}  # 多文件产物: {文件名: COS URL} (v1.2.1+)
+        refined_text: str = ""  # 文字总结: agent 生成完毕后的自然语言反馈(v1.2.2)
         qc_result: dict | None = None  # 捕获后置 QC 三裁判聚合结果(供落库 + 前端展示)
         requirement_doc_captured: dict | None = None  # 捕获需求文档(供落库 + 前端重启还原)
         event_seq: int = 0  # 结构化事件序号(供回放重建时间线)
@@ -779,6 +793,9 @@ async def chat(
                                         if event == "preview" and isinstance(payload_obj, dict) and payload_obj.get("url"):
                                             preview_url = payload_obj["url"]
                                             await cache_set(f"site_generated:{conversation_id}", "1", ttl=86400)
+                                            # 多文件: 捕获 AI 产出的完整文件列表(v1.2.1+)
+                                            if isinstance(payload_obj.get("files"), dict):
+                                                files_dict = payload_obj["files"]
                                         event_seq += 1
                                         # trace_event 暂存, 由 finally 批量写入
                                         if event == "aborted":
@@ -851,6 +868,9 @@ async def chat(
                                         # 注意 SSE data 形如 {"data": <文档>}, 取内层 payload
                                         requirement_doc_captured = payload_obj.get("data")
                                         logger.info("[chat] ◇ 需求文档已捕获 trace=%s", tid)
+                                    elif event == "refined" and isinstance(payload_obj, dict):
+                                        # 文字总结(v1.2.2): agent 生成完毕反馈文案, 持久化供刷新展示
+                                        refined_text = payload_obj.get("data") or ""
                                     logger.info(
                                             "[chat] ◇ SSE #%d type=%s stage=%s data=%.200s",
                                             event_seq, event, stage or "-", data,
@@ -898,6 +918,8 @@ async def chat(
                 user_text=user_text,
                 assistant_text=assistant_full_text,
                 preview_url=preview_url,
+                files_dict=files_dict,
+                refined_summary=refined_text,
                 qc_result=qc_result,
                 project_id=project_id,
                 requirement_doc=requirement_doc_captured,
@@ -958,6 +980,32 @@ def _normalize_assistant_text(text: str) -> str:
     return text
 
 
+def _extract_clean_html(text: str) -> str:
+    """从 AI 多文件拼接流中提取干净的 HTML 内容。
+
+    去杂: ① 移除 <!-- FILE: ... --> 多文件标记行;
+          ② 取 <!doctype html>... 或 <html>... 段, 截掉前后上下文残片。
+    未匹配到 HTML 时直接返回原文本。
+    """
+    import re
+    # 去掉多文件分隔标记(整行)
+    cleaned = re.sub(r'^<!--\s*FILE:.*?-->\s*$', '', text, flags=re.MULTILINE)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return text
+    # 优先提取 doctype→</html> 或 <html→</html>
+    for start_tag in ('<!doctype html', '<!DOCTYPE html', '<html'):
+        lc = cleaned.lower()
+        idx = lc.find(start_tag)
+        if idx >= 0:
+            end_idx = lc.find('</html>', idx)
+            if end_idx >= 0:
+                return cleaned[idx:end_idx + len('</html>')]
+            # 只有一个开标签无闭合: 取从开标签到末尾
+            return cleaned[idx:]
+    return cleaned
+
+
 async def _persist_conversation(
     db: AsyncSession,
     user_id: int,
@@ -967,6 +1015,8 @@ async def _persist_conversation(
     assistant_text: str,
     trace_id: str,
     preview_url: str | None = None,
+    files_dict: dict[str, str] | None = None,
+    refined_summary: str = "",
 ) -> None:
     """SSE 结束后落库。build 类消息走 Artifact+结构化 JSON, chat 类存纯文本。"""
     # 归一化: 拆解 {"data":"x"}{"data":"y"}... → "xy..." (兜底防 AI 服务旧格式)
@@ -987,37 +1037,40 @@ async def _persist_conversation(
         ))
 
     # assistant 消息: 按内容分两路
-    is_html = assistant_text and ("<html" in assistant_text[:500].lower() or "<!doctype" in assistant_text[:500].lower())
+    is_html = assistant_text and ("<html" in assistant_text[:500].lower() or "<!doctype" in assistant_text[:500].lower() or "<!-- FILE:" in assistant_text[:200])
     if is_html:
-        # ---- 建站/代码生成: 始终建 Artifact(COS 失败也用 srcdoc 兜底) ----
+        # ---- 建站/代码生成: 幂等 upsert Artifact(同一 trace 重连/续传/重试只 1 条) ----
         repo = "site"
-        art = Artifact(
+        # 多文件产物: 以文件名做 key 存为对象(前端 Object.entries 直接拿文件名, 不是数组下标)
+        if files_dict:
+            art_files = {fname: {"name": fname, "size": 0, "url": url} for fname, url in files_dict.items()}
+        else:
+            clean_html = _extract_clean_html(assistant_text)
+            art_files = {"index.html": {"name": "index.html", "size": len(clean_html.encode("utf-8")), "content": clean_html}}
+        art = await artifact_repo.upsert_by_trace(
+            db, trace_id,
             project_id=conv.project_id or 0,
             conversation_id=conv.id,
-            trace_id=trace_id,
             title=conv.title or user_text[:20],
             repo=repo,
-            files=[{"name": "index.html", "size": len(assistant_text.encode("utf-8")), "content": assistant_text}],
+            files=art_files,  # dict{name → {name, size, url/content}}
             preview_url=preview_url or "",
-            download_url=preview_url or "",
-            status="done",  # HTML 已可用(srcdoc 兜底, COS 链接可有可无)
         )
-        db.add(art)
-        await db.flush()
         content_obj = {
             "type": repo,
             "artifact_id": art.id,
             "title": art.title or "",
             "preview_url": preview_url or "",
             "download_url": preview_url or "",
-            "files": art.files or [],
+            "files": art.files if isinstance(art.files, dict) else [],
+            "summary": refined_summary,  # v1.2.2: 文字总结持久化
         }
         await message_repo.upsert_assistant(db, conv.id, trace_id, json.dumps(content_obj, ensure_ascii=False), model)
         if preview_url:
             proj = await db.get(Project, conv.project_id)
             if proj is not None:
                 proj.preview_url = preview_url
-        logger.info("[chat] Artifact 已创建 id=%s repo=%s preview=%s fallback=srcdoc", art.id, repo, preview_url or "(无)")
+        logger.info("[chat] Artifact 幂等落库 id=%s trace=%s repo=%s preview=%s", art.id, trace_id, repo, preview_url or "(无)")
     else:
         # ---- 闲聊/文档: 纯文本 ----
         if assistant_text:

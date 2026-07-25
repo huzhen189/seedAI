@@ -136,6 +136,7 @@ export interface SiteContent {
   title: string
   preview_url: string
   download_url?: string
+  summary?: string  // AI 生成后的文字总结(v1.2.2), 刷新后仍可展示
   files: { name: string; size: number }[]
 }
 

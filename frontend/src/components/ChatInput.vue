@@ -5,6 +5,7 @@ import type { ModelInfo } from '../types'
 defineProps<{
   model: string
   generating: boolean
+  cancelling: boolean
   models: ModelInfo[]
 }>()
 
@@ -41,6 +42,7 @@ function submit() {
       <button v-if="!generating" class="send" data-track="发送" :disabled="!value.trim()" @click="submit">
         发送 ⏎
       </button>
+      <button v-else-if="cancelling" class="stop" disabled>取消中…</button>
       <button v-else class="stop" data-track="停止" @click="emit('stop')">停止</button>
     </div>
   </div>

@@ -71,7 +71,7 @@ PROVIDERS: dict[str, ProviderConfig] = {
         label="DeepSeek",
         base_url="https://api.deepseek.com/v1",
         api_key=settings.deepseek_api_key,
-        model="deepseek-chat",
+        model="deepseek-v4-flash",
     ),
     "qwen": ProviderConfig(
         id="qwen",

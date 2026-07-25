@@ -20,7 +20,7 @@ import MessageBubble from '../components/MessageBubble.vue'
 import SubTaskTrack from '../components/SubTaskTrack.vue'
 import MergedResult from '../components/MergedResult.vue'
 import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
-import { listArtifacts, renameProject, patch } from '../api/projects'
+import { getConversation, listArtifacts, renameProject, patch } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
@@ -43,6 +43,8 @@ const model = ref('deepseek')
 const input = ref('')
 const generating = ref(false)
 const finished = ref(false)
+const sending = ref(false)   // 防双击重复发送
+const cancelling = ref(false) // 取消中状态(按钮反馈)
 
 // 思考时间线(每步一个 agent 节点)+ 计划特殊节点;替代旧版混成一坨的 thinks 字符串。
 const thoughtSteps = ref<ThoughtStep[]>([])
@@ -124,13 +126,33 @@ async function abortPaused() {
 // 意图识别(由 AI intent 事件设置; 控制右侧面板显示)
 const currentIntent = ref<{ level1: string; level2: string }>({ level1: '', level2: '' })
 const rightCollapsed = ref(false)
-// 方案确认(改文字回复驱动, 不再弹模态框): Planner 产出后暂停等待用户以文字回复续跑
-const awaitingConfirm = ref(false)
-const awaitPlan = ref<{ title: string; goal: string; steps: string[] } | null>(null)
-// v1.0.7: 需求就绪后给用户的「是否建站」咨询文案 + CTA 按钮文案(由后端 paused 事件下发)
-const awaitConfirmMsg = ref('')
-const awaitCtaLabel = ref('开始建站')
-
+// 可拖拽分栏
+const colGrip = ref<HTMLElement | null>(null)
+const gripActive = ref(false)
+let gripStartX = 0
+let gripStartW = 0
+function onGripDown(e: MouseEvent) {
+  gripActive.value = true
+  gripStartX = e.clientX
+  const pane = document.querySelector('.right-pane') as HTMLElement
+  gripStartW = pane?.offsetWidth || 0
+  document.addEventListener('mousemove', onGripMove)
+  document.addEventListener('mouseup', onGripUp)
+}
+function onGripMove(e: MouseEvent) {
+  const dx = gripStartX - e.clientX  // 左拖=放大右侧
+  const newW = gripStartW + dx
+  const maxW = window.innerWidth * 0.7
+  const minW = 280
+  const w = Math.max(minW, Math.min(maxW, newW))
+  const pct = ((w / window.innerWidth) * 100).toFixed(1)
+  document.documentElement.style.setProperty('--right-pane-width', pct + '%')
+}
+function onGripUp() {
+  gripActive.value = false
+  document.removeEventListener('mousemove', onGripMove)
+  document.removeEventListener('mouseup', onGripUp)
+}
 // 方案选择(options 事件): 前端弹出单选框, 选中后记录, 下次 send 时一起发送
 const showOptionsModal = ref(false)
 const optionsData = ref<OptionEvent | null>(null)
@@ -157,7 +179,7 @@ function parseSelectionToken(text: string): number | null {
   return null
 }
 // 二次确认弹框(安全 high)
-const pendingConfirm = ref<{ reason: string; skill: string } | null>(null)
+const pendingConfirm = ref<{ reason: string; skill: string; planTitle?: string; planGoal?: string; planSteps?: string[] } | null>(null)
 const showConfirmModal = ref(false)
 // 高危拦截提示(安全 critical, 不可绕过)
 const blockReason = ref('')
@@ -200,7 +222,6 @@ function cancelOptions() {
 // 文字回复驱动续跑: 复用当前 trace_id, 把用户文字作为改进意见/确认一并带入后端
 // (业务代理会把 q 追加到 checkpoint messages, 无需再弹确认模态框)。
 function resumeFromPlan(text: string) {
-  awaitingConfirm.value = false
   resetGenState()
   generating.value = true
   const cid = convStore.currentConvId!
@@ -224,32 +245,39 @@ function resumeFromPlan(text: string) {
   })
 }
 
-// 需求就绪后: 点「开始建站」→ 复用续跑通道(resume=true)触发建站。
-// 后端 resume 路径会强制 skill=generate_site, 绕过意图重分类(即使刷新后瞬时态丢失也安全,
-// 因为业务侧会按 Redis 的 await_confirm 阶段 + 已落库的需求文档放行)。
-function startBuild() {
-  if (!awaitingConfirm.value) return
-  resumeFromPlan('开始生成')
-}
-
-// 二次确认通过后: 带 confirmed 标记重发(Worker 据此跳过安全拦截, 执行 selected_skill)
-function resendConfirmed() {
+// 统一确认回调: 所有 confirm(安全/方案/删除)均走此路径
+async function resendConfirmed() {
   if (!pendingConfirm.value) return
+  const p = pendingConfirm.value
+  const skill = p.skill || ''
+  // 方案确认: skill=agent_generate_site 且带有 planSteps(非 planTitle, 避免空字符串假值)
+  const isPlan = skill === 'agent_generate_site' && (p.planSteps?.length ?? 0) > 0
   pendingConfirm.value = null
   showConfirmModal.value = false
+
   resetGenState()
   traceId.value = genTraceId()
   const cid = convStore.currentConvId!
   setActiveGen(cid, traceId.value)
   generating.value = true
   const assistantIdx = convStore.messages.length - 1
-  esRef.value = startChat({
+
+  // 方案确认: resume=true 续跑建站; 其他: confirmed=true 跳过拦截
+  const opts: any = {
     model: model.value,
     traceId: traceId.value,
     conversationId: cid,
-    confirmed: true,
     cb: makeCallbacks(assistantIdx),
-  })
+  }
+  if (isPlan) {
+    opts.resume = true
+    opts.skill = 'agent_generate_site'
+  } else {
+    opts.confirmed = true
+    opts.skill = skill || undefined
+  }
+
+  esRef.value = startChat(opts)
 }
 
 // 多选项选中: 带 skill 参数重发(Worker 直接执行该 skill)
@@ -357,6 +385,26 @@ async function loadArtifacts() {
       }
     }
   }
+  // 恢复完成态: 刷新后 SSE 事件丢失, 但产物已落 MySQL → 前端据此判断任务已完成
+  if (projectArtifacts.value.length > 0) {
+    if (!finished.value) finished.value = true
+    // previewUrl 也恢复: 取最新 artifact 的直链, 供「打开线上预览」「复制预览链接」使用
+    if (!previewUrl.value) {
+      const latest = projectArtifacts.value[projectArtifacts.value.length - 1]
+      previewUrl.value = latest?.preview_url || null
+    }
+  }
+  // 查询会话状态: 若无产物且后台有活跃 trace → 启动续接
+  if (projectArtifacts.value.length === 0 && convStore.currentConvId != null && !generating.value) {
+    try {
+      const resp = await fetch(`/api/conversations/${convStore.currentConvId}/status`)
+      const s = await resp.json()
+      if (s.status === 'processing' && s.active_trace_id) {
+        generating.value = true
+        resume(convStore.currentConvId, s.active_trace_id)
+      }
+    } catch { /* 状态查询失败不影响主流程 */ }
+  }
 }
 const traceId = ref('')
 const esRef = ref<EventSource | null>(null)
@@ -385,11 +433,21 @@ const artifactLinks = computed(() => {
   if (requirementDoc.value) {
     links.push({ name: requirementDoc.value.brand?.name || '需求文档', icon: '📄', kind: 'requirement' })
   }
-  for (const a of projectArtifacts.value) {
-    if (!a.files) continue
-    for (const name of Object.keys(a.files)) {
+  if (projectArtifacts.value.length === 0) return links
+  // 只展示最新一次生成的产物文件(避免把历史 artifact 全列出)
+  const latest = projectArtifacts.value[projectArtifacts.value.length - 1]
+  if (latest.files) {
+    const names = Array.isArray(latest.files)
+      ? (latest.files as any[]).map((f: any) => f.name)
+      : Object.keys(latest.files)
+    for (const name of names) {
       links.push({ name, icon: iconForFile(name), kind: 'file' })
     }
+  }
+  // 若有多版, 显示数量提示
+  if (projectArtifacts.value.length > 1) {
+    const tail = links[links.length - 1] as any
+    if (tail) tail.totalVersions = projectArtifacts.value.length
   }
   return links
 })
@@ -567,8 +625,6 @@ function resetGenState() {
   finished.value = false
   currentIntent.value = { level1: '', level2: '' }
   pendingRetry.value = null
-  awaitingConfirm.value = false
-  awaitPlan.value = null
   // 多意图编排状态(新请求时重置;confirmedSubtaskIds 在 doSend 单独清)
   isMultiIntent.value = false
   subTasks.value = []
@@ -675,13 +731,10 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     },
     onDone: () => {
       generating.value = false
+      sending.value = false
       finished.value = true
       thoughtSteps.value = []
       planNodes.value = []
-      awaitingConfirm.value = false
-      awaitPlan.value = null
-      awaitConfirmMsg.value = ''
-      awaitCtaLabel.value = '开始建站'
       clearActiveGen()
       clearDraft()
       loadArtifacts()
@@ -696,10 +749,6 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       thoughtSteps.value = []
       planNodes.value = []
-      awaitingConfirm.value = false
-      awaitPlan.value = null
-      awaitConfirmMsg.value = ''
-      awaitCtaLabel.value = '开始建站'
       errorMsg.value = '已取消'
       clearActiveGen()
       if (projectStore.currentProjectId) {
@@ -759,19 +808,18 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       clearActiveGen()
     },
     onPaused: (d: any) => {
+      // 方案确认(await_confirm): 后端 Planner 产出后暂停, 前端统一走 pendingConfirm 弹窗
       if (d.stage === 'await_confirm') {
         generating.value = false
         finished.value = true
-        // 不再弹模态框: 标记为等待文字回复, 由产物链接卡片引导用户回复/改进
-        awaitingConfirm.value = true
-        // v1.0.7: 接收后端下发的建站咨询文案与 CTA 文案
-        awaitConfirmMsg.value = d.content || ''
-        awaitCtaLabel.value = d.cta_label || '开始建站'
-        awaitPlan.value = {
-          title: d.plan_title || '',
-          goal: d.plan_goal || '',
-          steps: d.plan_steps || [],
+        pendingConfirm.value = {
+          reason: d.content || '方案已生成，确认开始建站吗？',
+          skill: 'agent_generate_site',
+          planTitle: d.plan_title || '',
+          planGoal: d.plan_goal || '',
+          planSteps: d.plan_steps || [],
         }
+        showConfirmModal.value = true
         clearActiveGen()
       }
     },
@@ -780,10 +828,6 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       thoughtSteps.value = []
       planNodes.value = []
-      awaitingConfirm.value = false
-      awaitPlan.value = null
-      awaitConfirmMsg.value = ''
-      awaitCtaLabel.value = '开始建站'
       errorMsg.value = m
       clearActiveGen()
     },
@@ -860,6 +904,7 @@ async function loadCurrentProject() {
 }
 
 async function send() {
+  if (sending.value) return  // 防双击重复发送
   let text = input.value.trim()
   // 如果有待发送的选项, 拼接到消息前面
   if (pendingOptionsText.value) {
@@ -867,6 +912,7 @@ async function send() {
     pendingOptionsText.value = ''
   }
   if (!text) return
+  sending.value = true
   // 非阻塞候选提示激活时, 若输入是选择 token(如 "B"/"2"/"选B") → 直接切换 skill
   // 对齐后端 pending_options(完整候选列表: [已选top1, ...alts]); "A"=重新确认当前(忽略), "B"=alts[0]
   if (alternativesData.value && alternativesData.value.skills.length) {
@@ -883,10 +929,17 @@ async function send() {
   }
   // 生成中: 加入队列
   if (generating.value) { enqueue(text); return }
-  // 等待方案确认: 直接回复文字 = 续跑生成(可带改进意见, 也可直接"开始/确认")
-  if (awaitingConfirm.value) {
+  // confirm 弹窗显示中: plan 类型→带改进意见续跑, 其他类型→关闭弹窗正常发送
+  if (showConfirmModal.value) {
+    showConfirmModal.value = false
+    const isPlanConfirm = pendingConfirm.value?.skill === 'agent_generate_site'
+    pendingConfirm.value = null
     input.value = ''
-    await resumeFromPlan(text)
+    if (isPlanConfirm) {
+      await resumeFromPlan(text)
+    } else {
+      await doSend(text)
+    }
     return
   }
   // 鉴权
@@ -1015,11 +1068,14 @@ async function maybeResume() {
 
 async function stop() {
   if (!generating.value) return
+  cancelling.value = true
   generating.value = false
+  sending.value = false
   // 级联取消(C1):通知业务 /api/cancel -> 业务转发 AI /cancel -> Worker 中断生成。
-  if (traceId.value) await cancelChat(traceId.value)
+  try { if (traceId.value) await cancelChat(traceId.value) } catch { /* 忽略取消错误 */ }
   esRef.value?.close()
   esRef.value = null
+  cancelling.value = false
 }
 
 // 气泡内多维度评价提交(v0.8.5 M1): 按 trace_id 存储, 落库 + 前端即时反馈
@@ -1067,7 +1123,7 @@ onMounted(async () => {
     await projectStore.load()
     await loadCurrentProject()
     await loadArtifacts()
-    await nextTick(() => { setupScrollLoading(); scrollToBottom(false) })
+    await nextTick(() => { setupScrollLoading(); scrollToBottom(false); handleSearchNav() })
     // 恢复未完成的本地草稿(刷新/崩溃后)
     if (loadDraft()) scrollToBottom(false)
     await maybeResume()
@@ -1082,11 +1138,46 @@ watch(
       requirementDoc.value = null  // 切换项目, 先清空旧项目的需求文档
       await convStore.loadConversations(id)
       await loadArtifacts()
-      await nextTick(() => { setupScrollLoading(); scrollToBottom(false) })
+      await nextTick(() => { setupScrollLoading(); scrollToBottom(false); handleSearchNav() })
       await maybeResume()
     }
   },
 )
+
+/* 搜索跳转: 从 sessionStorage 读取导航目标, 滚动到指定消息 */
+function handleSearchNav() {
+  const convId = sessionStorage.getItem('nav_conv')
+  const msgId = sessionStorage.getItem('nav_msg')
+  if (!convId) return
+  sessionStorage.removeItem('nav_conv')
+  sessionStorage.removeItem('nav_msg')
+  // 切换到目标会话(如果不在当前会话)
+  if (convStore.currentConvId !== Number(convId)) {
+    convStore.currentConvId = Number(convId)
+    // 加载该会话的消息
+    const conv = convStore.conversations.find(c => c.id === Number(convId))
+    if (conv) {
+      getConversation(conv.id).then(c => {
+        if (c.messages) convStore.messages = c.messages
+        scrollToMsgId(msgId)
+      })
+    }
+    return
+  }
+  scrollToMsgId(msgId)
+}
+
+function scrollToMsgId(msgId: string | null) {
+  if (!msgId) return
+  nextTick(() => {
+    const el = document.querySelector(`[data-msg-id="${msgId}"]`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      el.classList.add('highlight-flash')
+      setTimeout(() => el.classList.remove('highlight-flash'), 2000)
+    }
+  })
+}
 
 watch(
   () => convStore.pendingConvId,
@@ -1188,6 +1279,7 @@ watch(pendingRetry, (r) => {
           <MessageBubble
             v-for="(m, i) in s.msgs"
             :key="`s${si}-${i}`"
+            :data-msg-id="m.id"
             :role="m.role"
             :content="m.content"
             :time="m.role === 'user' ? (m.created_at || '') : ''"
@@ -1286,6 +1378,7 @@ watch(pendingRetry, (r) => {
           v-model:value="input"
           v-model:model="model"
           :generating="generating"
+          :cancelling="cancelling"
           :models="models"
           @send="send"
           @stop="stop"
@@ -1312,35 +1405,6 @@ watch(pendingRetry, (r) => {
           </ul>
           <div class="clarify-hint" v-if="clarifyData.rounds > 0">（第 {{ clarifyData.rounds }} 轮追问，直接回复补充信息即可）</div>
           <div class="clarify-hint">💡 直接在下方的输入框补充回答，或回复「随便聊聊」退出。</div>
-        </div>
-        <!-- 方案已就绪: 文字产物链接(替代确认模态框) -->
-        <div v-if="awaitingConfirm" class="artifact-links-card">
-          <div class="alc-head">📦 需求方案已生成，预览已自动打开</div>
-          <div v-if="awaitConfirmMsg" class="alc-invite">{{ awaitConfirmMsg }}</div>
-          <button class="alc-build-btn" @click="startBuild">{{ awaitCtaLabel }}</button>
-          <div class="alc-hint">
-            💡 直接回复文字即可：说明改进方向（如「加个博客列表页」），或回复「开始 / 确认」立即生成代码。
-          </div>
-          <div class="alc-list">
-            <button
-              v-for="link in artifactLinks"
-              :key="link.name + link.kind"
-              class="alc-item"
-              @click="openArtifact(link.name, link.kind)"
-            >
-              <span class="alc-icon">{{ link.icon }}</span>
-              <span class="alc-name">{{ link.name }}</span>
-              <span v-if="link.kind === 'requirement'" class="alc-dl" title="下载 .md" @click.stop="downloadReqDoc()">⬇</span>
-              <span class="alc-open">打开 ↗</span>
-            </button>
-          </div>
-          <div v-if="awaitPlan && awaitPlan.steps.length" class="alc-plan">
-            <div class="alc-plan-title">📋 {{ awaitPlan.title || '方案概览' }}</div>
-            <div class="alc-goal">{{ awaitPlan.goal }}</div>
-            <ol class="alc-steps">
-              <li v-for="(s, i) in awaitPlan.steps" :key="i">{{ s }}</li>
-            </ol>
-          </div>
         </div>
         <!-- 方案选择弹窗(单选, 确认后记录, 下次 send 一起发送) -->
         <div v-if="showOptionsModal && optionsData" class="options-modal-backdrop" @click.self="cancelOptions" @keydown.escape="cancelOptions">
@@ -1407,6 +1471,13 @@ watch(pendingRetry, (r) => {
       </div>
     </div>
 
+    <div
+      ref="colGrip"
+      class="col-grip"
+      :class="{ active: gripActive }"
+      @mousedown="onGripDown"
+    ></div>
+
     <div class="right-pane" :class="{ collapsed: rightCollapsed }">
       <div class="right-toggle">
         <button class="toggle-btn" @click="rightCollapsed = !rightCollapsed">
@@ -1435,19 +1506,35 @@ watch(pendingRetry, (r) => {
   flex: 1;
   display: flex;
   min-height: 0;
+  min-width: 0;
 }
 .left-col {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  min-width: 0;
+  min-width: 240px;
 }
 .left-col.full {
-  max-width: 100%;
+  /* right-pane collapsed → left-col fills all */
+}
+/* 可拖拽分栏手柄 */
+.col-grip {
+  width: 5px;
+  cursor: col-resize;
+  background: var(--border);
+  flex-shrink: 0;
+  transition: background 0.15s;
+  position: relative;
+}
+.col-grip:hover,
+.col-grip.active {
+  background: var(--brand);
 }
 .right-pane {
-  width: 46%;
+  width: var(--right-pane-width, 42%);
+  min-width: 280px;
+  max-width: 70%;
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -1457,6 +1544,8 @@ watch(pendingRetry, (r) => {
 }
 .right-pane.collapsed {
   width: 36px;
+  min-width: 36px;
+  max-width: 36px;
 }
 .right-toggle {
   display: flex;
@@ -1819,4 +1908,15 @@ watch(pendingRetry, (r) => {
 .qbtn { border: none; background: none; cursor: pointer; font-size: 13px; padding: 1px 4px; border-radius: 3px; color: var(--muted); }
 .qbtn:hover { background: #ddd6fe; color: #4f46e5; }
 .qdel:hover { background: #fee2e2; color: #ef4444; }
+
+/* 搜索跳转高亮闪烁 */
+.highlight-flash {
+  animation: flash-highlight 2s ease-out;
+  border-radius: 8px;
+}
+@keyframes flash-highlight {
+  0% { background-color: rgba(79, 70, 229, 0.2); }
+  50% { background-color: rgba(79, 70, 229, 0.08); }
+  100% { background-color: transparent; }
+}
 </style>

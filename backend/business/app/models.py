@@ -25,7 +25,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), default="")
     role: Mapped[str] = mapped_column(String(16), default="user")  # user | admin | super_admin
     plan: Mapped[str] = mapped_column(String(16), default="free")  # 收费预留
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
 
 
 class Project(Base):
@@ -36,7 +36,7 @@ class Project(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, index=True)
     name: Mapped[str] = mapped_column(String(128), default="未命名项目")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
@@ -50,7 +50,7 @@ class Project(Base):
     # 项目级 System Prompt(动态积累: 每次对话后 LLM 提取关键信息追加)
     system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # 建站状态: draft → planning → planned → building → built
-    status: Mapped[str] = mapped_column(String(20), default="draft", server_default="draft")
+    status: Mapped[str] = mapped_column(String(20), default="draft", server_default="draft", index=True)
     # 需求文档 JSON(requirement_agent 产出)
     requirement_doc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
@@ -75,7 +75,7 @@ class Conversation(Base):
     # JSON: {"plan":{...}, "html":"...", "attempt":0, "messages":[...]}
     progress_pct: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # 0 ~ 100
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
@@ -90,11 +90,11 @@ class Message(Base):
     conversation_id: Mapped[int] = mapped_column(Integer, index=True)
     role: Mapped[str] = mapped_column(String(16), default="user")  # user | assistant
     content: Mapped[str] = mapped_column(MEDIUMTEXT)  # 16MB, 建站产物可能很大
-    model_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    model_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     # 链路 id:同一 trace_id 的多次(重连/续传)SSE 落库据此幂等 —— 用户消息只插一次,
     # assistant 消息按 trace_id upsert,避免刷新/重连导致重复行(§15.3 / 重连机制)。
     trace_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
 
 
 # ---------- 对话追踪 / 反馈 / 用量(③-a · 文档 §3.13) ----------
@@ -129,7 +129,7 @@ class TraceEvent(Base):
     event_type: Mapped[str] = mapped_column(String(16))  # node|think|plan|token|error|done|aborted|degraded
     stage: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON 字符串
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
 
 
 class Feedback(Base):
@@ -146,7 +146,7 @@ class Feedback(Base):
     # 6 维细分(气泡内多维度星级): {"correctness": int(1-10), ..., "safety": int}
     # 缺省为 None(旧评价 / 未展开评价)
     dimensions: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
 
 
 class QcScore(Base):
@@ -165,7 +165,7 @@ class QcScore(Base):
     needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
     safety_risk: Mapped[str] = mapped_column(String(16), default="low")
     partial: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
 
 
 class UsageLog(Base):
@@ -181,7 +181,7 @@ class UsageLog(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost: Mapped[float] = mapped_column(default=0.0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
 
 
 class Artifact(Base):
@@ -203,4 +203,4 @@ class Artifact(Base):
     preview_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     download_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="uploading")  # uploading | done | failed
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())

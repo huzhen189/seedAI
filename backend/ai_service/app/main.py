@@ -85,8 +85,13 @@ app = FastAPI(title="SeedAI AI Service", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # M0 内网,生产收紧
-    allow_methods=["*"],
+    allow_origins=[
+        # 仅业务服务 + 本地开发可访问; 公网不应直连 AI 服务
+        "http://localhost:7101",
+        "http://127.0.0.1:7101",
+        "http://business:7101",
+    ],
+    allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
 
@@ -106,6 +111,9 @@ class GenerateReq(BaseModel):
     confirmed: bool = False             # 二次确认已通过(安全 confirm 后由前端带此标记重发)
     confirmed_subtasks: list[str] = []   # 多意图编排: 用户已确认的中风险子任务 id 列表
     version: int | None = None           # 产物版本号(business 侧按项目 artifact 计数算出, 用于 COS 版本化)
+    checkpoint: dict | None = None       # 断点续跑数据(business 侧从 Redis/MySQL 注入, 透传至技能 handler)
+    resume_mode: str = "resume"          # 续跑模式: resume(默认) / correct(修正模式)
+    site_generated: bool = False         # 对话是否已生成过站点(business 侧捕获 preview 后置位, 用于迭代意图纠偏)
 
 
 @app.get("/health")
@@ -192,6 +200,9 @@ async def generate(req: GenerateReq, after: str | None = None):
             "confirmed": req.confirmed,
             "confirmed_subtasks": req.confirmed_subtasks,
             "version": req.version,             # 产物版本号(透传至 _deliver 做 COS key)
+            "checkpoint": req.checkpoint,       # 断点续跑(透传至 Worker → run_skill → handler)
+            "resume_mode": req.resume_mode,     # 续跑模式
+            "site_generated": req.site_generated,  # 站已生成(透传至意图分类, 迭代纠偏)
         }
         await q.enqueue(job)
         logger.info("[2/3] 新任务入队 trace=%s queue=%s", trace_id, type(q).__name__)

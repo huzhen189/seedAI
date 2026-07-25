@@ -96,7 +96,7 @@ def _renew_access_token(response: Response, user: CurrentUser) -> str:
     return new_token
 
 
-def get_current_user(
+async def get_current_user(
     request: Request,
     response: Response,
     creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
@@ -115,9 +115,21 @@ def get_current_user(
         payload = decode_token(token)
         if payload.get("type") != "access":
             raise ValueError("not an access token")
-        user = CurrentUser(int(payload["sub"]), payload.get("role", "user"))
-        # 滑动过期(产品需求): 每次有效操作都重新签发 token, 刷新过期时间,
-        # 双通道回传(Set-Cookie + X-Access-Token), 活跃用户不会断线。
+        user_id = int(payload["sub"])
+        user = CurrentUser(user_id, payload.get("role", "user"))
+        # Token 黑名单: 若修改过密码, 密码修改前的 token 全部失效
+        from .cache import cache_get
+        try:
+            pwd_changed_ts = await cache_get(f"pwd_changed:{user_id}")
+            if pwd_changed_ts:
+                ts = float(pwd_changed_ts)
+                if payload.get("iat", 0) < ts:
+                    raise ValueError("token issued before password change")
+        except ValueError:
+            raise
+        except Exception:
+            pass  # Redis 不可用 → fail-open (不过度保护)
+        # 滑动过期: 每次有效操作都重新签发 token, 双通道回传
         _renew_access_token(response, user)
         return user
     except Exception:

@@ -23,6 +23,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    command: redis-server --appendonly yes --save 900 1 --save 300 10
     volumes:
       - redis_data:/data
     networks: [seed-net]

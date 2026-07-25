@@ -155,6 +155,17 @@
       "description": "代码评审、审查实现、给出改进建议",
       "examples": ["帮我代码评审", "审查一下这段代码", "做个review", "帮我review", "看看代码有没有问题"],
       "required_slots": ["target"]
+    },
+    {
+      "id": "manage_delete",
+      "level1": "manage",
+      "level2": "delete",
+      "skill": "agent_delete",
+      "category": "manage",
+      "title": "删除产物",
+      "description": "删除项目内的生成产物文件（全部或单个），需二次确认",
+      "examples": ["删除所有生成物", "删除index.html", "删了这个文件", "清空产物"],
+      "required_slots": []
     }
   ]
 }

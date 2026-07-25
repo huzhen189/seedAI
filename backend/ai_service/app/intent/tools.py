@@ -20,13 +20,15 @@ INTENT_SKILL_MAP: dict[tuple[str, str], str] = {
     ("chat", "design"): "agent_design",
     # Build 方向 → Agent
     ("build", "requirement"): "agent_requirement",
-    ("build", "site"): "agent_generate_site",   # 完整站生成(多 Agent 管线)
+    ("build", "site"): "agent_generate_site",
     ("build", "page"): "agent_build",
     ("build", "modify"): "agent_build",
     ("build", "game"): "agent_build",
-    ("build", "doc"): "agent_doc",              # 文档/README 生成
+    ("build", "doc"): "agent_doc",
     ("build", "fix"): "agent_review",
     ("build", "review"): "agent_review",
+    # Manage 方向 → Agent
+    ("manage", "delete"): "agent_delete",
 }
 
 

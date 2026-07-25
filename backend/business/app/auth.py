@@ -167,6 +167,13 @@ async def update_me(req: UpdateMeReq, user=Depends(get_current_user), db=Depends
         u.password_hash = hash_password(req.new_password)
         await db.commit()
         await db.refresh(u)
+        # Token 黑名单: 记录密码修改时间, 之前签发的 token 全部失效
+        from .cache import cache_set
+        try:
+            import time
+            await cache_set(f"pwd_changed:{u.id}", str(time.time()), ttl=86400 * 7)
+        except Exception:
+            pass  # Redis 不可用不阻断密码修改
 
     # 普通字段走 Repo update(自动 Redis 缓存)
     u = await user_repo.update_profile(

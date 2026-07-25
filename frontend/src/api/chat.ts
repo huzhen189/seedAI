@@ -148,38 +148,30 @@ export function startChat(opts: StartChatOptions): EventSource {
   // 服务端命名 error 事件带 data;网络层错误无 data。两者都关闭,不重连(避免重复生成)。
   es.addEventListener('error', (e) => {
     const me = e as MessageEvent
-    console.log('[SSE] 收到 error data=%s', me.data ? String(me.data).slice(0, 100) : '(无)')
     if (me.data) {
+      // 服务端错误: 关闭并提示(仅在确有 data 时记录, 避免网络抖动重连刷屏)
+      console.log('[SSE] 收到 error data=%s', String(me.data).slice(0, 100))
       const d = safeParse(me.data)
       const msg = String(d.message || me.data)
       const code = String(d.code || '')
-      // 按后端下发的错误码给出明确提示,而非笼统“连接中断”。
       if (code === 'UPSTREAM_ERROR') {
         opts.cb.onError?.('AI 服务暂时不可用，请稍后重试')
       } else if (code === 'RATE_LIMITED') {
         opts.cb.onError?.('请求过于频繁，请稍后再试')
       } else if (code === 'AUTH_REQUIRED') {
-        // 鉴权失败:主动弹出登录框。
         notifyAuthRequired()
         opts.cb.onError?.('登录已失效，请重新登录')
       } else if (
-        /missing authentication|not authenticated|未登录|invalid or expired token|^\s*401\b/i.test(
-          msg,
-        )
+        /missing authentication|not authenticated|未登录|invalid or expired token|^\s*401\b/i.test(msg)
       ) {
-        // 兜底:无 code 但文案为鉴权失败。
         notifyAuthRequired()
         opts.cb.onError?.('登录已失效，请重新登录')
       } else {
-        // 其他服务端错误:显示后端给出的 message(默认也给出可读文案)。
         opts.cb.onError?.(msg || '服务异常，请稍后重试')
       }
-    } else {
-      // 无 data:多为网络中断(连接被重置/服务不可达);EventSource 对
-      // 非 2xx 也会以无 data error 触发,故提示“检查网络或重新登录”。
-      opts.cb.onError?.('连接中断，请检查网络或重新登录')
+      es.close()
     }
-    es.close()
+    // 无 data: 网络抖动 → EventSource 会自动重连, 静默不干预(避免日志刷屏)
   })
 
   return es
