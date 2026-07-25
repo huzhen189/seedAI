@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from ..core.models import SubTask
 from ..providers import get_chat_model, resolve_fallback_order
 from ..registry import SkillRegistry
-from ..analytics import record_intent_classify
+from ..analytics import record_intent_classify, record_safety, record_llm_call
 from ..config import settings
 from .catalog import catalog_for_llm, get_intent, skill_whitelist
 from .common import (
@@ -131,6 +131,7 @@ async def _llm_rule(
     order = resolve_fallback_order(model_id)
     last_e: Exception | None = None
     for mid in order:
+        t0m = time.monotonic()  # 单次 LLM 终判耗时(用于 Provider 统计)
         try:
             chat = get_chat_model(mid, streaming=False)
             resp = await chat.ainvoke([
@@ -140,6 +141,15 @@ async def _llm_rule(
                     project_status=project_status, has_requirement_doc=has_requirement_doc,
                     prior_intent_id=prior_intent_id, collected=collected)},
             ])
+            # 提取 Token 用量(OpenAI 兼容协议 response_metadata.usage), 缺省为 0
+            usage = getattr(resp, "response_metadata", {}) or {}
+            usage = usage.get("usage") or {}
+            tin = int(usage.get("prompt_tokens", 0) or 0)
+            tout = int(usage.get("completion_tokens", 0) or 0)
+            await record_llm_call(
+                mid, True, (time.monotonic() - t0m) * 1000,
+                tokens_in=tin, tokens_out=tout,
+            )
             raw = (resp.content or "").strip()
             logger.info("[级联] LLM终判 model=%s raw=%.200s", mid, raw)
             m = re.search(r"\{.*\}", raw, re.DOTALL)
@@ -167,6 +177,11 @@ async def _llm_rule(
             )
         except Exception as e:
             last_e = e
+            # Provider 统计: 失败也要记(错误类型归类, 反映模型可用性)
+            await record_llm_call(
+                mid, False, (time.monotonic() - t0m) * 1000,
+                error_type=type(e).__name__,
+            )
             logger.warning("[级联] LLM终判模型%s失败: %s", mid, e)
             continue
     # 全部失败 → 降级: 用 top1 或闲聊
@@ -327,7 +342,8 @@ async def classify_v3(
                        latency_ms=(time.time() - t0) * 1000, tokens_used=0,
                        specialist_routed=intent["skill"], outcome="pending",
                        extra={"source": "superfast"})
-        await record_intent_classify("route", "superfast", (time.time() - t0) * 1000)
+        await record_intent_classify("route", "superfast", (time.time() - t0) * 1000,
+                                      confidence=strong_rule.confidence)
         return _emit_route(
             intent, strong_rule.confidence, decision="route",
             selected_skill=intent["skill"], industry="other",
@@ -352,7 +368,8 @@ async def classify_v3(
                        latency_ms=(time.time() - t0) * 1000, tokens_used=0,
                        specialist_routed="agent_chat", outcome="pending",
                        extra={"source": "novelty"})
-        await record_intent_classify("route", "novelty", (time.time() - t0) * 1000)
+        await record_intent_classify("route", "novelty", (time.time() - t0) * 1000,
+                                      confidence=top_score)
         return _emit_route(
             chat_intent, max(top_score, 0.3), decision="route",
             selected_skill="agent_chat", industry="other", reason="novelty_fallback",
@@ -368,7 +385,7 @@ async def classify_v3(
     except Exception as e:
         logger.warning("[级联] run_safety 异常: %s", e)
     if safety_result.risk_level == "critical":
-        logger.warning("[级联][%s] 安全检查→拦截 reason=%s", req_id, safety_result.block_reason)
+        logger.warning("[级联][%s] 安全检查→拦截 reason=%s risk=%s", req_id, safety_result.block_reason, safety_result.risk_level)
         reset_slots(conversation_id)
         observe_record(request_id=req_id, conversation_id=conversation_id, user_id=user_id,
                        raw_input=current_user_msg, llm_intent="chat/casual",
@@ -376,7 +393,9 @@ async def classify_v3(
                        belief_before=0.0, belief_after=0.0, decision="block",
                        latency_ms=(time.time() - t0) * 1000, tokens_used=0,
                        specialist_routed=None, outcome="blocked")
-        await record_intent_classify("block", "block", (time.time() - t0) * 1000)
+        # 安全网关统计: 记录本次拦截(风险等级 + 原因)
+        await record_safety(safety_result.risk_level, blocked=True, reason=safety_result.block_reason or "critical")
+        await record_intent_classify("block", "block", (time.time() - t0) * 1000, confidence=0.0)
         return _emit_route(
             {"level1": "chat", "level2": "casual"}, 0.0, decision="block",
             selected_skill="agent_chat", industry="other",
@@ -497,5 +516,10 @@ async def classify_v3(
         questions=questions, rounds=new_rounds, reason=ruling.reason, evidence=evidence,
         safety=safety_result, sub_tasks=sub_tasks, split_reason=split_reason, request_id=req_id,
     )
-    await record_intent_classify(result.decision, evidence["source"], (time.time() - t0) * 1000)
+    # 收尾摘要日志: 一条即可复盘整次分类(决策/来源/意图/置信/耗时/子任务数)
+    dur_ms = (time.time() - t0) * 1000
+    logger.info("[级联][%s] 完成 decision=%s source=%s intent=%s/%s conf=%.2f 耗时=%.1fms sub_tasks=%d",
+                req_id, result.decision, evidence["source"], intent["level1"], intent["level2"],
+                conf, dur_ms, len(sub_tasks))
+    await record_intent_classify(result.decision, evidence["source"], dur_ms, confidence=conf)
     return result

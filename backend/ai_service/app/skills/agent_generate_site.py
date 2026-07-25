@@ -34,10 +34,33 @@ from ..intent.common import build_skill_sys
 from ..knowledge.chroma import build_rag_context, save_memory
 from ..registry import register_skill
 from ..scoring import parse_scores, SCORING_DIMENSIONS, needs_review
+from ..analytics import record_reviewer, record_llm_call
 logger = logging.getLogger("ai_service.skills.agent_generate_site")
+
+# 本技能注册名(供统计维度 per-skill 区分; 与 @register_skill 名一致)
+SKILL_NAME = "agent_generate_site"
 
 
 GEN_LOG = logging.getLogger("ai_service.generate")
+
+
+def _review_reason(review: dict) -> str:
+    """把 reviewer 结果归类为一个失败原因标签, 供统计 reason_dist 分布。
+
+    取值: static_html / static_close_tag / parse_fail / llm_fail / llm_unpassed / ok
+    """
+    blob = " ".join(review.get("issues") or []) + " " + (review.get("comment", "") or "")
+    if "评审模型调用失败" in blob:
+        return "llm_fail"
+    if "评审输出异常" in blob or "无法解析" in blob:
+        return "parse_fail"
+    if "html" in blob.lower() and ("根标签" in blob or "缺少" in blob):
+        return "static_html"
+    if "标签未闭合" in blob:
+        return "static_close_tag"
+    if not review.get("passed"):
+        return "llm_unpassed"
+    return "ok"
 
 
 SYS_PLANNER = (
@@ -227,11 +250,17 @@ async def _review(model_id: str, html: str) -> Dict:
                 "issues": ["标签未闭合"], "needs_review": True}
     # LLM 自审(给 JSON 结论)
     try:
+        t0r = time.monotonic()
         out = await asyncio.to_thread(_chat, model_id, SYS_REVIEWER, [{"role": "user", "content": html[:6000]}])
+        await record_llm_call(model_id, True, (time.monotonic() - t0r) * 1000)
         m = re.search(r"\{.*\}", out, re.DOTALL)
         if m:
             data = json.loads(m.group(0))
             scores = parse_scores(data)  # 7 维, 缺失/异常填 0
+            reason = _review_reason({"passed": bool(data.get("passed")), "issues": data.get("issues", []) or [], "comment": data.get("comment", "")})
+            logger.info("[gen] Reviewer 自审 passed=%s reason=%s overall=%.2f",
+                        bool(data.get("passed")), reason,
+                        sum(scores.values()) / max(len(scores), 1))
             return {
                 "passed": bool(data.get("passed")),
                 "comment": data.get("comment", ""),
@@ -240,14 +269,16 @@ async def _review(model_id: str, html: str) -> Dict:
                 "needs_review": (not bool(data.get("passed"))) or needs_review(scores),
             }
         # 输出无 JSON: 不放行, 但也不强制重生成(偶发脏输出), 标记待 QC 复核
-        logger.warning("[gen] Reviewer 输出无解析 JSON, 标记待复核")
+        logger.warning("[gen] Reviewer 输出无解析 JSON, 标记待复核 reason=parse_fail")
         return {"passed": True, "comment": "评审输出无法解析, 已标记待复核",
                 "scores": {"correctness": 5, "completeness": 5, "readability": 5,
                            "compliance": 6, "efficiency": 6, "craft": 5, "safety": 6},
                 "issues": ["评审输出异常"], "needs_review": True}
     except Exception as e:
         # 🔧 C7 修复: 调用失败 → 标记未通过, 触发修复循环 + QC 升级(不再静默 passed=True)
-        logger.warning("[gen] Reviewer LLM 自审失败, 标记未通过待复核: %s", e)
+        await record_llm_call(model_id, False, (time.monotonic() - t0r) * 1000,
+                              error_type=type(e).__name__)
+        logger.warning("[gen] Reviewer LLM 自审失败, 标记未通过待复核 reason=llm_fail: %s", e)
         return {"passed": False, "comment": "评审模型调用失败, 已标记待复核",
                 "scores": {"correctness": 5, "completeness": 5, "readability": 5,
                            "compliance": 6, "efficiency": 6, "craft": 5, "safety": 6},
@@ -533,6 +564,7 @@ async def generate_stream(
             for attempt in range(3):
                 yield ev("node", stage="enter_reviewer", attempt=attempt + 1)
                 review = await _review(model_id, html)
+                await record_reviewer(SKILL_NAME, review, reason=_review_reason(review))
                 GEN_LOG.info("[gen] Reviewer 第%s轮(恢复) trace=%s passed=%s", attempt + 1, trace_id, review["passed"])
                 yield ev("think", stage="reviewer", passed=review["passed"], comment=review["comment"])
                 if review["passed"]: break
@@ -555,6 +587,7 @@ async def generate_stream(
             for a in range(attempt, 3):
                 yield ev("node", stage="enter_reviewer", attempt=a + 1)
                 review = await _review(model_id, html)
+                await record_reviewer(SKILL_NAME, review, reason=_review_reason(review))
                 if review["passed"] or a >= 2:
                     yield ev("think", stage="reviewer", passed=review["passed"], comment=review.get("comment", ""))
                     break
@@ -611,7 +644,14 @@ async def generate_stream(
             planner_msgs.append(
                 {"role": "user", "content": f"【行业设计约束: {industry}】\n{design_hint}"}
             )
-        spec = await asyncio.to_thread(_chat, model_id, build_skill_sys(SYS_PLANNER, project_system_prompt), planner_msgs)
+        t0p = time.monotonic()
+        try:
+            spec = await asyncio.to_thread(_chat, model_id, build_skill_sys(SYS_PLANNER, project_system_prompt), planner_msgs)
+            await record_llm_call(model_id, True, (time.monotonic() - t0p) * 1000)
+        except Exception as e:
+            await record_llm_call(model_id, False, (time.monotonic() - t0p) * 1000,
+                                  error_type=type(e).__name__)
+            raise
         plan = _parse_plan(spec)
         GEN_LOG.info(
             "[gen] Planner 完成 trace=%s title=%s steps=%s",
@@ -680,6 +720,7 @@ async def generate_stream(
         for attempt in range(3):
             yield ev("node", stage="enter_reviewer", attempt=attempt + 1)
             review = await _review(model_id, html)
+            await record_reviewer(SKILL_NAME, review, reason=_review_reason(review))
             GEN_LOG.info(
                 "[gen] Reviewer 第%s轮 trace=%s passed=%s",
                 attempt + 1, trace_id, review["passed"],

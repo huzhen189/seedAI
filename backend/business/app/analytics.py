@@ -226,6 +226,125 @@ async def _zset_percentiles(r, zkey: str) -> dict:
     return {"p50": round(p50, 1), "p90": round(p90, 1), "p99": round(p99, 1), "avg": avg, "samples": count}
 
 
+# AI 核心 v1.2.3 新增统计命名空间(ai:*), 与业务端 an:* 互不冲突, 此处只读聚合供「系统分析」展示。
+AI_SCORING_DIMS = ("correctness", "completeness", "readability", "compliance", "efficiency", "craft", "safety")
+
+
+async def _read_ai_core(r) -> dict:
+    """只读聚合 AI 核心 v1.2.3 的 ai:* 统计(意图/QC/Reviewer/安全/LLM)。
+
+    各子块独立 try/except: 任一块缺失或异常都不影响其余块与整体快照返回。
+    """
+    out: dict = {}
+
+    # 4) 意图识别(cascade 分类)
+    try:
+        it_total = int((await r.hget("ai:intent:total", "count")) or 0)
+        if it_total:
+            out["intent"] = {
+                "total": it_total,
+                "decision_dist": {k: int(v) for k, v in (await r.hgetall("ai:intent:decision") or {}).items()},
+                "source_dist": {k: int(v) for k, v in (await r.hgetall("ai:intent:source") or {}).items()},
+                "success_dist": {k: int(v) for k, v in (await r.hgetall("ai:intent:success") or {}).items()},
+                "confidence": await _zset_percentiles(r, "ai:intent:confidence"),
+                "duration_ms": await _zset_percentiles(r, "ai:intent:duration"),
+            }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics _read_ai_core intent failed: %s", e)
+
+    # 5) 后置 QC 三裁判
+    try:
+        qc_total = int((await r.hget("ai:qc:total", "count")) or 0)
+        if qc_total:
+            needs = int((await r.hget("ai:qc:needs_review", "count")) or 0)
+            partial = int((await r.hget("ai:qc:partial", "count")) or 0)
+            dims = {d: await _zset_percentiles(r, f"ai:qc:dim:{d}") for d in AI_SCORING_DIMS}
+            out["qc"] = {
+                "total": qc_total,
+                "overall": await _zset_percentiles(r, "ai:qc:overall"),
+                "needs_review": needs,
+                "needs_review_rate": round(needs / qc_total, 3),
+                "partial": partial,
+                "partial_rate": round(partial / qc_total, 3),
+                "safety_dist": {k: int(v) for k, v in (await r.hgetall("ai:qc:safety") or {}).items()},
+                "dimensions": dims,
+            }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics _read_ai_core qc failed: %s", e)
+
+    # 6) 生成内 Reviewer 自审
+    try:
+        rev_total = int((await r.hget("ai:rev:total", "count")) or 0)
+        if rev_total:
+            needs = int((await r.hget("ai:rev:needs_review", "count")) or 0)
+            per_skill: dict = {}
+            for sk in await r.keys("ai:rev:skill:*"):
+                name = sk.decode() if isinstance(sk, bytes) else sk
+                name = name.replace("ai:rev:skill:", "")
+                h = {kk: int(vv) for kk, vv in (await r.hgetall(sk) or {}).items()}
+                t = h.get("passed", 0) + h.get("failed", 0)
+                if t > 0:
+                    per_skill[name] = {"passed": h.get("passed", 0), "failed": h.get("failed", 0),
+                                       "total": t, "pass_rate": round(h.get("passed", 0) / t, 3)}
+            out["reviewer"] = {
+                "total": rev_total,
+                "per_skill": per_skill,
+                "needs_review": needs,
+                "needs_review_rate": round(needs / rev_total, 3),
+                "reason_dist": {k: int(v) for k, v in (await r.hgetall("ai:rev:reason") or {}).items()},
+                "dimensions": {d: await _zset_percentiles(r, f"ai:rev:dim:{d}") for d in AI_SCORING_DIMS},
+            }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics _read_ai_core reviewer failed: %s", e)
+
+    # 7) 安全网关
+    try:
+        safe_total = int((await r.hget("ai:safe:total", "count")) or 0)
+        if safe_total:
+            out["safety"] = {
+                "total": safe_total,
+                "risk_dist": {k: int(v) for k, v in (await r.hgetall("ai:safe:risk") or {}).items()},
+                "outcome_dist": {k: int(v) for k, v in (await r.hgetall("ai:safe:outcome") or {}).items()},
+                "reason_dist": {k: int(v) for k, v in (await r.hgetall("ai:safe:reason") or {}).items()},
+            }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics _read_ai_core safety failed: %s", e)
+
+    # 8) LLM Provider
+    try:
+        llm_total = int((await r.hget("ai:llm:total", "count")) or 0)
+        if llm_total:
+            models: dict = {}
+            for k in await r.keys("ai:llm:model:*"):
+                key = k.decode() if isinstance(k, bytes) else k
+                m = key.replace("ai:llm:model:", "")
+                if ":" in m:
+                    base = m.split(":", 1)[0]
+                    entry = models.setdefault(base, {"total": 0, "ok": 0, "fail": 0,
+                                                     "err_dist": {}, "duration_ms": {}, "tokens_in": 0, "tokens_out": 0})
+                    if m.endswith(":duration"):
+                        entry["duration_ms"] = await _zset_percentiles(r, key)
+                    elif m.endswith(":tok_in"):
+                        entry["tokens_in"] = int((await r.hget(key, "total")) or 0)
+                    elif m.endswith(":tok_out"):
+                        entry["tokens_out"] = int((await r.hget(key, "total")) or 0)
+                    elif m.endswith(":err"):
+                        entry["err_dist"] = {kk: int(vv) for kk, vv in (await r.hgetall(key) or {}).items()}
+                    continue
+                h = {kk: int(vv) for kk, vv in (await r.hgetall(key) or {}).items()}
+                entry = models.setdefault(m, {"total": 0, "ok": 0, "fail": 0,
+                                              "err_dist": {}, "duration_ms": {}, "tokens_in": 0, "tokens_out": 0})
+                entry["total"] = h.get("total", 0)
+                entry["ok"] = h.get("ok", 0)
+                entry["fail"] = h.get("fail", 0)
+                entry["success_rate"] = round(h.get("ok", 0) / max(h.get("total", 1), 1), 3)
+            out["llm"] = {"total": llm_total, "models": models}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics _read_ai_core llm failed: %s", e)
+
+    return out
+
+
 async def analytics_snapshot() -> dict:
     try:
         r = await get_redis()
@@ -502,6 +621,8 @@ async def analytics_snapshot() -> dict:
                 for k, v in ((await r.hgetall("an:v090:feature")) or {}).items()
             },
             "v090_summary_fallback": int((await r.hget("an:v090:summary_fallback", "count")) or 0),
+            # v1.2.3 新增: AI 核心原生统计(意图/QC/Reviewer/安全/LLM), 独立 ai:* 命名空间
+            "ai_core": await _read_ai_core(r),
         }
     except Exception as e:
         logger.warning("analytics_snapshot failed: %s", e)

@@ -35,6 +35,7 @@ from .config import settings
 from .scoring import (
     SCORING_DIMENSIONS, LLM_SCORING_DIMS, parse_scores,
 )
+from .analytics import record_qc, record_llm_call
 
 logger = logging.getLogger("ai_service.qc")
 
@@ -92,7 +93,11 @@ def _parse_judge_output(raw: str) -> Optional[Dict[str, Any]]:
 
 
 async def _judge_one(model_id: str, user_text: str, assistant_text: str) -> Dict[str, Any]:
-    """单个裁判打分(非流式 ainvoke)。失败返回空维度(标记异常, 不阻断整体)。"""
+    """单个裁判打分(非流式 ainvoke)。失败返回空维度(标记异常, 不阻断整体)。
+
+    同时写入 LLM Provider 统计(耗时 / 成功 / Token 用量 / 错误类型)。
+    """
+    t0 = time.monotonic()
     try:
         chat = get_chat_model(model_id, streaming=False)
         msgs = [
@@ -101,14 +106,25 @@ async def _judge_one(model_id: str, user_text: str, assistant_text: str) -> Dict
                 user_text=user_text[:4000], assistant_text=assistant_text[:8000])},
         ]
         resp = await chat.ainvoke(msgs)
+        # 提取 Token 用量(OpenAI 兼容协议), 缺省 0
+        meta = getattr(resp, "response_metadata", {}) or {}
+        usage = meta.get("usage") or {}
+        tin = int(usage.get("prompt_tokens", 0) or 0)
+        tout = int(usage.get("completion_tokens", 0) or 0)
+        await record_llm_call(model_id, True, (time.monotonic() - t0) * 1000,
+                              tokens_in=tin, tokens_out=tout)
         raw = resp.content if hasattr(resp, "content") else str(resp)
         parsed = _parse_judge_output(raw)
         if parsed is None:
-            logger.warning("QC 评委 %s 输出无法解析", model_id)
+            logger.warning("QC 评委 %s 输出无法解析(标记无效)", model_id)
             return {"model": model_id, "valid": False,
                     "dims": {d: 0 for d in QC_DIMENSIONS}, "comment": "解析失败"}
+        logger.info("[QC] 评委 %s 打分 valid=True overall=%.2f", model_id,
+                    sum(parsed.get(d, 0) for d in QC_DIMENSIONS) / max(len(QC_DIMENSIONS), 1))
         return {"model": model_id, "valid": True, "dims": parsed, "comment": parsed.get("comment", "")}
     except Exception as e:  # noqa: BLE001
+        await record_llm_call(model_id, False, (time.monotonic() - t0) * 1000,
+                              error_type=type(e).__name__)
         logger.warning("QC 评委 %s 调用失败: %s", model_id, e)
         return {"model": model_id, "valid": False,
                 "dims": {d: 0 for d in QC_DIMENSIONS}, "comment": f"调用失败:{type(e).__name__}"}
@@ -196,7 +212,17 @@ async def run_qc(
         _judge_one(mid, user_text, assistant_text) for mid in QC_JUDGES
     ])
     result = _aggregate(judges, safety_risk=safety_risk)
-    logger.info("[QC] 评分完成 耗时=%.2fs overall=%.2f needs_review=%s partial=%s",
-                time.monotonic() - t0, result.get("overall", 0),
-                result.get("needs_review"), result.get("partial"))
+    dur = time.monotonic() - t0
+    # 逐维方差日志: 方差大 = 评委分歧大, 直接定位需复核的维度
+    var_parts = " ".join(
+        f"{d}={result['dimensions'][d]['variance']:.1f}" for d in QC_DIMENSIONS
+    )
+    logger.info("[QC] 评分完成 耗时=%.2fs overall=%.2f needs_review=%s partial=%s | 方差 %s",
+                dur, result.get("overall", 0), result.get("needs_review"),
+                result.get("partial"), var_parts)
+    # 写入后置 QC 统计(整体/7维/复核率/掉线率/安全风险), 失败仅告警
+    try:
+        await record_qc(result, dur * 1000)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[QC] 统计写入失败(忽略): %s", e)
     return result

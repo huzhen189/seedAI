@@ -738,6 +738,13 @@ async def worker_loop(concurrency: int = 1):
                         # 编排场景: 仅当任一子任务 reviewer 标记 needs_review 才跑三裁判(省 LLM 成本)。
                         qc_assistant_text = "".join(qc_assistant_buf)
                         qc_result = None
+                        # 决策日志: 编排场景 QC 仅当子任务 reviewer 标 needs_review 才触发
+                        if not qc_assistant_text.strip() or done_event is None:
+                            logger.debug("[Worker] [6/6] 编排 QC 跳过 trace=%s (无合并文本或未收到 done)", trace_id)
+                        elif review_needs:
+                            logger.info("[Worker] [6/6] 编排 QC 触发 trace=%s 原因=子任务reviewer待复核", trace_id)
+                        else:
+                            logger.debug("[Worker] [6/6] 编排 QC 跳过 trace=%s 原因=无子任务待复核", trace_id)
                         if qc_assistant_text.strip() and done_event is not None and review_needs:
                             try:
                                 from ..qc import run_qc
@@ -807,6 +814,15 @@ async def worker_loop(concurrency: int = 1):
                 qc_assistant_text = "".join(qc_assistant_buf)
                 qc_result = None
                 force_qc = skill_name == "agent_chat"
+                # 决策日志: 明确 QC 是否触发 + 原因(可追溯, 便于复盘「为什么这次没跑三裁判」)
+                if not qc_assistant_text.strip() or done_event is None:
+                    logger.debug("[Worker] [6/6] QC 跳过 trace=%s (无助手文本或未收到 done)", trace_id)
+                elif review_needs:
+                    logger.info("[Worker] [6/6] QC 触发 trace=%s 原因=reviewer待复核", trace_id)
+                elif force_qc:
+                    logger.info("[Worker] [6/6] QC 触发 trace=%s 原因=闲聊强制兜底", trace_id)
+                else:
+                    logger.debug("[Worker] [6/6] QC 跳过 trace=%s 原因=reviewer已通过(按需不复核)", trace_id)
                 if qc_assistant_text.strip() and done_event is not None and (review_needs or force_qc):
                     try:
                         from ..qc import run_qc
