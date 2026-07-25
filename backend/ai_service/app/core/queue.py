@@ -55,6 +55,123 @@ async def _commit_after_done(trace_id: str, skill_name: str, user_text: str) -> 
             logger.warning("[Worker] §8 git 提交失败(跳过) trace=%s: %s", trace_id, e)
 
 
+async def _qc_fix_loop(
+    trace_id: str,
+    q,  # QueueBackend 发布通道(用于回传重评分进度事件)
+    qc_user_text: str,
+    qc_assistant_text: str,
+    model_id: str,
+    project_constraints: Optional[list],
+    version: Optional[int],
+    user_id: Optional[int],
+    project_id: Optional[int],
+    skill_name: str,
+    is_cancelled,
+) -> tuple[Optional[dict], bool, int]:
+    """质量闭环(v1.2.4): 后置 QC 标记 needs_review → 自动 agent_review 修复 → 重打分。
+
+    仅对建站类技能(agent_build / agent_generate_site)生效; 闲聊(agent_chat)走自有 Phase D 重试,
+    编排(orchestrator)多文件站点风险高, 暂不自动改写。流程(有界 qc_fix_max_rounds 轮, 默认 2):
+      1. 以当前代码作为 user 消息调用 agent_review_handler, 取 fixed_code;
+      2. 重写盘(ARTIFACT_DIR/anon/<trace_id>/) + 重传 COS(同版本 key 覆盖)
+         → 后续 _commit_after_done 与预览均为修复版, 用户最终拿到改进产物;
+      3. 对 fixed_code 重跑 run_qc; 收敛(needs_review=False)即停止, 否则继续(直至轮次上限)。
+    返回 (final_qc_result, fix_applied, rounds)。任意异常仅告警并回退原始 qc_result, 绝不阻断主流程。
+    """
+    if not settings.qc_fix_enabled:
+        return None, False, 0
+    if skill_name not in ("agent_build", "agent_generate_site"):
+        return None, False, 0
+    if not qc_assistant_text or not qc_assistant_text.strip():
+        return None, False, 0
+
+    from ..skills.agent_review import agent_review_handler
+    from ..tools.cos_upload import cos_upload
+    from ..skills.agent_generate_site import _parse_multi_files
+
+    art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
+    ver_seg = f"v{version}" if version else (trace_id or "site")
+    uid = user_id if user_id is not None else "anon"
+    pid = project_id if project_id is not None else "anon"
+    base_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/{uid}/{pid}/{ver_seg}"
+    site_root = art_dir / "anon" / (trace_id or "site")
+
+    current = qc_assistant_text
+    final_result: Optional[dict] = None
+    fix_applied = False
+    rounds = 0
+    max_rounds = max(1, settings.qc_fix_max_rounds)
+    try:
+        for rnd in range(max_rounds):
+            if is_cancelled and await is_cancelled():
+                logger.info("[质量闭环] 用户取消, 终止修复 trace=%s", trace_id)
+                break
+            # 1) agent_review 取 fixed_code
+            review_msgs = [{"role": "user", "content": current}]
+            fixed_code = None
+            try:
+                async for rev_ev in agent_review_handler(
+                    model_id, review_msgs, trace_id=trace_id, is_cancelled=is_cancelled
+                ):
+                    d = rev_ev.get("data") or {}
+                    if rev_ev.get("event") == "node" and d.get("fixed_code"):
+                        fixed_code = d["fixed_code"]
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[质量闭环] agent_review 异常(跳过本轮) trace=%s: %s", trace_id, e)
+                break
+            if not fixed_code or not fixed_code.strip():
+                logger.info("[质量闭环] 无 fixed_code, 终止修复 trace=%s round=%d", trace_id, rnd + 1)
+                break
+            # 2) 重写盘 + 重传 COS(同版本 key 覆盖)
+            try:
+                for fname, content in _parse_multi_files(fixed_code).items():
+                    fpath = site_root / fname
+                    fpath.parent.mkdir(parents=True, exist_ok=True)
+                    fpath.write_text(content, encoding="utf-8")
+                    try:
+                        cos_upload(str(fpath), f"{base_key}/{fname}")
+                    except Exception as ce:  # noqa: BLE001
+                        logger.debug("[质量闭环] COS 重传失败(忽略) %s: %s", f"{base_key}/{fname}", ce)
+            except Exception as we:  # noqa: BLE001
+                logger.warning("[质量闭环] 写盘失败(忽略本轮) trace=%s: %s", trace_id, we)
+            fix_applied = True
+            rounds = rnd + 1
+            # 3) 重跑 QC
+            try:
+                from ..qc import run_qc
+                from .safety import run_safety
+                safety_risk = run_safety(review_msgs, project_constraints).risk_level
+                qc2 = await asyncio.wait_for(
+                    run_qc(qc_user_text, fixed_code,
+                           project_constraints=project_constraints, safety_risk=safety_risk),
+                    timeout=settings.qc_timeout_seconds,
+                )
+                final_result = qc2
+                if qc2.get("needs_review"):
+                    # 未收敛: 回传本轮重评分(供前端展示进度), 继续修复
+                    prog = dict(qc2)
+                    prog["fix_round"] = rounds
+                    prog["fix_applied"] = True
+                    try:
+                        await q.publish(trace_id, {"event": "qc", "data": prog})
+                    except Exception:  # noqa: BLE001
+                        pass
+                    current = fixed_code
+                    logger.info("[质量闭环] 仍未通过, 继续修复 trace=%s round=%d overall=%.2f",
+                               trace_id, rounds, qc2.get("overall", 0))
+                else:
+                    logger.info("[质量闭环] 修复收敛 trace=%s round=%d overall=%.2f",
+                               trace_id, rounds, qc2.get("overall", 0))
+                    break
+            except Exception as qe:  # noqa: BLE001
+                logger.warning("[质量闭环] 重打分失败(终止) trace=%s: %s", trace_id, qe)
+                break
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[质量闭环] 异常(回退原 QC) trace=%s: %s", trace_id, e)
+        return None, fix_applied, rounds
+    return final_result, fix_applied, rounds
+
+
 async def _refine_assistant_dialog(raw_text: str, model_id: str = "deepseek") -> str:
     """L2 对话精炼(v0.9.0): done 后 LLM 去冗余→保留完整信息→结构清晰。失败返回原文。"""
     if not raw_text.strip():
@@ -838,6 +955,25 @@ async def worker_loop(concurrency: int = 1):
                         logger.info("[Worker] [6/6] QC 完成 trace=%s overall=%.2f needs_review=%s partial=%s",
                                    trace_id, qc_result.get("overall", 0),
                                    qc_result.get("needs_review"), qc_result.get("partial"))
+                        # ── 质量闭环(v1.2.4): needs_review → agent_review → 重打分 ──
+                        # 仅建站类技能(agent_build/agent_generate_site)生效; 闭环内重写盘+重传COS,
+                        # 后续 _commit_after_done 与预览均为修复版。闲聊走自有 Phase D, 不在此触发。
+                        if qc_result.get("needs_review"):
+                            try:
+                                fixed, fix_applied, fix_rounds = await _qc_fix_loop(
+                                    trace_id, q, qc_user_text, qc_assistant_text, model_id,
+                                    project_constraints, version, user_id, project_id,
+                                    skill_name, _cancelled,
+                                )
+                                if fix_applied and fixed is not None:
+                                    qc_result = dict(fixed)
+                                    qc_result["fix_applied"] = True
+                                    qc_result["fix_rounds"] = fix_rounds
+                                    await q.publish(trace_id, {"event": "qc", "data": qc_result})
+                                    logger.info("[质量闭环] 自动修复完成 trace=%s rounds=%d overall=%.2f",
+                                               trace_id, fix_rounds, qc_result.get("overall", 0))
+                            except Exception as _fe:  # noqa: BLE001
+                                logger.warning("[质量闭环] 触发异常(忽略) trace=%s: %s", trace_id, _fe)
                     except Exception as qc_err:  # noqa: BLE001
                         logger.warning("[Worker] [6/6] QC 执行失败(已跳过, 不影响主流程) trace=%s: %s",
                                        trace_id, qc_err)

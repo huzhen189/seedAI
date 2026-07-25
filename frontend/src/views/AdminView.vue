@@ -276,7 +276,16 @@ interface OrchestrationStat {
     duration_ms: LatencyBucket
   }
 }
+interface AiCoreIntent { total: number; decision_dist: Record<string, number>; source_dist: Record<string, number>; success_dist: Record<string, number>; confidence: LatencyBucket; duration_ms: LatencyBucket }
+interface AiCoreQc { total: number; overall: LatencyBucket; needs_review: number; needs_review_rate: number; partial: number; partial_rate: number; safety_dist: Record<string, number>; dimensions: Record<string, LatencyBucket> }
+interface AiCoreReviewerSkill { passed: number; failed: number; total: number; pass_rate: number }
+interface AiCoreReviewer { total: number; per_skill: Record<string, AiCoreReviewerSkill>; needs_review: number; needs_review_rate: number; reason_dist: Record<string, number>; dimensions: Record<string, LatencyBucket> }
+interface AiCoreSafety { total: number; risk_dist: Record<string, number>; outcome_dist: Record<string, number>; reason_dist: Record<string, number> }
+interface AiCoreLlmModel { total: number; ok: number; fail: number; success_rate: number; err_dist: Record<string, number>; duration_ms: LatencyBucket; tokens_in: number; tokens_out: number }
+interface AiCoreLlm { total: number; models: Record<string, AiCoreLlmModel> }
+interface AiCore { intent?: AiCoreIntent; qc?: AiCoreQc; reviewer?: AiCoreReviewer; safety?: AiCoreSafety; llm?: AiCoreLlm }
 interface AnalyticsSnapshot {
+  ai_core?: AiCore
   intent_stats: Record<string, IntentStat>
   skill_outcomes: Record<string, SkillStat>
   gen_stages: Record<string, LatencyBucket>
@@ -358,6 +367,37 @@ function decisionLabel(d: string) {
     route: '直接路由', fallback: '降级兜底', unsupported: '不支持',
   }
   return m[d] || d
+}
+
+function intentSourceLabel(s: string): string {
+  const m: Record<string, string> = { selection: '规则选中', reset: '重置', superfast: '强信号直路由', novelty: '新颖兜底', llm_ruling: 'LLM 终判', block: '安全拦截' }
+  return m[s] || s
+}
+function reviewReasonLabel(r: string): string {
+  const m: Record<string, string> = { static_html: '缺根标签', static_close_tag: '标签未闭合', parse_fail: '解析失败', llm_fail: '模型失败', llm_unpassed: '判定未过', ok: '通过' }
+  return m[r] || r
+}
+function safetyRiskLabel(r: string): string {
+  const m: Record<string, string> = { low: '低', medium: '中', high: '高', critical: '致命' }
+  return m[r] || r
+}
+function safetyOutcomeLabel(o: string): string {
+  const m: Record<string, string> = { blocked: '拦截', pass: '放行' }
+  return m[o] || o
+}
+function ratePct(dist?: Record<string, number>): string {
+  if (!dist) return '-'
+  const ok = dist.ok || 0
+  const fail = dist.fail || 0
+  const t = ok + fail
+  return t ? (ok / t * 100).toFixed(0) + '%' : '-'
+}
+function hasLlmErr(models?: Record<string, AiCoreLlmModel>): boolean {
+  if (!models) return false
+  return Object.values(models).some((m) => m.err_dist && Object.keys(m.err_dist).length > 0)
+}
+function dimAvg(v?: LatencyBucket): string {
+  return v && v.avg != null ? v.avg.toFixed(1) : '-'
 }
 
 onMounted(() => {
@@ -836,6 +876,89 @@ onUnmounted(() => {
             安全风险分布: <span v-for="(v, k) in al.qc.safety_dist" :key="k">{{ k }} {{ v }} · </span>
           </p>
         </div>
+        <!-- AI 核心原生统计(v1.2.3, ai: 命名空间) -->
+        <template v-if="al.ai_core">
+          <div class="block">
+            <h4>AI 核心 · 原生统计 (v1.2.3)</h4>
+            <p class="muted">以下维度由 AI 核心独立采集(ai: 命名空间), 与业务端统计互补, 反映模型与质量内情。</p>
+          </div>
+          <!-- 意图识别 -->
+          <div v-if="al.ai_core.intent && al.ai_core.intent.total" class="block">
+            <h4>意图识别（AI 核心）</h4>
+            <div class="card-row">
+              <div class="card"><div class="k">分类总次数</div><div class="v">{{ al.ai_core.intent.total }}</div></div>
+              <div class="card"><div class="k">成功率</div><div class="v">{{ ratePct(al.ai_core.intent.success_dist) }}</div></div>
+              <div class="card"><div class="k">平均置信度</div><div class="v">{{ al.ai_core.intent.confidence?.avg != null ? al.ai_core.intent.confidence.avg.toFixed(2) : '-' }}</div></div>
+              <div class="card"><div class="k">平均耗时</div><div class="v">{{ fmtMs(al.ai_core.intent.duration_ms?.avg ?? 0) }}</div></div>
+            </div>
+            <h5>决策分布</h5>
+            <div class="muted"><span v-for="(v, k) in al.ai_core.intent.decision_dist" :key="k" class="pill">{{ decisionLabel(k) }} {{ v }}</span></div>
+            <h5>来源分布</h5>
+            <div class="muted"><span v-for="(v, k) in al.ai_core.intent.source_dist" :key="k" class="pill">{{ intentSourceLabel(k) }} {{ v }}</span></div>
+          </div>
+          <!-- 后置 QC -->
+          <div v-if="al.ai_core.qc && al.ai_core.qc.total" class="block">
+            <h4>后置 QC 三裁判（AI 核心）</h4>
+            <div class="card-row">
+              <div class="card"><div class="k">样本数</div><div class="v">{{ al.ai_core.qc.total }}</div></div>
+              <div class="card"><div class="k">整体均分</div><div class="v">{{ al.ai_core.qc.overall?.avg != null ? al.ai_core.qc.overall.avg.toFixed(2) : '-' }}</div></div>
+              <div class="card"><div class="k">需复核率</div><div class="v">{{ (al.ai_core.qc.needs_review_rate * 100).toFixed(1) }}%</div></div>
+              <div class="card"><div class="k">评委掉线率</div><div class="v">{{ (al.ai_core.qc.partial_rate * 100).toFixed(1) }}%</div></div>
+            </div>
+            <table class="atable"><thead><tr><th>维度</th><th>均分</th></tr></thead>
+              <tbody><tr v-for="(v, k) in al.ai_core.qc.dimensions" :key="k"><td>{{ qcLabel(k) }}</td><td>{{ dimAvg(v) }}</td></tr></tbody>
+            </table>
+            <p v-if="al.ai_core.qc.safety_dist && Object.keys(al.ai_core.qc.safety_dist).length" class="muted">安全风险: <span v-for="(v, k) in al.ai_core.qc.safety_dist" :key="k">{{ k }} {{ v }} · </span></p>
+          </div>
+          <!-- Reviewer -->
+          <div v-if="al.ai_core.reviewer && al.ai_core.reviewer.total" class="block">
+            <h4>生成内 Reviewer 自审（AI 核心）</h4>
+            <div class="card-row">
+              <div class="card"><div class="k">自审次数</div><div class="v">{{ al.ai_core.reviewer.total }}</div></div>
+              <div class="card"><div class="k">需复核率</div><div class="v">{{ (al.ai_core.reviewer.needs_review_rate * 100).toFixed(1) }}%</div></div>
+            </div>
+            <h5>各技能通过率</h5>
+            <table class="atable"><thead><tr><th>技能</th><th>通过</th><th>失败</th><th>通过率</th></tr></thead>
+              <tbody><tr v-for="(v, k) in al.ai_core.reviewer.per_skill" :key="k"><td>{{ k }}</td><td>{{ v.passed }}</td><td>{{ v.failed }}</td><td>{{ (v.pass_rate * 100).toFixed(0) }}%</td></tr></tbody>
+            </table>
+            <h5>失败原因分布</h5>
+            <div class="muted"><span v-for="(v, k) in al.ai_core.reviewer.reason_dist" :key="k" class="pill">{{ reviewReasonLabel(k) }} {{ v }}</span></div>
+          </div>
+          <!-- 安全网关 -->
+          <div v-if="al.ai_core.safety && al.ai_core.safety.total" class="block">
+            <h4>入口安全网关（AI 核心）</h4>
+            <div class="card-row"><div class="card"><div class="k">决策次数</div><div class="v">{{ al.ai_core.safety.total }}</div></div></div>
+            <h5>风险等级分布</h5>
+            <div class="muted"><span v-for="(v, k) in al.ai_core.safety.risk_dist" :key="k" class="pill">{{ safetyRiskLabel(k) }} {{ v }}</span></div>
+            <h5>处置</h5>
+            <div class="muted"><span v-for="(v, k) in al.ai_core.safety.outcome_dist" :key="k" class="pill">{{ safetyOutcomeLabel(k) }} {{ v }}</span></div>
+            <h5 v-if="al.ai_core.safety.reason_dist && Object.keys(al.ai_core.safety.reason_dist).length">拦截原因</h5>
+            <div class="muted"><span v-for="(v, k) in al.ai_core.safety.reason_dist" :key="k" class="pill">{{ k }} {{ v }}</span></div>
+          </div>
+          <!-- LLM Provider -->
+          <div v-if="al.ai_core.llm && al.ai_core.llm.total" class="block">
+            <h4>LLM Provider 调用（AI 核心）</h4>
+            <table class="atable">
+              <thead><tr><th>模型</th><th>次数</th><th>成功</th><th>失败</th><th>成功率</th><th>Token(in/out)</th><th>平均耗时</th></tr></thead>
+              <tbody>
+                <tr v-for="(v, k) in al.ai_core.llm.models" :key="k">
+                  <td>{{ k }}</td><td>{{ v.total }}</td><td>{{ v.ok }}</td><td>{{ v.fail }}</td>
+                  <td>{{ (v.success_rate * 100).toFixed(0) }}%</td>
+                  <td>{{ (v.tokens_in || 0).toLocaleString() }} / {{ (v.tokens_out || 0).toLocaleString() }}</td>
+                  <td>{{ fmtMs(v.duration_ms?.avg ?? 0) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <template v-if="hasLlmErr(al.ai_core.llm.models)">
+              <h5>错误类型分布</h5>
+              <div v-for="(v, k) in al.ai_core.llm.models" :key="'err' + k" class="muted">
+                <template v-if="v.err_dist && Object.keys(v.err_dist).length">
+                  <b>{{ k }}:</b> <span v-for="(c, e) in v.err_dist" :key="e" class="pill">{{ e }} {{ c }}</span>
+                </template>
+              </div>
+            </template>
+          </div>
+        </template>
         <!-- 用户评价(v0.8.5, 含六维子星) -->
         <div v-if="al.feedback && al.feedback.count" class="block">
           <h4>用户评价</h4>

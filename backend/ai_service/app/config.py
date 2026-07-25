@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     qc_judges: str = "deepseek,qwen,hy3"    # 三裁判模型(逗号分隔, 顺序即 scores 下标)
     qc_needs_review_variance: float = 4.0   # 任一维方差 ≥ 此值 → needs_review(分歧大)
     qc_timeout_seconds: float = 60.0        # 单次 QC 调用超时(由调用方 asyncio.wait_for 控制)
+    # ── 质量闭环(needs_review → agent_review → 重打分) ──
+    qc_fix_enabled: bool = True             # 后置 QC 标记 needs_review 时, 自动触发 agent_review 修复并重打分
+    qc_fix_max_rounds: int = 2              # 修复循环上限(防无限); 每轮: agent_review 出 fixed_code → 重写盘+COS → 重跑 QC
 
     # 对象存储(COS 预览投递,§10 / §5.9 tool:cos_upload)
     cos_secret_id: str = ""
