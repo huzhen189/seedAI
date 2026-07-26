@@ -160,8 +160,17 @@ const selectedOption = ref('')  // radio 单选绑定
 const pendingOptionsText = ref('')  // 已确认但未发送的选项文本
 // 非阻塞候选提示(管道级 alternatives 事件): 系统已自行决定 top-1, 列出可切换候选
 const alternativesData = ref<AlternativesEvent | null>(null)
-// SIR 澄清卡(CLARIFY 事件): 意图模糊/缺规格时下发动态最少必要追问
-const clarifyData = ref<{ questions: string[]; rounds: number } | null>(null)
+// SIR 澄清卡(CLARIFY 事件): 意图模糊/缺规格时下发动态最少必要追问 + 结构化选项
+const clarifyData = ref<{
+  questions: string[]
+  rounds: number
+  options: { label: string; recommended?: boolean }[]
+  multi: boolean
+  freeTextHint: string
+} | null>(null)
+// 用户在澄清卡中的选择(选项索引数组)与自由输入
+const clarifySelected = ref<number[]>([])
+const clarifyFreeText = ref('')
 
 // 把用户输入解析为候选项索引(A-H / 1-9 / 中文数字 / 选X / 用X / 切换X / 第X个);
 // 不是选择则返 null。对齐后端 intent/selection.parse_selection。
@@ -314,6 +323,63 @@ function confirmSubTask(subTaskId: string) {
     conversationId: cid,
     confirmedSubtasks: confirmedSubtaskIds.value,
     cb: makeCallbacks(idx),
+  })
+}
+
+// 澄清卡确认: 汇总用户选择(选项 + 自由文本)为答案文本, 带 clarified=1 重发。
+// 后端跳过意图分类, 用首轮已存意图直接路由执行(补齐槽位, 不走 2 轮对话)。
+function confirmClarify() {
+  if (!clarifyData.value) return
+  const labels = clarifyData.value.options.map((o) => o.label)
+  const chosen = clarifySelected.value
+    .filter((i) => i >= 0 && i < labels.length)
+    .map((i) => labels[i])
+  const free = clarifyFreeText.value.trim()
+  // 必须至少选一项或填了自由文本, 否则禁用确认按钮(见模板 :disabled)
+  if (!chosen.length && !free) return
+  const parts: string[] = []
+  if (chosen.length) parts.push('已选: ' + chosen.join('、'))
+  if (free) parts.push('补充说明: ' + free)
+  const summary = parts.join('；')
+  clarifyData.value = null
+  clarifySelected.value = []
+  clarifyFreeText.value = ''
+  void doSendClarified(summary)
+}
+
+// 澄清续跑发送: 复用 doSend 的落库/占位逻辑, 但带 clarified=1 让后端跳过二次分类。
+async function doSendClarified(text: string) {
+  const pid = projectStore.currentProjectId
+  if (pid == null) { alert('请先在左侧新建项目'); return }
+  if (convStore.currentConvId == null || convStore.messages.length === 0) {
+    if (!convStore.creating) {
+      await convStore.create(pid, text.slice(0, 20))
+    }
+  }
+  resetGenState()
+  traceId.value = genTraceId()
+  const cid = convStore.currentConvId!
+  setActiveGen(cid, traceId.value)
+  confirmedSubtaskIds.value = []
+  convStore.messages.push({
+    role: 'user', content: text,
+    conversation_id: cid, id: 0, created_at: '', model_id: model.value,
+  } as any)
+  convStore.messages.push({
+    role: 'assistant', content: '',
+    conversation_id: cid, id: 0, created_at: '', model_id: model.value,
+  } as any)
+  const assistantIdx = convStore.messages.length - 1
+  generating.value = true
+  lastSentText.value = text
+  input.value = ''
+  esRef.value = startChat({
+    model: model.value,
+    traceId: traceId.value,
+    conversationId: cid,
+    q: text,
+    clarified: true,
+    cb: makeCallbacks(assistantIdx),
   })
 }
 
@@ -633,6 +699,8 @@ function resetGenState() {
   alternativesData.value = null
   // SIR 澄清卡(新请求时清除)
   clarifyData.value = null
+  clarifySelected.value = []
+  clarifyFreeText.value = ''
 }
 
 function upsertStep(stage: string, status: ThoughtStep['status'], customLabel?: string) {
@@ -787,11 +855,24 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       errorMsg.value = '暂不支持此功能，请尝试其他类型请求'
       clearActiveGen()
     },
-    onClarify: (d: { questions: string[]; rounds: number }) => {
-      // SIR 澄清: 意图模糊/缺规格 → 展示动态最少必要追问, 用户直接回复补充(不阻塞)
+    onClarify: (d) => {
+      // SIR 澄清: 意图模糊/缺规格 → 底部浮动卡片, 含结构化选项 + 自由输入 + 确认按钮
       generating.value = false
       finished.value = true
-      clarifyData.value = { questions: d.questions || [], rounds: d.rounds || 0 }
+      // 清掉触发轮留下的空 assistant 占位气泡, 避免界面出现空白气泡
+      const msgs = convStore.messages
+      if (msgs.length && msgs[msgs.length - 1].role === 'assistant' && !msgs[msgs.length - 1].content) {
+        msgs.pop()
+      }
+      clarifyData.value = {
+        questions: d.questions || [],
+        rounds: d.rounds || 0,
+        options: d.options || [],
+        multi: !!d.multi,
+        freeTextHint: d.freeTextHint || '',
+      }
+      clarifySelected.value = []
+      clarifyFreeText.value = ''
       clearActiveGen()
     },
     onBlock: (d: BlockEvent) => {
@@ -1397,15 +1478,47 @@ watch(pendingRetry, (r) => {
           >{{ String.fromCharCode(66 + i) }}. {{ sk }}</button>
           <span class="alts-tip">（输入字母如「B」或「用 {{ alternativesData.skills[0] }}」也可切换）</span>
         </div>
-        <!-- SIR 澄清卡: 意图模糊/缺规格时, 展示动态最少必要追问, 用户直接回复补充 -->
-        <div v-if="clarifyData && clarifyData.questions.length" class="clarify-card">
-          <div class="clarify-head">💬 为了更精准地帮你，确认一下：</div>
-          <ul class="clarify-list">
-            <li v-for="(q, i) in clarifyData.questions" :key="i">{{ q }}</li>
-          </ul>
-          <div class="clarify-hint" v-if="clarifyData.rounds > 0">（第 {{ clarifyData.rounds }} 轮追问，直接回复补充信息即可）</div>
-          <div class="clarify-hint">💡 直接在下方的输入框补充回答，或回复「随便聊聊」退出。</div>
-        </div>
+        <!-- SIR 澄清卡(底部浮动面板): 结构化选项 + 自由输入 + 确认按钮, 不影响原页面布局 -->
+        <Teleport to="body">
+          <transition name="clarify-pop">
+            <div v-if="clarifyData" class="clarify-panel">
+              <div class="clarify-panel-inner">
+                <div class="clarify-head">💬 为了更精准地帮你，请补充以下信息</div>
+                <ul v-if="clarifyData.questions.length" class="clarify-list">
+                  <li v-for="(q, i) in clarifyData.questions" :key="i">{{ q }}</li>
+                </ul>
+                <div
+v-if="clarifyData.options.length" class="clarify-options"
+                     :class="clarifyData.multi ? 'is-multi' : 'is-single'">
+                  <label
+v-for="(opt, i) in clarifyData.options" :key="i"
+                         class="clarify-opt" :class="{ on: clarifySelected.includes(i) }">
+                    <input
+v-if="clarifyData.multi" v-model="clarifySelected" type="checkbox"
+                           :value="i" class="clarify-opt-input" />
+                    <input
+v-else type="radio" name="clarifyOpt" :value="i"
+                           :checked="clarifySelected.includes(i)"
+                           class="clarify-opt-input" @change="clarifySelected = [i]" />
+                    <span class="clarify-opt-label">{{ opt.label }}</span>
+                    <span v-if="opt.recommended" class="clarify-badge">推荐</span>
+                  </label>
+                </div>
+                <textarea
+v-model="clarifyFreeText" class="clarify-free"
+                          :placeholder="clarifyData.freeTextHint || '有其他要求？也可以直接在这里补充…'"
+                          rows="2"></textarea>
+                <div class="clarify-actions">
+                  <button class="clarify-skip" @click="clarifyData = null">✕ 暂不补充</button>
+                  <button
+class="clarify-confirm"
+                          :disabled="!clarifySelected.length && !clarifyFreeText.trim()"
+                          @click="confirmClarify">✅ 确认并继续</button>
+                </div>
+              </div>
+            </div>
+          </transition>
+        </Teleport>
         <!-- 方案选择弹窗(单选, 确认后记录, 下次 send 一起发送) -->
         <div v-if="showOptionsModal && optionsData" class="options-modal-backdrop" @click.self="cancelOptions" @keydown.escape="cancelOptions">
           <div class="options-modal">
@@ -1490,9 +1603,9 @@ watch(pendingRetry, (r) => {
         ref="rightPanel"
         :artifacts="projectArtifacts"
         :generating="generating"
-        :previewUrl="previewUrl"
-        :projectId="projectStore.currentProjectId"
-        :requirementDoc="requirementDoc"
+        :preview-url="previewUrl"
+        :project-id="projectStore.currentProjectId"
+        :requirement-doc="requirementDoc"
         @refresh="loadArtifacts"
       />
       </div>
@@ -1812,16 +1925,93 @@ watch(pendingRetry, (r) => {
 .alts-chip:hover { background: #10b981; color: #fff; transform: translateY(-1px); }
 .alts-tip { color: #94a3b8; font-size: 11px; }
 
-/* ── SIR 澄清卡 ── */
-.clarify-card {
-  padding: 12px 16px; margin: 0 16px 8px;
-  background: rgba(99,102,241,.08); border: 1px solid #a5b4fc;
-  border-radius: 12px; font-size: 13px; color: #4338ca;
+/* ── SIR 澄清卡(底部浮动面板) ── */
+.clarify-panel {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  width: calc(100% - 32px);
+  max-width: 640px;
+  z-index: 1000;
+  pointer-events: none;
 }
-.clarify-head { font-weight: 600; margin-bottom: 6px; }
-.clarify-list { margin: 0 0 6px; padding-left: 18px; }
+.clarify-panel-inner {
+  pointer-events: auto;
+  padding: 16px 18px;
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: 16px;
+  box-shadow: 0 18px 50px rgba(30, 27, 75, 0.22);
+  font-size: 13px;
+  color: #312e81;
+}
+.clarify-head { font-weight: 600; margin-bottom: 8px; font-size: 14px; }
+.clarify-list { margin: 0 0 8px; padding-left: 18px; color: #4b5563; }
 .clarify-list li { margin: 3px 0; line-height: 1.5; }
-.clarify-hint { color: #6b7280; font-size: 11px; margin-top: 4px; }
+.clarify-options { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.clarify-opt {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; cursor: pointer;
+  background: rgba(99, 102, 241, 0.06);
+  border: 1px solid rgba(99, 102, 241, 0.18);
+  border-radius: 10px; transition: all .18s ease;
+}
+.clarify-opt:hover { background: rgba(99, 102, 241, 0.12); }
+.clarify-opt.on {
+  background: rgba(99, 102, 241, 0.16);
+  border-color: #6366f1;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.18) inset;
+}
+.clarify-opt-input { width: 16px; height: 16px; accent-color: #6366f1; flex: none; }
+.clarify-opt-label { flex: 1; }
+.clarify-badge {
+  font-size: 11px; font-weight: 700; color: #047857;
+  background: #d1fae5; border: 1px solid #6ee7b7;
+  border-radius: 999px; padding: 1px 8px;
+}
+.clarify-free {
+  width: 100%; margin-top: 4px; padding: 8px 10px;
+  border: 1px solid rgba(99, 102, 241, 0.25); border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7); color: #312e81;
+  font: inherit; resize: vertical; outline: none;
+}
+.clarify-free:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
+.clarify-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+.clarify-skip {
+  border: 1px solid #e5e7eb; background: #fff; color: #6b7280;
+  border-radius: 10px; padding: 8px 14px; cursor: pointer; font: inherit;
+  transition: all .18s ease;
+}
+.clarify-skip:hover { background: #f3f4f6; color: #374151; }
+.clarify-confirm {
+  border: none; border-radius: 10px; padding: 8px 18px; cursor: pointer;
+  font: inherit; font-weight: 600; color: #fff;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  box-shadow: 0 6px 16px rgba(99, 102, 241, 0.35);
+  transition: all .18s ease;
+}
+.clarify-confirm:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(99, 102, 241, 0.42); }
+.clarify-confirm:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+/* 浮动面板滑入动画 */
+.clarify-pop-enter-active, .clarify-pop-leave-active { transition: all .28s cubic-bezier(0.16, 1, 0.3, 1); }
+.clarify-pop-enter-from, .clarify-pop-leave-to { opacity: 0; transform: translate(-50%, 16px); }
+
+/* 深色主题适配(项目主题以 <html data-theme="dark"> 承载) */
+:global([data-theme="dark"]) .clarify-panel-inner {
+  background: rgba(30, 27, 46, 0.82);
+  border-color: rgba(129, 140, 248, 0.4);
+  color: #e0e7ff;
+}
+:global([data-theme="dark"]) .clarify-list { color: #c7c9d9; }
+:global([data-theme="dark"]) .clarify-opt { background: rgba(129, 140, 248, 0.1); border-color: rgba(129, 140, 248, 0.25); }
+:global([data-theme="dark"]) .clarify-opt:hover { background: rgba(129, 140, 248, 0.18); }
+:global([data-theme="dark"]) .clarify-opt.on { background: rgba(129, 140, 248, 0.22); border-color: #818cf8; }
+:global([data-theme="dark"]) .clarify-free { background: rgba(15, 15, 30, 0.6); border-color: rgba(129, 140, 248, 0.3); color: #e0e7ff; }
+:global([data-theme="dark"]) .clarify-skip { background: rgba(30, 27, 46, 0.6); border-color: #4b5563; color: #c7c9d9; }
+:global([data-theme="dark"]) .clarify-skip:hover { background: rgba(55, 48, 80, 0.8); }
 
 /* ── 待发送选项提示 ── */
 .pending-opt-badge {

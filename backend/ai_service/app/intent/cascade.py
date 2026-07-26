@@ -79,6 +79,10 @@ class RulingResult:
     missing_slots: list = field(default_factory=list)
     collected_slots: dict = field(default_factory=dict)
     questions: list = field(default_factory=list)
+    # 结构化澄清选项(前端浮动卡片用): 最多 3 个候选, 每个 {label, recommended}
+    options: list = field(default_factory=list)
+    multi: bool = False                 # 选项是否多选
+    free_text_hint: str = ""            # 自由输入框提示语
     reason: str = ""
 
 
@@ -91,11 +95,17 @@ RULE_SYSTEM = (
     "输出严格 JSON(不要多余文字):\n"
     '{"intent_id":"...","confidence":0.0~1.0,"industry":"...",'
     '"missing_slots":["slot_key",...],"collected_slots":{"slot_key":"value",...},'
-    '"questions":["自然语言追问(若缺槽位, 最多2条)"],"reason":"简短裁决理由"}\n\n'
+    '"questions":["自然语言追问(若缺槽位, 最多2条)"],'
+    '"options":[{"label":"候选A","recommended":false}],"multi":false,'
+    '"free_text_hint":"可补充其他要求","reason":"简短裁决理由"}\n\n'
     "industry(14选1 或 other/none): restaurant|ecommerce|gov|edu|health|finance|game|"
     "personal|corp|tech|media|travel|other|none\n"
     "confidence 准则: 明确匹配且信息充足 ≥0.8; 有匹配但缺关键信息 0.5~0.8; 模糊或像闲聊 <0.5。\n"
     "如果候选置信都低且不像任何建站/咨询意图 → 选 chat_casual, confidence 给 0.3~0.5。\n"
+    "若用户意图模糊或缺少关键规格(如风格/行业/页面类型/技术栈), 你可在 options 中给出 "
+    "2-3 个具体候选选项(每个含 label 与 recommended 标记, 仅一个 recommended:true 表示系统推荐), "
+    "multi 表示是否允许多选(默认 false 单选)。free_text_hint 是可选的开放输入框提示语。\n"
+    "若无需选项则省略 options/multi/free_text_hint(仅用 questions 自然语言追问)。\n"
 )
 
 
@@ -179,10 +189,23 @@ async def _llm_rule(
             if not isinstance(collected_slots, dict):
                 collected_slots = {}
             questions = [str(x) for x in (data.get("questions") or []) if x][:2]
+            # 结构化澄清选项(防御式解析: 最多 3 个, 每个需有非空 label)
+            raw_opts = data.get("options") or []
+            options = []
+            if isinstance(raw_opts, list):
+                for o in raw_opts[:3]:
+                    if isinstance(o, dict) and str(o.get("label", "")).strip():
+                        options.append({
+                            "label": str(o["label"]).strip(),
+                            "recommended": bool(o.get("recommended", False)),
+                        })
+            multi = bool(data.get("multi", False))
+            free_text_hint = str(data.get("free_text_hint", "") or "").strip()
             return RulingResult(
                 intent_id=iid, confidence=conf, industry=industry,
                 missing_slots=missing, collected_slots=collected_slots,
-                questions=questions, reason=str(data.get("reason", "")),
+                questions=questions, options=options, multi=multi,
+                free_text_hint=free_text_hint, reason=str(data.get("reason", "")),
             )
         except Exception as e:
             last_e = e
@@ -231,6 +254,10 @@ def _emit_route(
     sub_tasks: list | None = None,
     split_reason: str = "",
     request_id: str = "",
+    clarify_options: list | None = None,
+    clarify_multi: bool = False,
+    clarify_allow_free_text: bool = True,
+    clarify_free_text_hint: str = "",
 ) -> PipelineResult:
     l1 = intent.get("level1", "chat")
     l2 = intent.get("level2", "casual")
@@ -244,6 +271,10 @@ def _emit_route(
         selected_skill=selected_skill,
         clarify_questions=questions or [],
         clarify_rounds=rounds,
+        clarify_options=clarify_options or [],
+        clarify_multi=clarify_multi,
+        clarify_allow_free_text=clarify_allow_free_text,
+        clarify_free_text_hint=clarify_free_text_hint,
         request_id=request_id,
         sub_tasks=sub_tasks or [],
         split_reason=split_reason,
@@ -463,8 +494,16 @@ async def _classify_segment(
     selected_skill = tools.skills[0].name if tools.skills else intent["skill"]
 
     questions: list[str] = []
+    clarify_options: list = []
+    clarify_multi = False
+    clarify_free_text_hint = ""
     if decision == "clarify":
         questions = _build_questions(still_missing, ruling.questions)
+        # 结构化选项(若 LLM 提供了候选); 否则前端回退为纯自然语言追问 + 自由输入
+        if ruling.options:
+            clarify_options = ruling.options
+            clarify_multi = ruling.multi
+            clarify_free_text_hint = ruling.free_text_hint
 
     # ── [11] 持久化槽位 ──
     await asyncio.to_thread(save_slots, conversation_id, {
@@ -502,6 +541,8 @@ async def _classify_segment(
         intent, conf, decision=decision, selected_skill=selected_skill, industry=industry,
         questions=questions, rounds=new_rounds, reason=ruling.reason, evidence=evidence,
         safety=safety_result, sub_tasks=[], split_reason="", request_id=req_id,
+        clarify_options=clarify_options, clarify_multi=clarify_multi,
+        clarify_allow_free_text=True, clarify_free_text_hint=clarify_free_text_hint,
     )
 
     # 收尾摘要日志

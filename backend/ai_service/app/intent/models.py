@@ -12,6 +12,8 @@ Contract fields
 - plan / evidence / risk / tools: 决策支撑数据
 - sub_tasks / split_reason: 多意图编排拆分结果
 - clarify_questions / clarify_rounds / request_id: 澄清与可观测字段
+- clarify_options / clarify_multi / clarify_allow_free_text / clarify_free_text_hint:
+  澄清结构化选项(前端浮动卡片用:单选/多选 + 推荐标记 + 自由输入)
 """
 
 from __future__ import annotations
@@ -40,4 +42,9 @@ class PipelineResult:
     # 澄清 / 可观测
     clarify_questions: list = field(default_factory=list)
     clarify_rounds: int = 0
+    # 澄清结构化选项: 前端浮动卡片渲染用(单选/多选 + 推荐标记 + 自由输入)
+    clarify_options: list = field(default_factory=list)   # [{"label": str, "recommended": bool}]
+    clarify_multi: bool = False                            # 选项是否多选
+    clarify_allow_free_text: bool = True                  # 是否允许开放问答(自由输入)
+    clarify_free_text_hint: str = ""                      # 自由输入框提示语
     request_id: str = ""

@@ -624,6 +624,12 @@ async def chat(
     if confirmed in ("1", "true", "True"):
         payload["confirmed"] = True
         logger.info("[chat] 二次确认已通过, 跳过安全拦截")
+    # 澄清回填: 用户在前端 clarify 卡选完并确认后, 带 clarified=1 重发。
+    #   答案已随 q 参数作为新用户消息追加(见 _append_q), 后端据此跳过意图分类直接路由。
+    clarified = request.query_params.get("clarified")
+    if clarified in ("1", "true", "True"):
+        payload["clarified"] = True
+        logger.info("[chat] 澄清回填 clarified=1(q=%.60s)", user_text)
     # 多意图编排: 前端回传已确认的中风险子任务 id(逗号分隔)
     confirmed_subtasks = request.query_params.get("confirmed_subtasks")
     if confirmed_subtasks:

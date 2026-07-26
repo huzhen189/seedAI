@@ -29,6 +29,9 @@ from .router import detect_intent_v2, skill_for
 from .runner import run_skill
 from ..registry import SkillRegistry
 from ..intent.selection import set_pending_options
+from ..intent.selection import (
+    set_pending_clarify, get_pending_clarify, clear_pending_clarify,
+)
 from .git_site import commit_site_for_trace
 from ..analytics import (  # v0.9.0 新增功能统计
     record_repair, record_distill, record_code_index, record_refine, record_chat_retry,
@@ -640,29 +643,64 @@ async def worker_loop(concurrency: int = 1):
                 logger.info("[Worker] [3/6] 上下文检测 输入=\"%.80s\" ctx_hint=%.40s summary=%.40s (+%.0fms)",
                            user_text, ctx_hint[:40] if ctx_hint else "无", summary[:40] if summary else "无",
                            (time.time() - t_job) * 1000)
+                # ── [3.5] 澄清续跑(clarified 重发): 跳过意图分类, 复用已存意图直接路由 ──
+                #    用户在前端 clarify 卡选完并确认后, 带 clarified=1 重发(答案作为 q 已随 messages 追加)。
+                #    这里直接用首轮判定存的 pending_clarify 意图路由执行, 补齐槽位, 不走 2 轮对话。
+                _clarified = bool(job.get("clarified", False))
+                _skip_classify = False
+                if _clarified and conversation_id:
+                    _pc = get_pending_clarify(conversation_id)
+                    if _pc:
+                        _skip_classify = True
+                        logger.info("[Worker] [3.5] 澄清续跑: 跳过意图分类, 复用已存意图 skill=%s (+%.0fms)",
+                                    _pc.get("selected_skill"), (time.time() - t_job) * 1000)
+                        intent = {
+                            "level1": _pc.get("level1", "chat"),
+                            "level2": _pc.get("level2", "casual"),
+                            "confidence": float(_pc.get("confidence", 0.8)),
+                            "industry": _pc.get("industry", "other"),
+                            "decision": "route",
+                            "selected_skill": _pc.get("selected_skill") or "agent_chat",
+                            "risk_level": "low",
+                            "requires_confirm": False,
+                            "evidence": {},
+                            "plan": [{"action": "route", "skill": _pc.get("selected_skill"),
+                                      "confidence": float(_pc.get("confidence", 0.8)), "reason": "clarify_resume"}],
+                            "sub_tasks": [],
+                            "split_reason": "",
+                            "clarify_questions": [],
+                            "clarify_rounds": 0,
+                        }
+                        clear_pending_clarify(conversation_id)
+                    else:
+                        logger.warning("[Worker] [3.5] clarified 重发但无 pending_clarify(可能已过期), 退化为普通分类")
+
                 # 意图分类 v2(5模块并行, 35s超时)
-                try:
-                    intent = await asyncio.wait_for(
-                        detect_intent_v2(messages, model_id,
-                                         conversation_id=conversation_id,
-                                         context_hint=ctx_hint,
-                                         project_status=proj_status,
-                                         project_constraints=proj_constraints,
-                                         user_id=user_id, project_id=project_id,
-                                         has_requirement_doc=has_req_doc),
-                        timeout=35.0,
-                    )
-                except asyncio.TimeoutError:
-                    logger.error("[Worker] [3/6] 意图分类超时(35s) → 降级")
-                    intent = {"level1": "learn", "level2": "casual", "confidence": 0.3,
-                              "industry": "other", "checkpoint_relation": "none",
-                              "selected_skill": "agent_chat", "decision": "fallback"}
-                except Exception as e:  # 🔧 兜底: 非超时异常(如 classify 内部报错)也会静默杀死 Worker,
-                    # 导致后续所有任务卡死且无日志。这里捕获并打全栈, 降级响应, 保证 Worker 不挂。
-                    logger.exception("[Worker] [3/6] 意图分类异常(非超时) → 降级: %s", e)
-                    intent = {"level1": "learn", "level2": "casual", "confidence": 0.3,
-                              "industry": "other", "checkpoint_relation": "none",
-                              "selected_skill": "agent_chat", "decision": "fallback"}
+                if not _skip_classify:
+                    if conversation_id:
+                        clear_pending_clarify(conversation_id)  # 新一轮正常分类: 清除陈旧澄清态
+                    try:
+                        intent = await asyncio.wait_for(
+                            detect_intent_v2(messages, model_id,
+                                             conversation_id=conversation_id,
+                                             context_hint=ctx_hint,
+                                             project_status=proj_status,
+                                             project_constraints=proj_constraints,
+                                             user_id=user_id, project_id=project_id,
+                                             has_requirement_doc=has_req_doc),
+                            timeout=35.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error("[Worker] [3/6] 意图分类超时(35s) → 降级")
+                        intent = {"level1": "learn", "level2": "casual", "confidence": 0.3,
+                                  "industry": "other", "checkpoint_relation": "none",
+                                  "selected_skill": "agent_chat", "decision": "fallback"}
+                    except Exception as e:  # 🔧 兜底: 非超时异常(如 classify 内部报错)也会静默杀死 Worker,
+                        # 导致后续所有任务卡死且无日志。这里捕获并打全栈, 降级响应, 保证 Worker 不挂。
+                        logger.exception("[Worker] [3/6] 意图分类异常(非超时) → 降级: %s", e)
+                        intent = {"level1": "learn", "level2": "casual", "confidence": 0.3,
+                                  "industry": "other", "checkpoint_relation": "none",
+                                  "selected_skill": "agent_chat", "decision": "fallback"}
                 ctx_result = ctx_hint or "检测完成"
                 logger.info("[Worker] [3/6] 上下文结果 ctx=%.60s (+%.0fms, 含意图分类)", ctx_result,
                            (time.time() - t_job) * 1000)
@@ -722,12 +760,36 @@ async def worker_loop(concurrency: int = 1):
                     await q.publish(trace_id, {"event": "done", "data": {}})
                     continue
 
-                # 3.5) 澄清(CLARIFY, SIR 新增): 发 clarify 事件 + 存轮次, 不阻塞用户
+                # 3.5) 澄清(CLARIFY): 发 clarify 事件(含结构化选项) + 存 pending_clarify, 然后暂停流程
+                #     等用户在前端卡片选完并确认(clarified=1 重发)后, 由 [3.5] 分支跳过分类直接路由。
                 if decision == "clarify":
                     questions = intent.get("clarify_questions", [])
                     rounds = intent.get("clarify_rounds", 0)
-                    logger.info("[Worker] [5/6] 澄清轮次=%d questions=%s", rounds, questions)
-                    await q.publish(trace_id, {"event": "clarify", "data": {"questions": questions, "rounds": rounds}})
+                    options = intent.get("clarify_options") or []
+                    multi = bool(intent.get("clarify_multi", False))
+                    free_text_hint = intent.get("clarify_free_text_hint") or ""
+                    logger.info("[Worker] [5/6] 澄清轮次=%d questions=%s options=%d multi=%s",
+                                rounds, questions, len(options), multi)
+                    # 存 pending_clarify(含已判定意图与结构化选项), 供 clarified 重发时复用
+                    if conversation_id:
+                        set_pending_clarify(conversation_id, {
+                            "level1": intent.get("level1"),
+                            "level2": intent.get("level2"),
+                            "selected_skill": skill_name,
+                            "confidence": intent.get("confidence", 0.6),
+                            "industry": intent.get("industry", "other"),
+                            "questions": questions,
+                            "options": options,
+                            "multi": multi,
+                            "free_text_hint": free_text_hint,
+                        })
+                    await q.publish(trace_id, {"event": "clarify", "data": {
+                        "questions": questions,
+                        "rounds": rounds,
+                        "options": options,
+                        "multi": multi,
+                        "free_text_hint": free_text_hint,
+                    }})
                     await q.publish(trace_id, {"event": "done", "data": {}})
                     if req_id:
                         try:

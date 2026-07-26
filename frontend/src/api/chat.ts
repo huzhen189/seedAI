@@ -1,4 +1,4 @@
-import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent, QcResult, RatingDims, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent } from '../types'
+import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent, QcResult, RatingDims, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, ClarifyEvent } from '../types'
 import { notifyAuthRequired } from '../stores/auth'
 import { post, publicGet } from './client'
 
@@ -43,8 +43,8 @@ export interface ChatCallbacks {
   onQc?: (data: QcResult) => void
   /** L2 精炼结果(v0.9.0): done 前下发的终版润色文本(建站类), 用于覆盖气泡内容 */
   onRefined?: (data: string) => void
-  /** SIR 澄清(CLARIFY):意图模糊/缺规格时, 下发动态最少必要追问, 用户直接回复补充 */
-  onClarify?: (data: { questions: string[]; rounds: number }) => void
+  /** SIR 澄清(CLARIFY):意图模糊/缺规格时, 下发动态最少必要追问 + 结构化选项, 用户确认后带 clarified 重发 */
+  onClarify?: (data: ClarifyEvent) => void
 }
 
 export interface StartChatOptions {
@@ -60,6 +60,8 @@ export interface StartChatOptions {
   correct?: boolean
   /** 二次确认已通过标记(安全 confirm 通过后重发) */
   confirmed?: boolean
+  /** 澄清回填标记(用户在 clarify 卡选完确认后重发, 后端跳过意图分类直接路由) */
+  clarified?: boolean
   /** 多选项选中后重发: 指定 Worker 直接执行的 skill(管道级 options 选择) */
   skill?: string
   /** 多意图中风险已确认的子任务 id 列表(重发时带上, 让 MEDIUM 风险子任务放行) */
@@ -78,6 +80,7 @@ export function startChat(opts: StartChatOptions): EventSource {
   if (opts.resume) params.set('resume', 'true')
   if (opts.correct) params.set('correct', 'true')
   if (opts.confirmed) params.set('confirmed', '1')
+  if (opts.clarified) params.set('clarified', '1')
   if (opts.skill) params.set('skill', opts.skill)
   if (opts.confirmedSubtasks?.length) params.set('confirmed_subtasks', opts.confirmedSubtasks.join(','))
 

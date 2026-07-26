@@ -88,6 +88,11 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
         # SIR 新增: 澄清 / 可观测
         "clarify_questions": result.clarify_questions,
         "clarify_rounds": result.clarify_rounds,
+        # 澄清结构化选项(前端浮动卡片: 单选/多选 + 推荐标记 + 自由输入)
+        "clarify_options": result.clarify_options,
+        "clarify_multi": result.clarify_multi,
+        "clarify_allow_free_text": result.clarify_allow_free_text,
+        "clarify_free_text_hint": result.clarify_free_text_hint,
         "request_id": result.request_id,
         # 多意图编排(§多意图 v1.0): 拆分结果透传给 worker / 前端
         "sub_tasks": [dataclasses.asdict(s) for s in result.sub_tasks],

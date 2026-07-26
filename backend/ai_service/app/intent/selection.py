@@ -96,6 +96,44 @@ def clear_pending_options(conversation_id: int) -> None:
     _PENDING.pop(conversation_id, None)
 
 
+# ── pending_clarify 存储(按 conversation_id) ──
+# 结构: {conv_id: {level1, level2, selected_skill, confidence, industry,
+#                   questions, options, multi, free_text_hint, expire}}
+# 用途: 澄清(CLARIFY)事件下发后, 暂存"已判定的意图 + 结构化选项", 等用户回填后
+#       带 clarified=1 重发 → Worker 跳过意图分类, 直接用本意图路由执行(补齐槽位, 不走 2 轮对话)。
+_PENDING_CLARIFY: dict[int, dict] = {}
+_PENDING_CLARIFY_TTL = 1800  # 30 分钟(与 pending_options 一致)
+
+
+def set_pending_clarify(conversation_id: int, data: dict) -> None:
+    """记录待澄清意图(含结构化选项), 供 clarified 重发时复用。"""
+    if not conversation_id or not data:
+        return
+    entry = dict(data)
+    entry["expire"] = time.time() + _PENDING_CLARIFY_TTL
+    _PENDING_CLARIFY[conversation_id] = entry
+    logger.info("[澄清] 记录待澄清意图 conv=%s skill=%s options=%d",
+                 conversation_id, data.get("selected_skill"), len(data.get("options") or []))
+
+
+def get_pending_clarify(conversation_id: int) -> dict | None:
+    """取待澄清意图; 过期或不存在返回 None。"""
+    if not conversation_id:
+        return None
+    entry = _PENDING_CLARIFY.get(conversation_id)
+    if not entry:
+        return None
+    if time.time() > entry["expire"]:
+        _PENDING_CLARIFY.pop(conversation_id, None)
+        return None
+    return entry
+
+
+def clear_pending_clarify(conversation_id: int) -> None:
+    """清除待澄清意图(用户已回填 / 新一轮正常分类时调用)。"""
+    _PENDING_CLARIFY.pop(conversation_id, None)
+
+
 def last_user_text(messages: list[dict]) -> str:
     """兼容别名: 取最近一条用户消息(统一来源见 common.last_user_message)。"""
     from .common import last_user_message

@@ -72,6 +72,28 @@ export interface BlockEvent {
   reason?: string
 }
 
+/** 澄清卡结构化选项(前端浮动卡片渲染). */
+export interface ClarifyOption {
+  /** 选项展示文案 */
+  label: string
+  /** 是否为系统推荐选项(前端标"推荐") */
+  recommended?: boolean
+}
+
+/** 澄清(CLARIFY): 意图模糊/缺规格时下发, 前端以底部浮动卡片呈现. */
+export interface ClarifyEvent {
+  /** 自然语言追问(兜底展示) */
+  questions?: string[]
+  /** 已进行的澄清轮次 */
+  rounds?: number
+  /** 结构化候选选项(单选/多选) */
+  options?: ClarifyOption[]
+  /** 是否多选(默认 false 单选) */
+  multi?: boolean
+  /** 自由输入框提示语 */
+  freeTextHint?: string
+}
+
 /** 二次确认(安全 high, 等待用户确认后带 confirmed 重发). */
 export interface ConfirmEvent {
   reason?: string
