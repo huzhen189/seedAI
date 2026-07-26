@@ -12,14 +12,20 @@ export const deleteProject = (id: number): Promise<null> => del(`/api/projects/$
 
 export const listConversations = (projectId: number): Promise<Conversation[]> =>
   get(`/api/conversations?project_id=${projectId}`)
-export const createConversation = (projectId: number, title?: string): Promise<Conversation> =>
-  post('/api/conversations', { project_id: projectId, title })
+export const createConversation = (projectId: number, name?: string): Promise<Conversation> =>
+  post('/api/conversations', { project_id: projectId, name })
 export const getConversation = (id: number): Promise<Conversation> =>
   get(`/api/conversations/${id}`)
 export const renameConversation = (id: number, name: string): Promise<Conversation> =>
   patch(`/api/conversations/${id}`, { name })
 export const deleteConversation = (id: number): Promise<null> =>
   del(`/api/conversations/${id}`)
+
+/** 首条对话无项目时: 按对话文本自动建项目+会话, 返回 {project, conversation}。 */
+export const autoStart = (
+  text: string,
+): Promise<{ project: Project; conversation: Conversation }> =>
+  post('/api/auto-start', { text })
 
 export const search = (q: string): Promise<SearchItem[]> =>
   get(`/api/search?q=${encodeURIComponent(q)}`)

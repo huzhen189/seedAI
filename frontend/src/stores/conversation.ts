@@ -25,7 +25,7 @@ export const useConversationStore = defineStore('conversation', () => {
 
   /** 当前会话标题 */
   const currentTitle = computed(() =>
-    conversations.value[0]?.title || '新对话',
+    conversations.value[0]?.name || '新对话',
   )
 
   /** 切换项目: 加载会话列表 + 恢复或新建会话。 */
@@ -127,10 +127,10 @@ export const useConversationStore = defineStore('conversation', () => {
   }
 
   /** 新建会话(当前项目下)。 */
-  async function create(projectId: number, title?: string): Promise<Conversation> {
+  async function create(projectId: number, name?: string): Promise<Conversation> {
     creating.value = true
     try {
-      const c = await projectsApi.createConversation(projectId, title)
+      const c = await projectsApi.createConversation(projectId, name)
       if (!conversations.value.some(x => x.id === c.id)) {
         conversations.value.unshift(c)
       }
@@ -152,6 +152,27 @@ export const useConversationStore = defineStore('conversation', () => {
     }
   }
 
+  /** 从项目树点选某会话: 切换到该项目并加载该会话的消息。 */
+  async function openConversation(convId: number) {
+    const target = conversations.value.find(c => c.id === convId)
+    const pid = target?.project_id ?? _currentProjectId.value
+    if (pid == null) return
+    // 若当前显示的是"生成中的乐观会话"且为空, 先收起为历史(与 create 对称)
+    if (currentConvId.value && currentConvId.value !== convId && messages.value.length > 0) {
+      const oldConv = conversations.value.find(x => x.id === currentConvId.value)
+      if (oldConv) {
+        pastSessions.value.unshift({
+          conv: { ...oldConv }, collapsed: true,
+          messages: [...messages.value], loading: false,
+        })
+      }
+    }
+    currentConvId.value = convId
+    const c = await projectsApi.getConversation(convId)
+    messages.value = c.messages || []
+    sessionStorage.setItem('activeConv_' + pid, String(convId))
+  }
+
   function reset() {
     conversations.value = []
     currentConvId.value = null
@@ -163,6 +184,6 @@ export const useConversationStore = defineStore('conversation', () => {
   return {
     conversations, currentConvId, messages, pastSessions, loading, loadingMore,
     currentTitle, loadedPastCount, pendingConvId, creating,
-    loadConversations, loadMoreHistory, togglePast, create, reset,
+    loadConversations, loadMoreHistory, togglePast, create, openConversation, reset,
   }
 })

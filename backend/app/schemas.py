@@ -57,7 +57,7 @@ class RenameReq(BaseModel):
 
 class CreateConversationReq(BaseModel):
     project_id: int
-    title: str | None = Field(None, max_length=255)
+    name: str | None = Field(None, max_length=255)
 
 
 class ProjectResp(BaseModel):
@@ -89,9 +89,14 @@ class ConversationResp(BaseModel):
     id: int
     project_id: int
     user_id: int
-    title: str | None = None
+    name: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class AutoStartReq(BaseModel):
+    """首条对话自动建项目+会话: 按对话文本自动命名。"""
+    text: str = Field(min_length=1, max_length=2000)
     # 注意: from_attributes 默认会按字段名去读 ORM 的 `messages` relationship(惰性加载),
     # 在同步序列化上下文触发异步查询 -> MissingGreenlet 500。改用 validation_alias 让其
     # 在 from_attributes 时找不到对应属性而落到 default, 避免误触发关系查询。

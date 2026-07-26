@@ -208,7 +208,7 @@ export interface Conversation {
   id: number
   project_id: number
   user_id: number
-  title: string | null
+  name: string | null
   created_at: string
   updated_at: string
   messages?: Message[]

@@ -21,6 +21,7 @@ from .db import get_db
 from .models import Artifact, Conversation, Message, Project, Trace
 from .repos.business_repos import artifact_repo, conv_repo, message_repo, project_repo
 from .schemas import (
+    AutoStartReq,
     ConversationResp,
     CreateConversationReq,
     CreateProjectReq,
@@ -197,12 +198,30 @@ async def create_conversation(
     proj = await project_repo.get_by(db, id=req.project_id, user_id=user.id)
     if proj is None:
         raise HTTPException(status_code=404, detail="project not found")
-    conv = await conv_repo.create(db, project_id=req.project_id, user_id=user.id, title=req.title)
+    conv = await conv_repo.create(db, project_id=req.project_id, user_id=user.id, name=req.name or "新对话")
     await cache_invalidate(f"conv:list:{req.project_id}:*")
     return conv
 
 
-@router.get("/conversations/{conversation_id}", response_model=ConversationResp)
+@router.post("/auto-start", status_code=201)
+async def auto_start(
+    req: AutoStartReq,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """首条对话无项目时: 按对话文本自动创建一个项目 + 首个会话(同名),返回两者。
+
+    前端在未选中任何项目时发起首条对话调用本接口,再用返回的 conversation_id 走 /api/chat。
+    项目名与会话名均取对话文本(截断到 128 字符,保留可读性)。
+    """
+    name = req.text.strip()[:128] or "未命名项目"
+    proj = await project_repo.create(db, user_id=user.id, name=name)
+    conv = await conv_repo.create(db, project_id=proj.id, user_id=user.id, name=name)
+    await cache_invalidate(f"conv:list:{proj.id}:*")
+    return {
+        "project": ProjectResp.model_validate(proj),
+        "conversation": ConversationResp.model_validate(conv),
+    }
 async def get_conversation(
     conversation_id: int,
     user: CurrentUser = Depends(get_current_user),
@@ -230,7 +249,7 @@ async def rename_conversation(
     conv = await conv_repo.get_by(db, id=conversation_id, user_id=user.id)
     if conv is None:
         raise HTTPException(status_code=404, detail="conversation not found")
-    return await conv_repo.update(db, conv, title=req.name)
+    return await conv_repo.update(db, conv, name=req.name)
 
 
 @router.delete("/conversations/{conversation_id}", status_code=204)
@@ -279,12 +298,12 @@ async def search(
     for p in projs:
         results.append(SearchItemResp(type="project", id=p.id, title=p.name, project_id=None))
     convs = (await db.execute(
-        select(Conversation).where(Conversation.user_id == user.id, Conversation.title.like(like))
+        select(Conversation).where(Conversation.user_id == user.id, Conversation.name.like(like))
     )).scalars().all()
     for c in convs:
         results.append(SearchItemResp(
             type="conversation", id=c.id,
-            title=c.title or "(未命名会话)", project_id=c.project_id,
+            title=c.name or "(未命名会话)", project_id=c.project_id,
         ))
     return results
 
@@ -300,7 +319,7 @@ async def search_messages(
     like = f"%{q}%"
     # 查找匹配的 user 消息(仅搜索用户发送的内容, 避免匹配过于泛化)
     rows = (await db.execute(
-        select(Message, Conversation.title, Conversation.project_id, Project.name)
+        select(Message, Conversation.name, Conversation.project_id, Project.name)
         .join(Conversation, Message.conversation_id == Conversation.id)
         .join(Project, Conversation.project_id == Project.id)
         .where(
@@ -314,7 +333,7 @@ async def search_messages(
     )).all()
 
     results = []
-    for msg, conv_title, project_id, project_name in rows:
+    for msg, conv_name, project_id, project_name in rows:
         # 找紧随其后的第一条 AI 回复(AI 对这条问题的回答)
         ai_reply_row = (await db.execute(
             select(Message.content)
@@ -337,7 +356,7 @@ async def search_messages(
             "conversation_id": msg.conversation_id,
             "project_id": project_id,
             "project_name": project_name or "",
-            "conv_title": conv_title or "(未命名)",
+            "conv_title": conv_name or "(未命名)",
             "user_text": user_snippet,
             "ai_reply": ai_snippet,
             "created_at": msg.created_at.isoformat() if msg.created_at else "",

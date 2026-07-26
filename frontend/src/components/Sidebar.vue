@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useProjectStore } from '../stores/project'
-import { searchMessages, type MessageSearchResult } from '../api/projects'
+import { useConversationStore } from '../stores/conversation'
+import {
+  listConversations, renameProject, renameConversation, searchMessages,
+  type MessageSearchResult,
+} from '../api/projects'
+import type { Conversation } from '../types'
 
 defineProps<{ collapsed: boolean }>()
 const emit = defineEmits<{
@@ -9,25 +14,97 @@ const emit = defineEmits<{
   'navigate-message': [result: MessageSearchResult]
 }>()
 const projectStore = useProjectStore()
+const convStore = useConversationStore()
 
 const showSearch = ref(false)
 const searchText = ref('')
 const msgResults = ref<MessageSearchResult[]>([])
 const searching = ref(false)
 
+// ── 项目树展开状态 + 懒加载会话 ──
+const expanded = ref<Record<number, boolean>>({})
+const tree = ref<Record<number, Conversation[]>>({})
+const loadingTree = ref<Record<number, boolean>>({})
+
+async function toggleProject(id: number) {
+  if (expanded.value[id]) {
+    expanded.value[id] = false
+    return
+  }
+  expanded.value[id] = true
+  if (!tree.value[id]) {
+    loadingTree.value[id] = true
+    try {
+      tree.value[id] = await listConversations(id)
+    } finally {
+      loadingTree.value[id] = false
+    }
+  }
+}
+
+function selectProject(id: number) {
+  projectStore.currentProjectId = id
+}
+
+async function openConv(conv: Conversation) {
+  projectStore.currentProjectId = conv.project_id
+  await convStore.openConversation(conv.id)
+}
+
+// ── 双击就地改名 ──
+const editingProjectId = ref<number | null>(null)
+const editProjectName = ref('')
+const editingConvId = ref<number | null>(null)
+const editConvName = ref('')
+
+function startEditProject(p: { id: number; name: string }) {
+  editingProjectId.value = p.id
+  editProjectName.value = p.name
+}
+async function saveProjectName() {
+  const id = editingProjectId.value
+  if (id == null) return
+  const name = editProjectName.value.trim()
+  editingProjectId.value = null
+  if (name && name !== projectStore.projects.find(p => p.id === id)?.name) {
+    await renameProject(id, name)
+    await projectStore.load()
+  }
+}
+function startEditConv(c: Conversation) {
+  editingConvId.value = c.id
+  editConvName.value = c.name || ''
+}
+async function saveConvName() {
+  const id = editingConvId.value
+  if (id == null) return
+  const name = editConvName.value.trim()
+  editingConvId.value = null
+  const pid = cachedPid.value
+  const oldName = pid != null ? (tree.value[pid]?.find((x: Conversation) => x.id === id)?.name) : undefined
+  if (name && name !== oldName) {
+    await renameConversation(id, name)
+    if (pid != null) tree.value[pid] = await listConversations(pid)
+  }
+}
+// 记住正在编辑的会话所属项目, 改名后刷新对应树
+const cachedPid = ref<number | null>(null)
+function startEditConvWithPid(c: Conversation, pid: number) {
+  cachedPid.value = pid
+  startEditConv(c)
+}
+
+// ── 新建项目 ──
 async function newProject() {
   const name = prompt('项目名称：', '我的项目')
   if (!name) return
   await projectStore.create(name)
 }
-function selectProject(id: number) {
-  projectStore.currentProjectId = id
-}
 
+// ── 搜索 ──
 let _searchTimer: ReturnType<typeof setTimeout> | null = null
 async function onSearch() {
   const q = searchText.value.trim()
-  // 同时调用旧搜索(项目/会话名) + 新搜索(消息内容)
   if (_searchTimer) clearTimeout(_searchTimer)
   if (!q) {
     projectStore.searchResults = []
@@ -59,14 +136,11 @@ function pickMessage(r: MessageSearchResult) {
   projectStore.searchResults = []
   msgResults.value = []
   showSearch.value = false
-  // 存储导航目标, ChatView 读取后滚动到指定消息
   sessionStorage.setItem('nav_conv', String(r.conversation_id))
   sessionStorage.setItem('nav_msg', String(r.message_id))
-  // 先切项目, ChatView watch 到 projectId 变化后会读取 sessionStorage
   projectStore.currentProjectId = r.project_id
 }
 
-// 展开搜索框时聚焦
 watch(showSearch, (v) => {
   if (v) {
     setTimeout(() => {
@@ -92,7 +166,6 @@ watch(showSearch, (v) => {
     <div v-if="showSearch && !collapsed" class="searchbox">
       <input v-model="searchText" placeholder="搜索消息 / 项目 / 会话" @input="onSearch" />
       <div v-if="searching" class="search-hint">搜索中…</div>
-      <!-- 旧搜索: 项目/会话名 -->
       <div v-if="projectStore.searchResults.length" class="sres">
         <div class="sres-label">匹配的项目/会话</div>
         <div
@@ -104,7 +177,6 @@ watch(showSearch, (v) => {
           {{ r.type === 'project' ? '📁' : '💬' }} {{ r.title }}
         </div>
       </div>
-      <!-- 消息搜索: 匹配的 Q&A 对 -->
       <div v-if="msgResults.length" class="sres msg-results">
         <div class="sres-label">匹配的消息 ({{ msgResults.length }})</div>
         <div
@@ -121,15 +193,59 @@ watch(showSearch, (v) => {
       <div v-if="!searching && !projectStore.searchResults.length && !msgResults.length && searchText" class="search-hint">无匹配结果</div>
     </div>
 
+    <!-- 项目树: 项目 → 会话, 双击改名 -->
     <div v-if="!collapsed" class="plist">
-      <div
-        v-for="p in projectStore.projects"
-        :key="p.id"
-        class="pitem"
-        :class="{ active: p.id === projectStore.currentProjectId }"
-        @click="selectProject(p.id)"
-      >
-        📁 {{ p.name }}
+      <div v-for="p in projectStore.projects" :key="p.id" class="ptree">
+        <div
+          class="pitem"
+          :class="{ active: p.id === projectStore.currentProjectId }"
+          @click="selectProject(p.id)"
+        >
+          <span class="caret" :class="{ open: expanded[p.id] }" @click.stop="toggleProject(p.id)">▸</span>
+          <span
+            v-if="editingProjectId !== p.id"
+            class="pname"
+            title="双击改名"
+            @dblclick.stop="startEditProject(p)"
+          >📁 {{ p.name }}</span>
+          <input
+            v-else
+            v-model="editProjectName"
+            class="rename-input"
+            @keyup.enter="saveProjectName"
+            @keyup.escape="editingProjectId = null"
+            @blur="saveProjectName"
+          />
+        </div>
+
+        <div v-if="expanded[p.id]" class="ctree">
+          <div v-if="loadingTree[p.id]" class="loading-more">加载会话…</div>
+          <template v-else>
+            <div
+              v-for="c in (tree[p.id] || [])"
+              :key="c.id"
+              class="citem"
+              :class="{ active: c.id === convStore.currentConvId }"
+              @click="openConv(c)"
+            >
+              <span
+                v-if="editingConvId !== c.id"
+                class="cname"
+                title="双击改名"
+                @dblclick.stop="startEditConvWithPid(c, p.id)"
+              >💬 {{ c.name || '会话' }}</span>
+              <input
+                v-else
+                v-model="editConvName"
+                class="rename-input"
+                @keyup.enter="saveConvName"
+                @keyup.escape="editingConvId = null"
+                @blur="saveConvName"
+              />
+            </div>
+            <div v-if="!(tree[p.id] || []).length" class="empty small">暂无会话</div>
+          </template>
+        </div>
       </div>
       <div v-if="projectStore.projects.length === 0" class="empty">暂无项目，点 ＋ 新建</div>
     </div>
@@ -139,7 +255,7 @@ watch(showSearch, (v) => {
         :key="p.id"
         class="pdot"
         :class="{ active: p.id === projectStore.currentProjectId }"
-        @click="selectProject(p.id)"
+        @click="toggleProject(p.id)"
       >
         📁
       </div>
@@ -235,7 +351,6 @@ watch(showSearch, (v) => {
   font-size: 12px;
   padding: 10px 0;
 }
-/* 消息搜索结果 */
 .msg-results {
   max-height: 300px;
 }
@@ -268,22 +383,59 @@ watch(showSearch, (v) => {
   overflow: auto;
   padding: 8px;
 }
+.ptree { margin-bottom: 2px; }
 .pitem {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   padding: 8px 10px;
   border-radius: 8px;
   font-size: 14px;
   cursor: pointer;
-  margin-bottom: 4px;
 }
-.pitem:hover {
-  background: var(--hover-bg);
-  color: var(--text);
-}
+.pitem:hover { background: var(--hover-bg); color: var(--text); }
 .pitem.active {
   background: var(--brand-bg);
   color: var(--brand);
   font-weight: 600;
   box-shadow: inset 3px 0 0 var(--brand);
+}
+.caret {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+  width: 10px;
+}
+.caret.open { transform: rotate(90deg); }
+.pname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctree {
+  margin: 2px 0 6px 18px;
+  border-left: 1px dashed var(--border);
+  padding-left: 6px;
+}
+.citem {
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+.citem:hover { background: var(--hover-bg); color: var(--text); }
+.citem.active {
+  background: var(--brand-bg);
+  color: var(--brand);
+  font-weight: 600;
+}
+.cname { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rename-input {
+  flex: 1;
+  width: 100%;
+  border: 1px solid var(--brand);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 13px;
+  outline: none;
 }
 .empty {
   color: var(--muted);
@@ -291,6 +443,7 @@ watch(showSearch, (v) => {
   padding: 12px;
   text-align: center;
 }
+.empty.small { padding: 4px 8px; font-size: 12px; }
 .pdot {
   text-align: center;
   padding: 8px 0;

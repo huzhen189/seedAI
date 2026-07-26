@@ -89,7 +89,7 @@ class Conversation(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
-    title: Mapped[str] = mapped_column(String(128), default="新对话", nullable=False)
+    name: Mapped[str] = mapped_column(String(128), default="新对话", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     checkpoint_stage: Mapped[str | None] = mapped_column(String(64))
     checkpoint_data: Mapped[str | None] = mapped_column(Text)  # JSON snapshot
@@ -100,6 +100,11 @@ class Conversation(Base):
     project: Mapped["Project"] = relationship(back_populates="conversations")
     user: Mapped["User"] = relationship(back_populates="conversations")
     messages: Mapped[list["Message"]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
+
+    @property
+    def title(self) -> str:
+        """向后兼容只读别名(单进程合并时旧调用方/前端可能仍读 title)。统一命名后逐步移除。"""
+        return self.name
 
 
 class Message(Base):

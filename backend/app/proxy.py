@@ -1127,7 +1127,7 @@ async def _persist_conversation(
             db, trace_id,
             project_id=conv.project_id or 0,
             conversation_id=conv.id,
-            title=conv.title or user_text[:20],
+            title=conv.name or user_text[:20],
             repo=repo,
             files=art_files,  # dict{name → {name, size, url/content}}
             preview_url=preview_url or "",
@@ -1152,9 +1152,9 @@ async def _persist_conversation(
         if assistant_text:
             await message_repo.upsert_assistant(db, conv.id, trace_id, assistant_text, model)
 
-    if not conv.title and user_text:
-        conv.title = user_text[:20]
-        logger.info("[chat] 自动设置会话标题 conv=%s title=%.20s", conv.id, user_text)
+    if not conv.name and user_text:
+        conv.name = user_text[:20]
+        logger.info("[chat] 自动设置会话标题 conv=%s name=%.20s", conv.id, user_text)
     conv.updated_at = datetime.utcnow()
     await db.commit()
     logger.info("[chat] 消息落库成功 conv=%s", conv.id)

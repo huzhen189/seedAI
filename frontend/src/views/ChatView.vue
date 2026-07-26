@@ -20,7 +20,7 @@ import MessageBubble from '../components/MessageBubble.vue'
 import SubTaskTrack from '../components/SubTaskTrack.vue'
 import MergedResult from '../components/MergedResult.vue'
 import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
-import { getConversation, listArtifacts, renameProject, patch } from '../api/projects'
+import { getConversation, listArtifacts, renameProject, patch, autoStart } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
@@ -349,8 +349,19 @@ function confirmClarify() {
 
 // 澄清续跑发送: 复用 doSend 的落库/占位逻辑, 但带 clarified=1 让后端跳过二次分类。
 async function doSendClarified(text: string) {
-  const pid = projectStore.currentProjectId
-  if (pid == null) { alert('请先在左侧新建项目'); return }
+  let pid = projectStore.currentProjectId
+  if (pid == null) {
+    try {
+      const res = await autoStart(text)
+      await projectStore.load()
+      projectStore.currentProjectId = res.project.id
+      await convStore.loadConversations(res.project.id)
+      pid = res.project.id
+    } catch {
+      alert('创建项目失败，请稍后重试')
+      return
+    }
+  }
   if (convStore.currentConvId == null || convStore.messages.length === 0) {
     if (!convStore.creating) {
       await convStore.create(pid, text.slice(0, 20))
@@ -1062,8 +1073,20 @@ async function send() {
 }
 
 async function doSend(text: string) {
-  const pid = projectStore.currentProjectId
-  if (pid == null) { alert('请先在左侧新建项目'); return }
+  let pid = projectStore.currentProjectId
+  // 首条对话无项目: 按对话文本自动建项目+会话
+  if (pid == null) {
+    try {
+      const res = await autoStart(text)
+      await projectStore.load()
+      projectStore.currentProjectId = res.project.id
+      await convStore.loadConversations(res.project.id)
+      pid = res.project.id
+    } catch {
+      alert('创建项目失败，请稍后重试')
+      return
+    }
+  }
 
   // 防重复: 只有 id 不存在或消息为空时才创建新会话
   if (convStore.currentConvId == null || convStore.messages.length === 0) {
@@ -1351,7 +1374,7 @@ watch(pendingRetry, (r) => {
         <!-- 所有会话统一消息流(当前+历史同一格式, 会话间仅 thin 分割线) -->
         <template v-for="(s, si) in allSessions" :key="s.conv.id">
           <div v-if="si > 0" class="session-divider">
-            <span>{{ s.conv.title || '会话' }} · {{ s.conv.updated_at?.slice(0, 10) || '' }}</span>
+            <span>{{ s.conv.name || '会话' }} · {{ s.conv.updated_at?.slice(0, 10) || '' }}</span>
           </div>
           <div v-if="s.loading" class="loading-more">加载中…</div>
           <MessageBubble
