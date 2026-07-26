@@ -248,7 +248,8 @@ async def _build_messages_from_db(db: AsyncSession, conversation_id: int, reques
             await r.expire(redis_key, ttl)
             logger.info("[chat] Redis命中 conv=%d cursor=%s cnt=%d TTL已刷新(%ds)",
                        conversation_id, cursor_id or 'latest', len(messages), ttl)
-            return _append_q(messages, request, from_cache=True)
+            # C3 修复: 缓存命中仍须补当前 q(缓存只存历史)
+            return _append_q(messages, request)
     except Exception as e:
         logger.warning("[chat] Redis读失败 conv=%d err=%s", conversation_id, e)
 
@@ -289,10 +290,14 @@ async def _build_messages_from_db(db: AsyncSession, conversation_id: int, reques
     return _append_q(messages, request)
 
 
-def _append_q(messages: list, request: Request, *, from_cache: bool = False) -> list:
-    """追加当前用户输入(非 cache 路径才需要, cache 已含历史)。"""
-    if from_cache:
-        return messages
+def _append_q(messages: list, request: Request) -> list:
+    """追加当前用户输入(q)。
+
+    缓存命中/未命中两条路径都会走到这里: Redis 缓存只存历史(不含当前 q),
+    因此无论来源都必须补上本次用户输入。末尾去重逻辑保证:若历史最后一条已是
+    相同 user q,则不重复追加(C3 修复:此前 from_cache=True 短路导致 2nd turn 起
+    当前输入丢失, LLM 上下文缺最新用户消息)。
+    """
     q = request.query_params.get("q")
     resume = request.query_params.get("resume", "").lower() in ("true", "1")
     if q:
@@ -309,43 +314,8 @@ def _append_q(messages: list, request: Request, *, from_cache: bool = False) -> 
 
 
 # ── 路由定义 ──
-
-
-@router.get("/models")
-async def list_models():
-    """透传 AI 服务的模型列表(匿名可读, 供前端模型选择器使用)。Redis 缓存 300s。"""
-    cache_key = "cache:models"
-    cached = await cache_get(cache_key)
-    if cached:
-        try:
-            return json.loads(cached)
-        except Exception:
-            pass
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(f"{settings.ai_service_url}/models")
-        r.raise_for_status()
-        data = r.json()
-    # 回填缓存(300s TTL, 模型列表极少变动)
-    await cache_set(cache_key, json.dumps(data, ensure_ascii=False), ttl=1500)
-    return data
-
-
-@router.get("/agents")
-async def list_agents():
-    """透传 AI 服务的 Agent 注册表(匿名可读, 供前端头像/名称展示)。Redis 缓存 600s。"""
-    cache_key = "cache:agents"
-    cached = await cache_get(cache_key)
-    if cached:
-        try:
-            return json.loads(cached)
-        except Exception:
-            pass
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(f"{settings.ai_service_url}/agents")
-        r.raise_for_status()
-        data = r.json()
-    await cache_set(cache_key, json.dumps(data, ensure_ascii=False), ttl=600)
-    return data
+# 注: /models 与 /agents 已迁移到 main.py(单进程直读 Provider/SkillRegistry, 不再经
+#     httpx 转发到已不存在的 ai_service —— 旧转发会在合并后 500)。见 main.py。
 
 
 # ---- 对话摘要(Redis 滑动窗口, v0.9.0: TTL 1d + 过期 MySQL 回退) ----
@@ -679,7 +649,7 @@ async def chat(
                 payload["version"] = 1
             proj = await db.get(Project, project_id)
             if proj:
-                payload["project_status"] = proj.status or "draft"
+                payload["project_status"] = proj.build_status or "draft"
                 if proj.requirement_doc:
                     try:
                         payload["requirement_doc"] = json.loads(proj.requirement_doc)
@@ -1207,32 +1177,10 @@ async def post_feedback(
     return {"ok": True, "rating": fb.rating}
 
 
-@router.post("/cancel")
-async def cancel(
-    request: Request,
-    user: CurrentUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """级联取消(C1):转发到 AI 服务的 /cancel。需登录且为 trace 所有者(防越权取消他人生成)。"""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    trace_id = body.get("trace_id") or (await request.body()).decode("utf-8", "ignore")
-    if not trace_id:
-        raise HTTPException(status_code=400, detail="missing trace_id")
-    # 归属校验:trace_id 必须属于当前用户,否则 403。
-    # 用 traces 表(user_id + trace_id 是规范的归属记录);若该 trace 尚未落库
-    # (极端竞态),owner_id 为 None → 放行(不误杀),避免取消不了自己的生成。
-    from sqlmodel import select as _select
-    owner_id = (await db.execute(
-        _select(Trace.user_id).where(Trace.trace_id == trace_id).limit(1)
-    )).scalar_one_or_none()
-    if owner_id is not None and owner_id != user.id:
-        raise HTTPException(status_code=403, detail="not owner of this trace")
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(f"{settings.ai_service_url}/cancel", json={"trace_id": trace_id})
-        return r.json()
+# 注: /cancel 已在 main.py 实现为单进程直写 cancel:<tid>(不再经 httpx 转发)。
+# 旧 proxy 版转发到已不存在的 ai_service → 500, 且与 main.py 的 POST /cancel 重复挂载会
+# 在 FastAPI 启动时报 "multiple routes" 冲突, 故整段删除。
+
 
 # reload v99
 

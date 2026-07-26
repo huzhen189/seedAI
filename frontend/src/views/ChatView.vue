@@ -112,7 +112,7 @@ async function resumeConversation() {
   convStore.currentConvId = pc.id
   setActiveGen(pc.id, traceId.value)
   generating.value = true
-  startChat({ model: model.value, traceId: traceId.value, conversationId: pc.id, cb: makeCallbacks(0), resume: true })
+  openEs({ model: model.value, traceId: traceId.value, conversationId: pc.id, cb: makeCallbacks(0), resume: true })
 }
 
 async function abortPaused() {
@@ -244,7 +244,7 @@ function resumeFromPlan(text: string) {
   } as any)
   const assistantIdx = convStore.messages.length - 1
   lastSentText.value = text
-  esRef.value = startChat({
+  openEs({
     model: model.value,
     traceId: traceId.value,
     conversationId: cid,
@@ -286,7 +286,7 @@ async function resendConfirmed() {
     opts.skill = skill || undefined
   }
 
-  esRef.value = startChat(opts)
+  openEs(opts)
 }
 
 // 多选项选中: 带 skill 参数重发(Worker 直接执行该 skill)
@@ -297,7 +297,7 @@ function resendWithSkill(skillName: string) {
   setActiveGen(cid, traceId.value)
   generating.value = true
   const assistantIdx = convStore.messages.length - 1
-  esRef.value = startChat({
+  openEs({
     model: model.value,
     traceId: traceId.value,
     conversationId: cid,
@@ -317,7 +317,7 @@ function confirmSubTask(subTaskId: string) {
   const cid = convStore.currentConvId!
   setActiveGen(cid, traceId.value)
   generating.value = true
-  esRef.value = startChat({
+  openEs({
     model: model.value,
     traceId: traceId.value,
     conversationId: cid,
@@ -373,7 +373,7 @@ async function doSendClarified(text: string) {
   generating.value = true
   lastSentText.value = text
   input.value = ''
-  esRef.value = startChat({
+  openEs({
     model: model.value,
     traceId: traceId.value,
     conversationId: cid,
@@ -390,6 +390,8 @@ let scrollObserver: IntersectionObserver | null = null
 
 function setupScrollLoading() {
   if (!sentinel.value) return
+  // C14 修复: 重建前先断开旧 observer, 否则每次切会话/加载都泄漏一个 IntersectionObserver
+  teardownScrollLoading()
   scrollObserver = new IntersectionObserver(
     async (entries) => {
       if (entries[0].isIntersecting && !convStore.loadingMore) {
@@ -474,6 +476,28 @@ async function loadArtifacts() {
 }
 const traceId = ref('')
 const esRef = ref<EventSource | null>(null)
+
+// S10 修复: 预览链接可能来自后端/模型输出, 必须过滤危险协议(javascript: 等),
+// 仅放行 http/https。供模板 :href 使用, 防止 XSS 类协议注入。
+function safeHref(url: string | null): string {
+  if (!url) return ''
+  try {
+    const u = new URL(url, window.location.origin)
+    if (u.protocol === 'http:' || u.protocol === 'https:') return u.href
+  } catch {
+    /* 相对路径或非法 → 放行(站内相对路径安全) */
+    if (!/^\s*[a-z]+:/i.test(url)) return url
+  }
+  return ''
+}
+
+// B8 修复: 打开新 SSE 前先关闭上一个 EventSource, 避免重发/重连/切换 skill 时
+// 旧连接泄漏(浏览器持续重试 + 占用连接数)。统一经此入口, 不再裸调 startChat。
+function openEs(opts: Parameters<typeof startChat>[0]) {
+  esRef.value?.close()
+  esRef.value = null
+  esRef.value = startChat(opts)
+}
 // 右侧预览面板实例(ChatView 通过它联动选中文件并打开预览)
 const rightPanel = ref<InstanceType<typeof RightPanel> | null>(null)
 // 后置 QC 三裁判结果 / 用户评价, 均按 trace_id 索引(气泡内展示, v0.8.5 M1)
@@ -701,6 +725,9 @@ function resetGenState() {
   clarifyData.value = null
   clarifySelected.value = []
   clarifyFreeText.value = ''
+  // B7 修复: 任何新请求/重连/重发都先解除 sending 锁, 避免上一轮 error/abort/retry/
+  // clarify/block/confirm/paused 等终态未解锁导致输入框永久卡死(此前仅 onDone 解锁)。
+  sending.value = false
 }
 
 function upsertStep(stage: string, status: ThoughtStep['status'], customLabel?: string) {
@@ -1046,43 +1073,8 @@ async function doSend(text: string) {
   const cid = convStore.currentConvId!
   setActiveGen(cid, traceId.value)
 
-  // ---- WebLLM(v1.0 弃用, 直接走服务端) ----
-  // 后续升级启用时: 删除下方 if(true) return 块, 恢复 WebLLM 代码
-  if (true) { // WEBLLM_DISABLED — 跳过所有本地推理
-    /* ↓↓↓ 原 WebLLM 代码(弃用保留, 方便后续恢复) ↓↓↓
-  let contextHint: string | undefined
-  try {
-    const { contextCheck } = await import('../webllm/context')
-    contextHint = await contextCheck(text, convStore.messages.slice(-20).map(m => ({ role: m.role, content: m.content }))) || undefined
-  } catch { }
-
-  let intent: { level1: string; level2: string } | null = null
-  try {
-    const { localClassify } = await import('../webllm/classifier')
-    intent = await localClassify(text)
-  } catch { }
-
-  if (intent && intent.level1 === 'learn' && intent.level2 === 'casual') {
-    try {
-      const { localChat } = await import('../webllm/chat')
-      const chatMsgs = convStore.messages.slice(-6).map(m => ({ role: m.role, content: m.content }))
-      const reply = await localChat([...chatMsgs, { role: 'user', content: text }])
-      if (reply) {
-        console.log('[WebLLM] 本地闲聊完成 → 不走服务端')
-        convStore.messages.push({ role: 'user', content: text, conversation_id: cid, id: 0, created_at: '' } as any)
-        convStore.messages.push({ role: 'assistant', content: reply, conversation_id: cid, id: 0, created_at: '' } as any)
-        nextTick(scrollToBottom)
-        return
-      }
-    } catch { }
-  }
-  if (intent) {
-    console.log('[WebLLM] 分类结果: ${intent.level1}/${intent.level2} → 路由服务端')
-  } else {
-    console.log('[WebLLM] 本地分类不可用 → 走服务端')
-  }
-    ↑↑↑ 原 WebLLM 代码结束 ↑↑↑ */
-  }
+  // C13 清理: 本地 WebLLM 推理已弃用(v1.0 起统一走服务端), 原死代码块已删除。
+  // 若未来需恢复, 历史实现见 git 历史(src/webllm/* 已一并移除)。
 
   // 多意图: 全新用户请求, 清空之前累计的已确认子任务
   confirmedSubtaskIds.value = []
@@ -1110,7 +1102,7 @@ async function doSend(text: string) {
   lastSentText.value = text
   input.value = ''
 
-  esRef.value = startChat({
+  openEs({
     model: model.value,
     traceId: traceId.value,
     conversationId: cid,
@@ -1128,7 +1120,7 @@ async function resume(convId: number, tid: string) {
   generating.value = true
   traceId.value = tid
   setActiveGen(convId, tid)
-  esRef.value = startChat({
+  openEs({
     model: model.value,
     traceId: tid,
     conversationId: convId,
@@ -1577,7 +1569,7 @@ class="clarify-confirm"
           >
             🔗 复制预览链接
           </button>
-          <a v-if="previewUrl" :href="previewUrl" target="_blank" rel="noreferrer" class="open">
+          <a v-if="previewUrl" :href="safeHref(previewUrl)" target="_blank" rel="noreferrer" class="open">
             打开线上预览 ↗
           </a>
         </div>

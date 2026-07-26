@@ -4,7 +4,7 @@ Both the business (BFF/asset/auth/admin/analytics/metrics) layer and the agent
 (inference) layer import this one ``Settings``. Secrets come from the repo-root
 ``.env`` via pydantic BaseSettings. Async SQLAlchemy MySQL driver is enforced
 (mysql+aiomysql) so local runs hit the same Cloud MySQL as docker (the historical
-NAT-kill bug is avoided via pool_pre_ping + pool_recycle in shared/db.py).
+NAT-kill bug is avoided via pool_pre_ping + pool_recycle in app/db.py).
 
 This merges what used to be two separate settings objects (business/app/config.py
 and ai_service/app/config.py) so the two services now run in one process.

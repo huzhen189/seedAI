@@ -219,7 +219,7 @@ class Orchestrator:
         # ── 风险门控(兜底 5: 风险分级) ──
         # HIGH: 死红线, 系统直接拒绝, 即便用户后续确认也不可绕过(返回 SUB_BLOCKED)
         if st.risk_level == RISK_HIGH:
-            sink(ev("subtask_fail", sub_task_id=st.id, reason="高风险操作不予执行(系统拒绝)", recoverable=False))
+            await sink(ev("subtask_fail", sub_task_id=st.id, reason="高风险操作不予执行(系统拒绝)", recoverable=False))
             return SubTaskResult(
                 id=st.id, status=SUB_BLOCKED, skill=st.selected_skill, goal=st.goal,
                 error="高风险拦截", risk_level=st.risk_level,
@@ -227,7 +227,7 @@ class Orchestrator:
         # MEDIUM: 需用户二次确认; 未确认则跳过(返回 SUB_SKIPPED)并等前端回传,
         #         confirmed_subtasks 携带已确认 id 重发时, 此处放行执行
         if st.risk_level == RISK_MEDIUM and st.id not in confirmed_subtasks:
-            sink(ev("subtask_fail", sub_task_id=st.id,
+            await sink(ev("subtask_fail", sub_task_id=st.id,
                     reason="中风险操作需用户确认(回复确认后重发)",
                     recoverable=True))
             return SubTaskResult(
@@ -265,7 +265,7 @@ class Orchestrator:
                 if ev_name in ("intent", "done"):
                     continue
                 item.setdefault("sub_task_id", st.id)
-                sink(item)
+                await sink(item)
                 if ev_name == "token":
                     data = item.get("data", "")
                     if isinstance(data, str):
@@ -275,14 +275,14 @@ class Orchestrator:
                     if url:
                         artifacts.append(url)
             if await _cancelled_now(is_cancelled):
-                sink(ev("subtask_fail", sub_task_id=st.id, reason="用户取消", recoverable=True))
+                await sink(ev("subtask_fail", sub_task_id=st.id, reason="用户取消", recoverable=True))
                 return SubTaskResult(
                     id=st.id, status=SUB_FAILED, skill=st.selected_skill, goal=st.goal,
                     error="用户取消", risk_level=st.risk_level, duration_ms=int((time.time() - t0) * 1000),
                 )
 
             st.status = SUB_DONE
-            sink(ev("subtask_done", sub_task_id=st.id,
+            await sink(ev("subtask_done", sub_task_id=st.id,
                     result_summary="".join(out_buf)[:200],
                     artifacts=artifacts))
             # 注册产出到共享上下文(供依赖方读取)
@@ -294,7 +294,7 @@ class Orchestrator:
             )
         except Exception as e:
             logger.error("[编排] 子任务 %s 失败: %s", st.id, e)
-            sink(ev("subtask_fail", sub_task_id=st.id, reason=f"执行异常: {e}", recoverable=True))
+            await sink(ev("subtask_fail", sub_task_id=st.id, reason=f"执行异常: {e}", recoverable=True))
             return SubTaskResult(
                 id=st.id, status=SUB_FAILED, skill=st.selected_skill, goal=st.goal,
                 error=str(e), risk_level=st.risk_level, duration_ms=int((time.time() - t0) * 1000),

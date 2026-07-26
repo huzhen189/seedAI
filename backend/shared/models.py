@@ -123,7 +123,15 @@ class Artifact(Base):
     conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id", ondelete="SET NULL"))
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    url: Mapped[str | None] = mapped_column(String(512))
+    title: Mapped[str | None] = mapped_column(String(255))  # 前端展示标题(与 name 并存, 历史 name 保留)
+    url: Mapped[str | None] = mapped_column(String(512))  # 保留兼容列(历史索引),业务实际使用 preview_url
+    # ── 以下为落库/前端展示所需字段(C1 补齐: 此前缺失导致每次建站 AttributeError 500) ──
+    trace_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    repo: Mapped[str | None] = mapped_column(String(32), default="site")
+    preview_url: Mapped[str | None] = mapped_column(String(512))
+    download_url: Mapped[str | None] = mapped_column(String(512))
+    files: Mapped[dict | None] = mapped_column(JSON)  # dict{name -> {name, size, url/content}}
+    status: Mapped[str | None] = mapped_column(String(32), default="done")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
     __table_args__ = (
@@ -146,6 +154,9 @@ class Trace(Base):
     events: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # ── C1 补齐(可空, 防御性): 让 trace 起止时间可被记录/统计 ──
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 

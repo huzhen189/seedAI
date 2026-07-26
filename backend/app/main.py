@@ -138,6 +138,18 @@ async def registry_summary():
     return {"skills": SkillRegistry.names(), "tools": ToolRegistry.names()}
 
 
+@app.get("/models")
+async def list_models():
+    """可用模型列表(公开, 供前端模型选择器)。单进程直读 Provider 注册表, 不再转发。"""
+    return list_providers()
+
+
+@app.get("/agents")
+async def list_agents():
+    """Agent 注册表(公开, 供前端头像/名称展示)。单进程直读 SkillRegistry。"""
+    return SkillRegistry.list_agents()
+
+
 @app.post("/cancel")
 async def cancel(req: Request):
     """级联取消(C1): 标记 cancel:<trace_id>, Worker 在下个 token/阶段前中断。"""

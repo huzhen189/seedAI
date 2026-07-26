@@ -42,12 +42,14 @@ logger = logging.getLogger("ai_service.tools.file_io")
     },
 )
 def file_write(path: str, content: str) -> dict:
-    root = Path(settings.artifact_dir)
-    root.mkdir(parents=True, exist_ok=True)
-    fp = root / path
+    root = Path(settings.artifact_dir).resolve()
+    fp = (root / path).resolve()
+    # S9 修复: 阻止路径穿越(如 '../../etc/passwd'),所有写入必须落在 artifact_dir 内
+    if fp != root and root not in fp.parents:
+        return {"ok": False, "error": "path_traversal", "path": str(path)}
     fp.parent.mkdir(parents=True, exist_ok=True)
     fp.write_text(content, encoding="utf-8")
-    return {"ok": True, "path": str(fp.resolve()), "bytes": len(content.encode("utf-8"))}
+    return {"ok": True, "path": str(fp), "bytes": len(content.encode("utf-8"))}
 
 
 @tool(
@@ -71,13 +73,17 @@ def file_write(path: str, content: str) -> dict:
     },
 )
 def file_read(path: str) -> dict:
-    fp = Path(settings.artifact_dir) / path
+    root = Path(settings.artifact_dir).resolve()
+    fp = (root / path).resolve()
+    # S9 修复: 阻止路径穿越, 读取也必须限定在 artifact_dir 内
+    if fp != root and root not in fp.parents:
+        return {"ok": False, "error": "path_traversal", "path": str(path)}
     if not fp.exists():
         return {"ok": False, "error": "not_found", "path": str(fp)}
     text = fp.read_text(encoding="utf-8")
     return {
         "ok": True,
-        "path": str(fp.resolve()),
+        "path": str(fp),
         "content": text,
         "bytes": len(text.encode("utf-8")),
     }
