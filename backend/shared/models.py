@@ -75,6 +75,12 @@ class Project(Base):
         back_populates="project", cascade="all, delete-orphan"
     )
 
+    # 兼容层: 业务 API 沿用以 `name` 表达项目名, 模型列实为 `title`(单进程合并命名差)。
+    # 用只读 property 双向对齐, 避免 ProjectResp/其他读取处因缺 `name` 而校验失败。
+    @property
+    def name(self) -> str:
+        return self.title
+
 
 class Conversation(Base):
     """A single dialogue inside a project."""

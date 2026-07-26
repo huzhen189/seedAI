@@ -8,7 +8,7 @@ import logging
 
 from typing import Literal, Optional, TypedDict
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import or_, select
 
 from .cache import cache_user_get, cache_user_set
@@ -42,7 +42,24 @@ class _CookieOpts(TypedDict):
     domain: Optional[str]
 
 
-def _set_cookies(resp: Response, access: str, refresh: str) -> None:
+def _cookie_domain_for(host: str | None) -> str | None:
+    """按请求 Host 动态决定 Cookie Domain,避免本地联调被拒。
+
+    旧逻辑写死 settings.cookie_domain(=huzhen.net.cn),导致本地用 127.0.0.1/
+    localhost 访问时浏览器/客户端因 Domain 不匹配而拒绝写入 Cookie → 登录态
+    丢失、所有需鉴权接口 401。修正: 仅当请求 Host 主机名确实隶属于配置域名
+    (线上 seedai.huzhen.net.cn 等)时才带 Domain,否则留空(=仅当前 Host)。
+    """
+    cfg = (settings.cookie_domain or "").strip().lower()
+    if not cfg or not host:
+        return None
+    host = host.split(":")[0].lower()  # 去掉端口
+    if host == cfg or host.endswith("." + cfg):
+        return cfg
+    return None
+
+
+def _set_cookies(resp: Response, access: str, refresh: str, request: Request | None = None) -> None:
     """把 access / refresh 两个 JWT 写进 HttpOnly Cookie。
 
     为什么用 Cookie 而非把 token 返给前端存 localStorage?
@@ -53,12 +70,13 @@ def _set_cookies(resp: Response, access: str, refresh: str) -> None:
     前端无需手动管理 token,也避免 Bearer 头在 SSE 里无法携带的问题。
     access 短时效(max_age=access_token_ttl),refresh 长时效用于静默续期。
     """
+    domain = _cookie_domain_for((request.headers.get('host') if request else None))
     opts: _CookieOpts = {
         "max_age": settings.access_token_ttl,
         "httponly": True,
         "secure": settings.cookie_secure,
         "samesite": "lax",
-        "domain": settings.cookie_domain or None,
+        "domain": domain,
     }
     resp.set_cookie(ACCESS_COOKIE, access, **opts)
     # refresh 复用除 max_age 外的全部属性,仅把有效期换成 refresh_token_ttl。
@@ -66,9 +84,10 @@ def _set_cookies(resp: Response, access: str, refresh: str) -> None:
     resp.set_cookie(REFRESH_COOKIE, refresh, **refresh_opts)
 
 
-def _clear_cookies(resp: Response) -> None:
+def _clear_cookies(resp: Response, request: Request | None = None) -> None:
+    domain = _cookie_domain_for((request.headers.get('host') if request else None))
     for name in (ACCESS_COOKIE, REFRESH_COOKIE):
-        resp.delete_cookie(name, domain=settings.cookie_domain or None)
+        resp.delete_cookie(name, domain=domain or None)
 
 
 def _to_resp(u: User) -> UserResp:
@@ -77,7 +96,7 @@ def _to_resp(u: User) -> UserResp:
 
 
 @router.post("/register", response_model=UserResp)
-async def register(req: RegisterReq, response: Response, db=Depends(get_db)):
+async def register(req: RegisterReq, response: Response, request: Request, db=Depends(get_db)):
     # 唯一性校验
     existing = await user_repo.get_by_username(db, req.username)
     if existing:
@@ -96,21 +115,21 @@ async def register(req: RegisterReq, response: Response, db=Depends(get_db)):
         role="user",
         plan="free",
     )
-    _set_cookies(response, create_access_token(user.id, user.role), create_refresh_token(user.id))
+    _set_cookies(response, create_access_token(user.id, user.role), create_refresh_token(user.id), request)
     return _to_resp(user)
 
 
 @router.post("/login", response_model=UserResp)
-async def login(req: LoginReq, response: Response, db=Depends(get_db)):
+async def login(req: LoginReq, response: Response, request: Request, db=Depends(get_db)):
     user = await user_repo.get_by_username(db, req.username)
     if not user or not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid credentials")
-    _set_cookies(response, create_access_token(user.id, user.role), create_refresh_token(user.id))
+    _set_cookies(response, create_access_token(user.id, user.role), create_refresh_token(user.id), request)
     return _to_resp(user)
 
 
 @router.post("/refresh", response_model=UserResp)
-async def refresh(req: RefreshReq, response: Response, db=Depends(get_db)):
+async def refresh(req: RefreshReq, response: Response, request: Request, db=Depends(get_db)):
     # 刷新令牌必须严格校验两点:
     #   1. 能正常 decode(签名/过期都会抛异常 -> 401);
     #   2. token 的 type 字段必须为 "refresh",防止拿 access token 当 refresh 用
@@ -126,13 +145,13 @@ async def refresh(req: RefreshReq, response: Response, db=Depends(get_db)):
     user = await user_repo.get_by_id(db, uid)
     if not user:
         raise HTTPException(status_code=401, detail="user not found")
-    _set_cookies(response, create_access_token(user.id, user.role), create_refresh_token(user.id))
+    _set_cookies(response, create_access_token(user.id, user.role), create_refresh_token(user.id), request)
     return _to_resp(user)
 
 
 @router.post("/logout")
-async def logout(response: Response):
-    _clear_cookies(response)
+async def logout(response: Response, request: Request):
+    _clear_cookies(response, request)
     return {"ok": True}
 
 

@@ -27,6 +27,19 @@ class ProjectRepo(BaseRepo[Project]):
     async def get_by_share_id(self, db: AsyncSession, share_id: str) -> Optional[Project]:
         return await self.get_by(db, share_id=share_id)
 
+    # 字段名兼容: 业务层接口沿用以 `name` 表达项目名, 但 Project 模型的列是 `title`
+    # (单进程合并时的命名差)。在此统一把 name→title 落库, 避免 create/update 直接
+    # 透传 name 触发 "invalid keyword argument for Project" 的 500。
+    async def create(self, db: AsyncSession, **data) -> Project:
+        if "name" in data:
+            data["title"] = data.pop("name")
+        return await super().create(db, **data)
+
+    async def update(self, db: AsyncSession, obj: Project, **data) -> Project:
+        if "name" in data:
+            data["title"] = data.pop("name")
+        return await super().update(db, obj, **data)
+
 
 class ConversationRepo(BaseRepo[Conversation]):
     model = Conversation

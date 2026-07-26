@@ -45,7 +45,37 @@ logger = logging.getLogger("app.main")
 
 setup_logging("app")
 
-app = FastAPI(title=settings.app_title)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 1) 业务层 schema 初始化 + 超管种子
+    await init_db()
+    # 2) 推理层: 确保队列单例、重建 Chroma 集合、构建意图向量索引
+    get_queue()
+    try:
+        from .agent.knowledge.chroma import ensure_collections
+        ensure_collections()
+    except Exception as e:
+        logger.warning("lifespan: ensure_collections 失败(可忽略): %s", e)
+    try:
+        from .agent.intent.vector_store import ensure_intent_index
+        ensure_intent_index()
+    except Exception as e:
+        logger.warning("lifespan: ensure_intent_index 失败(可忽略): %s", e)
+    # 3) 启动 Worker 池(消费 queue:generate, 发布进度)
+    try:
+        loop = asyncio.get_running_loop()
+        worker_task = loop.create_task(worker_loop(concurrency=settings.worker_concurrency))
+        logger.info("[startup] Worker 池已提交到事件循环 (concurrency=%s)", settings.worker_concurrency)
+    except Exception as e:
+        logger.error("[startup] Worker 池启动失败: %s", e)
+    # 4) 业务层对账器
+    start_reconciler()
+    logger.info("统一应用启动完成(单进程 v2.0)")
+    yield
+    worker_task.cancel()
+
+
+app = FastAPI(title=settings.app_title, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -86,30 +116,6 @@ def _exception_handler(loop, context):
 asyncio.get_event_loop().set_exception_handler(_exception_handler)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # 1) 业务层 schema 初始化 + 超管种子
-    await init_db()
-    # 2) 推理层: 确保队列单例、重建 Chroma 集合、构建意图向量索引
-    get_queue()
-    try:
-        from .agent.knowledge.chroma import ensure_collections
-        ensure_collections()
-    except Exception as e:
-        logger.warning("lifespan: ensure_collections 失败(可忽略): %s", e)
-    try:
-        from .agent.intent.vector_store import ensure_intent_index
-        ensure_intent_index()
-    except Exception as e:
-        logger.warning("lifespan: ensure_intent_index 失败(可忽略): %s", e)
-    # 3) 启动 Worker 池(消费 queue:generate, 发布进度)
-    worker_task = asyncio.ensure_future(worker_loop(concurrency=settings.worker_concurrency))
-    # 4) 业务层对账器
-    start_reconciler()
-    logger.info("统一应用启动完成(单进程 v2.0)")
-    yield
-    worker_task.cancel()
-
 
 # ---------- 推理层只读端点(原 ai_service 暴露, 现同进程) ----------
 @app.get("/models")
@@ -136,12 +142,6 @@ async def list_tools():
 @app.get("/registry")
 async def registry_summary():
     return {"skills": SkillRegistry.names(), "tools": ToolRegistry.names()}
-
-
-@app.get("/models")
-async def list_models():
-    """可用模型列表(公开, 供前端模型选择器)。单进程直读 Provider 注册表, 不再转发。"""
-    return list_providers()
 
 
 @app.get("/agents")

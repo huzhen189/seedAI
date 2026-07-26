@@ -72,10 +72,18 @@ def _get_redis():
     try:
         import redis.asyncio as aioredis
 
+        # 关键: 与 cache.py / queue.py 保持一致, 强制 RESP2(protocol=2)。
+        # redis-py 默认走 RESP3 握手会先发 `HELLO`, 部分云 Redis(老版本/代理)
+        # 不支持 HELLO → 直接 `unknown command HELLO ...`。
+        # 这里用 protocol=2 避开 HELLO, 否则所有 AI 核心统计写入都会静默失败。
         _redis_client = aioredis.from_url(
             settings.redis_url,
+            protocol=2,
             socket_connect_timeout=3,
             socket_timeout=3,
+            health_check_interval=30,
+            socket_keepalive=True,
+            retry_on_timeout=True,
         )
     except Exception as e:  # 缺 redis 库或连不上 → 静默降级, 不阻塞主流程
         logger.warning("AI analytics redis 不可用, 统计降级: %s", e)

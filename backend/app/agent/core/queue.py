@@ -573,6 +573,7 @@ def get_queue() -> QueueBackend:
 
 async def worker_loop(concurrency: int = 1):
     """Worker 池:消费 queue:generate,运行 run_skill,把每个事件 publish 到对应进度流(持久化)。"""
+    logger.info("[Worker] worker_loop 启动, concurrency=%s backend=%s", concurrency, type(get_queue()).__name__)
     q = get_queue()
 
     # 用 asyncio 任务池模拟并发 Worker
