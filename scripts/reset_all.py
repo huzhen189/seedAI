@@ -87,6 +87,7 @@ async def reset() -> None:
         # 运行数据集合 —— 用户/项目运行时数据, 重置时**清空**
         CHROMA_RUNTIME_COLLECTIONS = {
             "memory", "cache_gen", "user_preferences", "project_memory", "project_code",
+            "conversation_context",  # 会话上下文向量(ai_service.knowledge.chroma.CTX_COLLECTION), 运行期数据需清空
         }
 
         colls = c.list_collections()
