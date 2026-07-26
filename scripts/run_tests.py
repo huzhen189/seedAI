@@ -21,8 +21,10 @@ from urllib.parse import quote_plus
 import httpx
 
 # ── 配置 ──────────────────────────────────────────
+# v2.0.0 起: 业务服务 + AI 核心合并为单进程, 对话统一走 /api/chat 网关(GET SSE),
+# 不再有独立的 7102 AI 服务 /generate 端点。
 BASE = os.environ.get("TEST_HOST", "http://127.0.0.1:7101")
-AI_BASE = os.environ.get("TEST_AI_HOST", "http://127.0.0.1:7102")
+MODEL = os.environ.get("TEST_MODEL", "qwen")  # 默认模型(与 backend/shared/config.py 一致)
 USER = os.environ.get("TEST_USER", "huzhen")
 PASS = os.environ.get("TEST_PASS", "huzhen189")
 CONV_ID = None
@@ -256,18 +258,26 @@ async def create_conv(client: httpx.AsyncClient, headers: dict) -> tuple[int | N
 
 async def send_chat(client: httpx.AsyncClient, headers: dict,
                     conv_id: int, text: str, timeout: int = 120) -> dict:
-    """发送一轮对话(直调AI核心7102/generate)，返回 {done, tokens, events, qc, refined, error, elapsed}。"""
+    """发送一轮对话(单进程 /api/chat 网关, GET + SSE),返回 {done, tokens, events, qc, refined, error, elapsed}。
+
+    v2.0.0: 合并后 SSE 由 /api/chat 直接订阅同进程 Worker 频道产出；用户消息走
+    ?q= 参数(后端据此追加为最后一条 user 消息)，无需事先落库。事件帧与旧 /generate
+    一致: token / done / qc / refined / error。
+    """
     t0 = time.time()
     result = {"done": False, "tokens": 0, "events": 0,
               "qc": False, "refined": False, "error": False, "elapsed": 0.0}
+    trace_id = f"test-{int(t0*1000)%1000000}"
+    params = {
+        "model": MODEL,
+        "conversation_id": conv_id,
+        "q": text,
+        "trace_id": trace_id,
+    }
     try:
-        job = {
-            "model_id": "deepseek", "messages": [{"role": "user", "content": text}],
-            "trace_id": f"test-{int(t0*1000)%1000000}", "conversation_id": conv_id,
-            "user_id": 1, "project_id": PROJ_ID or 1,
-        }
-        async with client.stream("POST", f"{AI_BASE}/generate", json=job,
-                                 headers={"Content-Type": "application/json"},
+        async with client.stream("GET", f"{BASE}/api/chat", params=params,
+                                 headers={"Cookie": headers.get("Cookie", ""),
+                                          "Accept": "text/event-stream"},
                                  timeout=timeout) as resp:
             if resp.status_code != 200:
                 result["error"] = True; result["elapsed"] = time.time() - t0; return result

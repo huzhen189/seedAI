@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, "reconfigure") else None
 
 BASE = "http://127.0.0.1:7101"
-AI_BASE = "http://127.0.0.1:7102"
+# v2.0.0: 单进程, 不再有独立 AI 服务的 /health;/generate。对话统一走 {BASE}/api/chat。
 TEST_USER = "huzhen"
 TEST_PASS = "huzhen189"
 TEST_NICK = "小胡"
@@ -159,10 +159,10 @@ async def run():
     async with httpx.AsyncClient(timeout=120) as client:
         # ---- Step 1: 健康检查 ----
         print("\n[1/5] 健康检查...")
+        # v2.0.0: 单进程, 业务 + AI 核心合并, 健康检查只看 /ready(无独立 /health 端点)。
         r1 = await client.get(f"{BASE}/ready")
-        r2 = await client.get(f"{AI_BASE}/health")
-        ok = r1.status_code == 200 and r2.status_code == 200
-        log_result(0, "服务健康检查", ok, "both UP", f"business={r1.status_code} ai={r2.status_code}")
+        ok = r1.status_code == 200
+        log_result(0, "服务健康检查", ok, "UP", f"backend(7101)={r1.status_code}")
 
         # ---- Step 2: 注册与登录 ----
         print("\n[2/5] 注册/登录...")
