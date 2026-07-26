@@ -33,8 +33,15 @@ from fastapi.security import HTTPBearer
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .analytics import record_error, record_intent_result, record_model_detail, record_skill_outcome, record_user_active, record_intent_decision
-from .analytics import record_agent_usage, record_context_detection, record_requirement_doc, record_project_status_transition
+from .analytics import (  # 业务端统计接入(§「新增功能必接统计」约定)
+    record_error,
+    record_intent_result,
+    record_model_detail,
+    record_skill_outcome,
+    record_user_active,
+    record_intent_decision,
+)
+from .analytics import record_context_detection, record_requirement_doc, record_project_status_transition
 from .analytics import record_qc, record_feedback
 from .cache import cache_get, cache_set, ck_delete, ck_get, ck_set, enqueue_write_error, get_redis
 from .config import settings
@@ -588,7 +595,11 @@ async def chat(
     logger.info("[chat] [3/8] 配额检查通过 plan=%s 剩余=%s", plan, remaining)
 
     # --- 4) 计量 + Trace ---
+    # 计量: 模型用量计数 + (统计) DAU 活跃用户 + (统计) 模型成功率基线(首调用记为成功样本,
+    # 后续失败会经 record_model_detail(success=False) 修正, 供「系统分析」模型成功率分布)。
     await record_model_usage(user.id, model)
+    await record_user_active(user.id)  # 统计: DAU(按日去重活跃用户) + 人均生成次数
+    await record_model_detail(model, success=True, intent="chat")  # 统计: per-model 成功率/意图分布基线
     await create_trace(db, user.id, conversation_id, tid, model)
     logger.info("[chat] [4/8] 计量已记录 + trace=%s 已创建", tid)
 
@@ -620,9 +631,9 @@ async def chat(
     if ctx:
         payload["context_hint"] = ctx
         logger.info("[chat] 上下文检测 frontend_context=%.80s", ctx)
-        await record_context_detection("webllm")
+        await record_context_detection("frontend")  # 上下文来源: 前端直传(非向量检索)
     else:
-        await record_context_detection("chroma")
+        await record_context_detection("chroma")  # 上下文来源: 服务端 Chroma 向量检索
     summary = await get_summary(conversation_id)
     if summary:
         payload["conversation_summary"] = summary

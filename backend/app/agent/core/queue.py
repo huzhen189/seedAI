@@ -33,9 +33,11 @@ from ..intent.selection import (
     set_pending_clarify, get_pending_clarify, clear_pending_clarify,
 )
 from .git_site import commit_site_for_trace
-from ..analytics import (  # v0.9.0 新增功能统计
-    record_repair, record_distill, record_code_index, record_refine, record_chat_retry,
+from ..analytics import (  # AI 核心原生统计(合并后同库, 命名空间 ai:/an:)
+    record_repair, record_distill, record_code_index, record_refine,
+    record_chat_retry, record_generate_request,
 )
+from ...analytics import record_skill_outcome, record_gen_stage  # 业务端每步统计: skill 成效 + 生成阶段耗时
 
 
 _JOB_QUEUE = "queue:generate"
@@ -578,6 +580,8 @@ async def worker_loop(concurrency: int = 1):
                 job = await q.dequeue()
                 t_job = time.time()
                 logger.info("[Worker] [1/6] 从队列取出任务 trace=%s", job.get("trace_id"))
+                # 统计: AI 核心总生成请求数(反映真实负载, 独立于编排统计)
+                await record_generate_request()
             except Exception as e:
                 logger.warning("[Worker] 取任务失败,1秒后重试: %s", e)
                 await asyncio.sleep(1)
@@ -955,6 +959,8 @@ async def worker_loop(concurrency: int = 1):
                 qc_assistant_buf: list[str] = []
                 done_event: dict | None = None
                 review_needs = False
+                # 生成阶段耗时统计: 记录进入各阶段的时间戳(供 record_gen_stage 算时长)
+                _stage_enter: dict[str, float] = {}
                 async for event in run_skill(
                     skill_name, model_id, messages,
                     trace_id=trace_id, is_cancelled=_cancelled,
@@ -983,6 +989,13 @@ async def worker_loop(concurrency: int = 1):
                         data = event.get("data", "")
                         if isinstance(data, str):
                             qc_assistant_buf.append(data)
+                    # 生成阶段进入埋点: node(stage=enter_planner|enter_coder|enter_reviewer|previewing)
+                    # 仅记录「首次进入该阶段」的耗时基准, 阶段耗时统计走 record_gen_stage。
+                    if event.get("event") == "node" and skill_name in ("agent_build", "agent_generate_site"):
+                        d = event.get("data") or {}
+                        stg = d.get("stage")
+                        if stg in ("enter_planner", "enter_coder", "enter_reviewer", "previewing") and stg not in _stage_enter:
+                            _stage_enter[stg] = time.time()
                     await q.publish(trace_id, event)
                     event_cnt += 1
                 # ── [6/6] 后置 QC 三裁判(按需触发) ──
@@ -1097,6 +1110,20 @@ async def worker_loop(concurrency: int = 1):
                         logger.debug("[Worker] 代码索引失败: %s", _ie)
                 logger.info("[Worker] [6/6] 执行完毕 trace=%s skill=%s 共发出%d个事件 总耗时%.0fms",
                            trace_id, skill_name, event_cnt, (time.time() - t_job) * 1000)
+                # 统计: 单 skill 路径成效(成功/失败/中断 + 耗时), 供「系统分析」skill 维度成功率
+                try:
+                    _ok = done_event is not None and not (qc_result and qc_result.get("error"))
+                    await record_skill_outcome(
+                        skill_name, "ok" if _ok else "fail", (time.time() - t_job) * 1000
+                    )
+                except Exception as _soe:  # noqa: BLE001
+                    logger.debug("[Worker] skill_outcome 统计失败(忽略): %s", _soe)
+                # 统计: 生成各阶段耗时(建站/生成站点类技能), 供「系统分析」生成链路耗时分布
+                try:
+                    for _s, _t in _stage_enter.items():
+                        await record_gen_stage(_s, (time.time() - _t) * 1000)
+                except Exception as _gse:  # noqa: BLE001
+                    logger.debug("[Worker] gen_stage 统计失败(忽略): %s", _gse)
                 try:
                     await _commit_after_done(trace_id, skill_name, qc_user_text)
                 except Exception:

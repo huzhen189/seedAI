@@ -537,16 +537,6 @@ async def analytics_snapshot() -> dict:
             gen_rate = round(done / max(total, 1), 3)
 
         # ---- v0.7.0 新增统计 ----
-        # Agent 用量
-        agent_total = await r.hgetall(f"{P_AGENT}:total")
-        agent_ok = await r.hgetall(f"{P_AGENT}:ok")
-        agent_stats: dict = {}
-        for aid in set(list(agent_total.keys()) + list(agent_ok.keys())):
-            t = int(agent_total.get(aid, 0))
-            o = int(agent_ok.get(aid, 0))
-            if t > 0:
-                agent_stats[aid] = {"total": t, "ok": o, "rate": round(o / t, 3)}
-
         # 项目状态流转
         project_status = await r.hgetall(P_PROJECT_STATUS)
         status_stats = {k.decode() if isinstance(k, bytes) else k: int(v)
@@ -564,16 +554,6 @@ async def analytics_snapshot() -> dict:
         ctx_stats = await r.hgetall(P_CONTEXT)
         context_stats = {k.decode() if isinstance(k, bytes) else k: int(v)
                          for k, v in (ctx_stats or {}).items()}
-
-        # WebLLM
-        wllm_total = await r.hgetall(f"{P_WEBLLM}:total")
-        wllm_ok = await r.hgetall(f"{P_WEBLLM}:ok")
-        wllm_stats: dict = {}
-        for act in set(list(wllm_total.keys()) + list(wllm_ok.keys())):
-            t = int(wllm_total.get(act, 0))
-            o = int(wllm_ok.get(act, 0))
-            if t > 0:
-                wllm_stats[act] = {"total": t, "ok": o, "rate": round(o / t, 3)}
 
         # 意图决策分布(v0.8.1: 安全拦截/二次确认/多选项/路由)
         decision_raw = await r.hgetall(P_INTENT_DECISION)
@@ -625,13 +605,11 @@ async def analytics_snapshot() -> dict:
             "error_stats": error_stats,
             "model_stats": model_stats,
             # v0.7.0 新增
-            "agent_usage": agent_stats,
             "project_status": status_stats,
             "requirement_doc": {"ok": req_ok, "fail": req_fail,
                                 "avg_pages": round(req_pages_sum / max(req_pages_cnt, 1), 1),
                                 "avg_features": round(req_feat_sum / max(req_feat_cnt, 1), 1)},
             "context_detection": context_stats,
-            "webllm": wllm_stats,
             "intent_decisions": {
                 "by_decision": decision_stats,
                 "by_skill": decision_skill_stats,
@@ -671,11 +649,9 @@ async def analytics_snapshot() -> dict:
 
 
 # ---- v0.7.0 新增统计维度 ----
-P_AGENT = "an:agent"            # per-agent 使用计数
 P_PROJECT_STATUS = "an:project:status"  # 项目状态流转
 P_REQUIREMENT = "an:requirement"  # 需求文档生成
 P_CONTEXT = "an:context"          # 上下文检测方式
-P_WEBLLM = "an:webllm"           # WebLLM 本地推理
 P_COS = "an:cos"                  # COS 上传统计
 
 
@@ -693,20 +669,6 @@ async def record_cos_upload(ok: bool, size_bytes: int = 0, elapsed_ms: float = 0
             await r.zremrangebyrank(zkey, 0, -(LATENCY_MAX_SAMPLES + 1))
     except Exception as e:
         logger.warning("analytics record_cos_upload failed: %s", e)
-
-
-async def record_agent_usage(agent_id: str, status: str, elapsed_ms: float = 0) -> None:
-    """per-agent 使用: ok/fail/abort + 延迟采样"""
-    try:
-        r = await get_redis()
-        await r.hincrby(f"{P_AGENT}:total", agent_id, 1)
-        await r.hincrby(f"{P_AGENT}:{status}", agent_id, 1)
-        if elapsed_ms > 0:
-            zkey = f"{P_AGENT}:latency:{agent_id}"
-            await r.zadd(zkey, {uuid.uuid4().hex: elapsed_ms})
-            await r.zremrangebyrank(zkey, 0, -(LATENCY_MAX_SAMPLES + 1))
-    except Exception as e:
-        logger.warning("analytics record_agent_usage failed: %s", e)
 
 
 async def record_project_status_transition(project_id: int, old_status: str, new_status: str) -> None:
@@ -734,26 +696,12 @@ async def record_requirement_doc(project_id: int, ok: bool, pages: int = 0, feat
 
 
 async def record_context_detection(source: str) -> None:
-    """上下文检测方式: webllm / chroma / none"""
+    """上下文检测方式: chroma / none"""
     try:
         r = await get_redis()
         await r.hincrby(P_CONTEXT, source, 1)
     except Exception as e:
         logger.warning("analytics record_context_detection failed: %s", e)
-
-
-async def record_webllm_usage(action: str, ok: bool, elapsed_ms: float = 0) -> None:
-    """WebLLM 本地推理: classify/chat/context + 成功/失败 + 延迟"""
-    try:
-        r = await get_redis()
-        await r.hincrby(f"{P_WEBLLM}:total", action, 1)
-        await r.hincrby(f"{P_WEBLLM}:{'ok' if ok else 'fail'}", action, 1)
-        if elapsed_ms > 0:
-            zkey = f"{P_WEBLLM}:latency:{action}"
-            await r.zadd(zkey, {uuid.uuid4().hex: elapsed_ms})
-            await r.zremrangebyrank(zkey, 0, -(LATENCY_MAX_SAMPLES + 1))
-    except Exception as e:
-        logger.warning("analytics record_webllm_usage failed: %s", e)
 
 
 # ---- v0.8.5 新增统计维度: 后置三裁判 QC + 用户评价 ----
