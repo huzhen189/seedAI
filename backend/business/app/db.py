@@ -10,7 +10,7 @@ import logging
 from sqlalchemy import inspect, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from .config import settings
+from .config import settings, ENV_FILE
 
 logger = logging.getLogger("business.db")
 
@@ -231,9 +231,22 @@ async def reset_db() -> dict:
 
     # 2.5) 清空 Chroma 所有集合(v0.9.0: 重置须同步清向量库, 与 reset_all.py 一致)
     try:
+        import os
         from urllib.parse import urlparse as _up
         import chromadb
-        chroma_url = getattr(settings, "chroma_url", None) or "http://chroma:8000"
+        # business Settings 未定义 chroma_url 字段, 须从环境变量或根 .env 读取真实地址
+        # (Chroma 为远程服务, 默认回退 http://chroma:8000 是 docker 内网名, 本机连不上)
+        _cu = os.environ.get("CHROMA_URL")
+        if not _cu:
+            try:
+                for _l in ENV_FILE.read_text(encoding="utf-8").splitlines():
+                    _l = _l.strip()
+                    if _l.startswith("CHROMA_URL="):
+                        _cu = _l.split("=", 1)[1].strip()
+                        break
+            except Exception:
+                pass
+        chroma_url = _cu or "http://chroma:8000"
         p = _up(chroma_url)
         c = chromadb.HttpClient(host=p.hostname or "localhost", port=p.port or 8000)
         colls = c.list_collections()

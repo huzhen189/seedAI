@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend" / "business"))
 
-from app.config import settings  # noqa: E402
+from app.config import settings, ENV_FILE  # noqa: E402
 from app.db import SessionLocal, engine, init_db  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
@@ -63,9 +63,22 @@ async def reset() -> None:
     #      说明: 规则 JSON 文件(intent_catalog.json / rules_catalog.json / ruleset.json)在磁盘上,
     #           本脚本不触碰, 天然安全; 此处仅针对 Chroma 内"由规则派生的向量索引"做保留。
     try:
+        import os
         from urllib.parse import urlparse as _up
         import chromadb
-        chroma_url = getattr(settings, 'chroma_url', None) or "http://chroma:8000"
+        # business Settings 未定义 chroma_url 字段, 须从环境变量或根 .env 读取真实地址
+        # (Chroma 为远程服务, 默认回退 http://chroma:8000 是 docker 内网名, 本机连不上)
+        _cu = os.environ.get("CHROMA_URL")
+        if not _cu:
+            try:
+                for _l in ENV_FILE.read_text(encoding="utf-8").splitlines():
+                    _l = _l.strip()
+                    if _l.startswith("CHROMA_URL="):
+                        _cu = _l.split("=", 1)[1].strip()
+                        break
+            except Exception:
+                pass
+        chroma_url = _cu or "http://chroma:8000"
         p = _up(chroma_url)
         c = chromadb.HttpClient(host=p.hostname or "localhost", port=p.port or 8000)
 
