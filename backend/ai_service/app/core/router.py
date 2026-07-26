@@ -1,7 +1,7 @@
 """Router:意图管道 + Skill 分发。
 
-- detect_intent_v2: 混合级联意图识别(classify_v3) → PipelineResult → 兼容旧 dict
-- skill_for: (level1, level2) → skill_name 查表
+- detect_intent_v2: 混合级联意图识别(classify_v3, 含多意图拆分) → PipelineResult → 兼容旧 dict
+- skill_for: (level1, level2) → skill_name(委托意图目录单一来源)
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from ..intent.cascade import classify_v3
-from ..intent.tools import INTENT_SKILL_MAP
+from ..intent.catalog import skill_for as catalog_skill_for
 from ..registry import SkillRegistry
 
 
@@ -41,11 +41,9 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
                            context_hint: str = "",
                            project_status: str = "draft",
                            project_constraints: list[str] | None = None,
-                           checkpoint_info: dict | None = None,
                            user_id: int | None = None,
                            project_id: int | None = None,
-                           has_requirement_doc: bool = False,
-                           site_generated: bool = False) -> dict:
+                           has_requirement_doc: bool = False) -> dict:
     """意图识别入口: 统一走混合级联 classify_v3(自 v1.2.0 起为唯一分类器)。
 
     v0.9.0: 新增 user_id/project_id 用于 Chroma 上下文增强。
@@ -61,11 +59,9 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
         context_hint=context_hint,
         project_status=project_status,
         project_constraints=project_constraints,
-        checkpoint_info=checkpoint_info,
         user_id=user_id,
         project_id=project_id,
         has_requirement_doc=has_requirement_doc,
-        site_generated=site_generated,
     )
     l1 = result.intent["level1"]
     l2 = result.intent["level2"]
@@ -100,7 +96,8 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
 
 
 def skill_for(level1: str, level2: str) -> str | None:
-    return INTENT_SKILL_MAP.get((level1, level2))
+    """(level1, level2) → skill_name。委托给意图目录单一来源(catalog.skill_for)。"""
+    return catalog_skill_for(level1, level2)
 
 
 async def dispatch(

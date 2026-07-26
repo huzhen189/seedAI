@@ -1,8 +1,8 @@
-"""意图目录加载器(单一来源, v1.2.0 混合级联)。
+"""意图目录加载器(单一来源, v1.2.5)。
 
-- 分类(向量召回 + LLM 终判)与多意图拆分(splitter)共用同一份 intent_catalog.json,
-  根治旧 splitter.SKILL_WHITELIST 与 INTENT_SKILL_MAP 两处维护漂移的 R3 风险。
-- 提供: load_catalog / get_intent / intent_list / catalog_for_llm / skill_whitelist。
+- 分类(向量召回 + LLM 终判)与多意图拆分(multi_intent)共用同一份 intent_catalog.json,
+  技能映射由 skill_for() 统一派生, 根治旧多来源维护漂移的 R3 风险。
+- 提供: load_catalog / get_intent / intent_list / catalog_for_llm / skill_whitelist / skill_for。
 - 纯 JSON + 缓存, 可离线(无 Chroma / 无 Redis)直接测试。
 """
 
@@ -92,10 +92,9 @@ def catalog_for_llm(top_ids: list[tuple[str, float]] | None = None) -> str:
 
 
 def skill_whitelist() -> str:
-    """生成供 splitter LLM 使用的『可用技能』白名单文本(从目录派生, 单一来源)。
+    """生成供多意图拆分 LLM 使用的『可用技能』白名单文本(从目录派生, 单一来源)。
 
-    旧 splitter.SKILL_WHITELIST 硬编码了 agent_chat/explain/write_code 等失效名,
-    这里改为直接读目录, 保证与 INTENT_SKILL_MAP / 实际注册技能一致。
+    保证与 catalog.skill_for / 实际注册技能完全一致, 杜绝旧硬编码白名单失效名漂移。
     """
     # 去重保留 skill → 代表性标题
     seen: dict[str, str] = {}
@@ -105,3 +104,9 @@ def skill_whitelist() -> str:
             seen[sk] = it.get("title", sk)
     parts = [f"{sk}({title})" for sk, title in seen.items()]
     return "、".join(parts)
+
+
+def skill_for(level1: str, level2: str) -> str | None:
+    """(level1, level2) → 注册技能名。技能映射唯一来源(消除旧 INTENT_SKILL_MAP 漂移)。"""
+    it = intent_by_level(level1, level2)
+    return it.get("skill") if it else None

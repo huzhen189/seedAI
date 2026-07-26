@@ -1,6 +1,6 @@
 {
   "version": "1.2.0",
-  "description": "意图目录(分类与多意图拆分共用单一来源)。字段: id/level1/level2/skill/category/title/description/examples/required_slots。skill 必须与 INTENT_SKILL_MAP 实际注册名一致(根治 SKILL_WHITELIST vs INTENT_SKILL_MAP 两处维护的 R3 风险)。",
+  "description": "意图目录(分类与多意图拆分共用单一来源)。字段: id/level1/level2/skill/category/title/description/examples/required_slots。skill 必须与实际注册技能名一致(skill 由 catalog.skill_for 统一派生, 根治多来源维护的 R3 风险)。",
   "intents": [
     {
       "id": "chat_casual",

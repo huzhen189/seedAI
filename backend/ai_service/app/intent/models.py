@@ -35,7 +35,7 @@ class PipelineResult:
     evidence: dict = field(default_factory=dict)
     decision: str = "route"  # "route"|"block"|"confirm"|"options"|"fallback"|"split"|"clarify"
     selected_skill: str = "explain"
-    sub_tasks: list = field(default_factory=list)   # 多意图: list[SubTask]
+    sub_tasks: list[SubTask] = field(default_factory=list)   # 多意图: list[SubTask]
     split_reason: str = ""                            # 拆分原因(供统计/前端展示)
     # 澄清 / 可观测
     clarify_questions: list = field(default_factory=list)

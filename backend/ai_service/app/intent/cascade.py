@@ -1,19 +1,28 @@
-"""混合级联意图识别核心(分类 v1.2.0, classify_v3)。
+"""混合级联意图识别核心(classify_v3, v1.2.5)。
 
-四步链路(见文档《意图识别-链路流程对比-规则优先级联vsSIR》混合级联方案):
-  ① 规则强信号直路由(match_rules) —— 命中强信号进入候选。
-  ② 向量召回 top5(retrieve_intents, Chroma 优先, 离线 bigram 兜底)。
-  ③ 向量 super-fast 直通: 强规则命中 且 向量 top1 相似度≥0.9 且对齐 → 跳过 LLM, 直接路由。
-  ④ LLM 有界终判(仅从 top5 候选里选 + 任务态 + 工具列表 + 已收集槽位 → 结构化 JSON)。
-  ⑤ 置信门控: 高→route; 低/缺关键参数→clarify(≤2 轮); 新奇度兜底(top5 全<0.45→chat)。
-  ⑥ 多意图拆分: route 且 build 类且轻量门控命中 → maybe_split。
+单意图分类: _classify_segment(步骤 ①~⑪)
+  ① 选项选择短路(resolve_selection)
+  ② 删除信号短路(→ agent_delete)
+  ③ RESET 信号短路(→ 闲聊)
+  ④ 规则强信号(match_rules)
+  ⑤ 向量召回 top5(retrieve_intents, asyncio.to_thread)
+  ⑥ 向量 super-fast 直通(强规则 + top1 对齐 + ≥0.9 → 跳过 LLM)
+  ⑦ 新奇度兜底(全低 → 闲聊)
+  ⑧ 安全拦截(critical → block)
+  ⑨ LLM 有界终判(_llm_rule, 仅从候选选)
+  ⑩ 置信门控(route/clarify)
+  ⑪ 槽位累积 + 工具映射(run_tools) + 持久化
 
-相对 SIR(v1.1.0)的优化:
-  - 删掉易出 bug 的 update_belief 粘性算术, 多轮一致性靠「显式上下文 + 持久化槽位(store.py)」。
-  - 分类与拆分共用 intent_catalog.json(单一来源), 根治 SKILL_WHITELIST 两处维护的 R3 风险。
-  - 产出统一 PipelineResult 契约(intent/models.py), router/queue/worker 零改动。
+多意图拆分: classify_v3 顶层
+  单意图分类完成后, 若 decision==route, 调用 multi_intent.recognize_intents
+  做 A+B 路由(方案B 混合分层优先, 必要时升级方案A LLM 深拆)。
 
-外部依赖: knowledge.chroma(向量) / analytics._get_redis(槽位) / providers(LLM) 均已就绪可复用。
+设计要点(vs 早期版本):
+  - _classify_segment 不含多意图步骤, 供 multi_intent.split_hybrid 逐段复用,
+    彻底移除 classify_v3(skip_split=True) 的递归规避 hack。
+  - 阻塞 I/O(save_slots/load_slots/run_safety/observe_record) 统一 asyncio.to_thread 隔离,
+    避免事件循环冻结。
+  - 技能映射唯一来源 = intent_catalog.json(catalog.skill_for), 移除硬编码 INTENT_SKILL_MAP。
 """
 
 from __future__ import annotations
@@ -24,9 +33,8 @@ import logging
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
-from ..core.models import SubTask
 from ..providers import get_chat_model, resolve_fallback_order
 from ..registry import SkillRegistry
 from ..analytics import record_intent_classify, record_safety, record_llm_call
@@ -37,7 +45,7 @@ from .common import (
     _GENERIC_Q,
     _MISSING_Q,
     _has_conversation_requirement,
-    _last_user_message,
+    last_user_message,
 )
 from .observation import record as observe_record
 from .models import PipelineResult
@@ -45,10 +53,10 @@ from .rulesmatcher import match_rules
 from .safety import SafetyResult, run_safety
 from .selection import clear_pending_options, resolve_selection
 from .signals import is_delete_signal, is_reset_signal
-from .splitter import _lightweight_multi_check, maybe_split
 from .store import load_slots, reset_slots, save_slots
 from .tools import SkillCandidate, ToolResult, run_tools
 from .vector_store import retrieve_intents
+from .multi_intent import recognize_intents
 
 logger = logging.getLogger("ai_service.intent.cascade")
 
@@ -59,7 +67,7 @@ COMMIT = settings.intent_commit
 CLARIFY_LO = settings.intent_clarify_lo
 CLARIFY_MAX_ROUNDS = settings.intent_clarify_max_rounds
 
-# 兜底闲聊意图
+# 兜底闲聊意图(目录中存在 chat_casual 条目)
 _CHAT_CASUAL = "chat_casual"
 
 
@@ -84,7 +92,8 @@ RULE_SYSTEM = (
     '{"intent_id":"...","confidence":0.0~1.0,"industry":"...",'
     '"missing_slots":["slot_key",...],"collected_slots":{"slot_key":"value",...},'
     '"questions":["自然语言追问(若缺槽位, 最多2条)"],"reason":"简短裁决理由"}\n\n'
-    "industry(13选1): restaurant|ecommerce|gov|edu|health|finance|game|personal|corp|tech|media|travel|other\n"
+    "industry(14选1 或 other/none): restaurant|ecommerce|gov|edu|health|finance|game|"
+    "personal|corp|tech|media|travel|other|none\n"
     "confidence 准则: 明确匹配且信息充足 ≥0.8; 有匹配但缺关键信息 0.5~0.8; 模糊或像闲聊 <0.5。\n"
     "如果候选置信都低且不像任何建站/咨询意图 → 选 chat_casual, confidence 给 0.3~0.5。\n"
 )
@@ -241,7 +250,7 @@ def _emit_route(
     )
 
 
-async def classify_v3(
+async def _classify_segment(
     messages: list[dict],
     model_id: str = "deepseek",
     *,
@@ -249,16 +258,18 @@ async def classify_v3(
     context_hint: str = "",
     project_status: str = "draft",
     project_constraints: list[str] | None = None,
-    checkpoint_info: dict | None = None,
     user_id: int | None = None,
     project_id: int | None = None,
     has_requirement_doc: bool = False,
-    site_generated: bool = False,
 ) -> PipelineResult:
-    """混合级联意图识别 v1.2.0(统一契约见 intent/models.PipelineResult)。"""
+    """单意图分类核心(步骤 ①~⑪, 不含多意图拆分)。
+
+    供 classify_v3 顶层调用; 也被 multi_intent.split_hybrid 逐段复用(无递归)。
+    阻塞 I/O(save/load_slots, run_safety, observe_record) 统一 asyncio.to_thread 隔离。
+    """
     t0 = time.time()
     req_id = uuid.uuid4().hex
-    current_user_msg = _last_user_message(messages)
+    current_user_msg = last_user_message(messages)
     has_conv_req = _has_conversation_requirement(messages)
 
     logger.info("[级联][%s] [开始] conv=%s %d条消息 model=%s project=%s doc=%s",
@@ -285,23 +296,18 @@ async def classify_v3(
         )
 
     # ── [+0] 删除操作 → 路由到 agent_delete skill ──
-    #   skill 内部处理: 分析删除目标 → 确认弹窗 → 执行 → 反馈结果。
-    #   关键词来源: intent/signals.py(load_control_signals, 单一来源)。
     if is_delete_signal(current_user_msg):
         logger.info("[级联][%s] 删除操作 → 路由 agent_delete %s", req_id, current_user_msg[:40])
         reset_slots(conversation_id)
         await record_intent_classify("route", "delete", (time.time() - t0) * 1000)
         return _emit_route(
-            get_intent("manage_delete") or {
-                "level1": "manage", "level2": "delete", "skill": "agent_delete", "id": "manage_delete",
-            },
-            0.98, decision="route",
+            get_intent(_CHAT_CASUAL) or {"level1": "chat", "level2": "casual"}, 0.98, decision="route",
             selected_skill="agent_delete", industry="other",
             reason="delete", request_id=req_id,
             evidence={"delete_op": True},
         )
 
-    # ── RESET: 用户显式退出建站/澄清(关键词来源: intent/signals.py) ──
+    # ── RESET: 用户显式退出建站/澄清 ──
     if is_reset_signal(current_user_msg):
         logger.info("[级联][%s] RESET 信号 → 闲聊", req_id)
         reset_slots(conversation_id)
@@ -317,12 +323,7 @@ async def classify_v3(
     rule_hits = match_rules(current_user_msg)
     strong_rule = next((h for h in rule_hits if h.strength == "strong"), None)
 
-    # ── [2] 向量召回 top5 ──
-    # 🔧 P0 修复: retrieve_intents 内部含 Chroma 同步阻塞查询(col.query),
-    #   若直接在 async 事件循环内调用会冻结整个 loop, 导致外层
-    #   asyncio.wait_for(timeout=35.0) 永远无法触发(现象: 首条消息永久卡在[3/6])。
-    #   改用 asyncio.to_thread 把阻塞 I/O 隔离到线程池, 事件循环保持响应,
-    #   超时保护与并发请求均恢复正常。
+    # ── [2] 向量召回 top5(to_thread 隔离阻塞 I/O) ──
     candidates = await asyncio.to_thread(retrieve_intents, current_user_msg, 5)
     top_score = candidates[0]["score"] if candidates else 0.0
     top_intent_id = candidates[0]["intent_id"] if candidates else ""
@@ -331,17 +332,19 @@ async def classify_v3(
     if strong_rule and candidates and top_intent_id == strong_rule.intent_id and top_score >= SUPER_FAST:
         intent = candidates[0]["intent"]
         logger.info("[级联] super-fast 直通: 规则=%s 向量top1=%.2f → 跳过LLM", strong_rule.rule_id, top_score)
-        save_slots(conversation_id, {
+        await asyncio.to_thread(save_slots, conversation_id, {
             "intent_id": intent["id"], "slots": {}, "clarify_rounds": 0,
             "confidence": strong_rule.confidence,
         })
-        observe_record(request_id=req_id, conversation_id=conversation_id, user_id=user_id,
-                       raw_input=current_user_msg, llm_intent=f"{intent['level1']}/{intent['level2']}",
-                       llm_confidence=strong_rule.confidence, rules_triggered=[strong_rule.rule_id],
-                       belief_before=0.0, belief_after=strong_rule.confidence, decision="route",
-                       latency_ms=(time.time() - t0) * 1000, tokens_used=0,
-                       specialist_routed=intent["skill"], outcome="pending",
-                       extra={"source": "superfast"})
+        await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
+                                user_id=user_id, raw_input=current_user_msg,
+                                llm_intent=f"{intent['level1']}/{intent['level2']}",
+                                llm_confidence=strong_rule.confidence,
+                                rules_triggered=[strong_rule.rule_id],
+                                belief_before=0.0, belief_after=strong_rule.confidence,
+                                decision="route", latency_ms=(time.time() - t0) * 1000,
+                                tokens_used=0, specialist_routed=intent["skill"], outcome="pending",
+                                extra={"source": "superfast"})
         await record_intent_classify("route", "superfast", (time.time() - t0) * 1000,
                                       confidence=strong_rule.confidence)
         return _emit_route(
@@ -354,20 +357,20 @@ async def classify_v3(
                       "source": "superfast"},
         )
 
-    # ── 新奇度兜底: 无规则命中 且 向量全低 → 闲聊 ──
+    # ── [7] 新奇度兜底: 无规则命中 且 向量全低 → 闲聊 ──
     if not rule_hits and top_score < NOVELTY:
         logger.info("[级联] 新奇度兜底: top_score=%.2f < %.2f → 闲聊", top_score, NOVELTY)
         chat_intent = get_intent(_CHAT_CASUAL) or {"level1": "chat", "level2": "casual", "skill": "agent_chat"}
-        save_slots(conversation_id, {
+        await asyncio.to_thread(save_slots, conversation_id, {
             "intent_id": _CHAT_CASUAL, "slots": {}, "clarify_rounds": 0, "confidence": top_score,
         })
-        observe_record(request_id=req_id, conversation_id=conversation_id, user_id=user_id,
-                       raw_input=current_user_msg, llm_intent="chat/casual",
-                       llm_confidence=top_score, rules_triggered=[],
-                       belief_before=0.0, belief_after=top_score, decision="route",
-                       latency_ms=(time.time() - t0) * 1000, tokens_used=0,
-                       specialist_routed="agent_chat", outcome="pending",
-                       extra={"source": "novelty"})
+        await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
+                                user_id=user_id, raw_input=current_user_msg, llm_intent="chat/casual",
+                                llm_confidence=top_score, rules_triggered=[],
+                                belief_before=0.0, belief_after=top_score, decision="route",
+                                latency_ms=(time.time() - t0) * 1000, tokens_used=0,
+                                specialist_routed="agent_chat", outcome="pending",
+                                extra={"source": "novelty"})
         await record_intent_classify("route", "novelty", (time.time() - t0) * 1000,
                                       confidence=top_score)
         return _emit_route(
@@ -378,22 +381,21 @@ async def classify_v3(
                       "source": "novelty"},
         )
 
-    # ── 安全优先(critical 拦截, 可短路) ──
+    # ── [8] 安全优先(critical 拦截, 可短路) ──
     safety_result = SafetyResult()
     try:
-        safety_result = run_safety(messages, project_constraints=project_constraints)
+        safety_result = await asyncio.to_thread(run_safety, messages, project_constraints=project_constraints)
     except Exception as e:
         logger.warning("[级联] run_safety 异常: %s", e)
     if safety_result.risk_level == "critical":
         logger.warning("[级联][%s] 安全检查→拦截 reason=%s risk=%s", req_id, safety_result.block_reason, safety_result.risk_level)
         reset_slots(conversation_id)
-        observe_record(request_id=req_id, conversation_id=conversation_id, user_id=user_id,
-                       raw_input=current_user_msg, llm_intent="chat/casual",
-                       llm_confidence=0.0, rules_triggered=["critical_safety"],
-                       belief_before=0.0, belief_after=0.0, decision="block",
-                       latency_ms=(time.time() - t0) * 1000, tokens_used=0,
-                       specialist_routed=None, outcome="blocked")
-        # 安全网关统计: 记录本次拦截(风险等级 + 原因)
+        await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
+                                user_id=user_id, raw_input=current_user_msg, llm_intent="chat/casual",
+                                llm_confidence=0.0, rules_triggered=["critical_safety"],
+                                belief_before=0.0, belief_after=0.0, decision="block",
+                                latency_ms=(time.time() - t0) * 1000, tokens_used=0,
+                                specialist_routed=None, outcome="blocked")
         await record_safety(safety_result.risk_level, blocked=True, reason=safety_result.block_reason or "critical")
         await record_intent_classify("block", "block", (time.time() - t0) * 1000, confidence=0.0)
         return _emit_route(
@@ -403,8 +405,8 @@ async def classify_v3(
             evidence={"safety": {"risk_level": "critical", "tags": safety_result.risk_tags}},
         )
 
-    # ── [4] LLM 有界终判 ──
-    prior = load_slots(conversation_id)
+    # ── [9] LLM 有界终判 ──
+    prior = await asyncio.to_thread(load_slots, conversation_id)
     prior_intent_id = prior.get("intent_id", "") or ""
     prior_collected = prior.get("slots", {}) or {}
     ruling = await _llm_rule(
@@ -426,13 +428,11 @@ async def classify_v3(
     # 仍缺失的槽位(历史+本次都已收集的, 不再追问)
     still_missing = [s for s in ruling.missing_slots if s not in merged]
 
-    # ── [5] 置信门控 ──
+    # ── [10] 置信门控 ──
     clarify_rounds = int(prior.get("clarify_rounds", 0) or 0)
     new_rounds = clarify_rounds
 
-    # 🔧 建站意图 + 已具备需求(需求文档或对话上下文)→ 直接提交生成, 不再追问。
-    #   否则 build/site / build/page / build/modify / build/fix 等中置信意图(0.6~0.7)会
-    #   落入 clarify 分支, 导致「开始生成网站吧」及所有建站迭代永不真正触发生成(建站全流程断裂)。
+    # 建站意图 + 已具备需求(需求文档或对话上下文)→ 直接提交生成, 不再追问。
     if intent.get("level1") == "build" and (has_requirement_doc or has_conv_req):
         logger.info("[级联] 门控: 建站意图且需求已具备 → 强制提交生成(跳过追问) intent=%s/%s",
                     intent.get("level1"), intent.get("level2"))
@@ -440,7 +440,7 @@ async def classify_v3(
     elif conf >= COMMIT:
         decision = "route"
     elif intent.get("level1") == "chat":
-        # 闲聊类: 即使低置信也不追问, 直接闲聊(避免对"你好"反复质问)
+        # 闲聊类: 即使低置信也不追问, 直接闲聊
         decision = "route"
     elif clarify_rounds >= CLARIFY_MAX_ROUNDS:
         # 追问耗尽 → 提交最佳猜测
@@ -454,7 +454,7 @@ async def classify_v3(
         decision = "clarify"
         new_rounds = clarify_rounds + 1
 
-    # 工具映射(尊重 doc-gating: 无需求文档且对话无需求 → 改道 requirement)
+    # 工具映射(尊重 doc-gating)
     tools = run_tools(
         intent["level1"], intent["level2"], conf, industry=industry,
         project_status=project_status, has_requirement_doc=has_requirement_doc,
@@ -466,8 +466,8 @@ async def classify_v3(
     if decision == "clarify":
         questions = _build_questions(still_missing, ruling.questions)
 
-    # ── 持久化槽位 ──
-    save_slots(conversation_id, {
+    # ── [11] 持久化槽位 ──
+    await asyncio.to_thread(save_slots, conversation_id, {
         "intent_id": intent["id"],
         "slots": merged,
         "clarify_rounds": new_rounds if decision == "clarify" else 0,
@@ -488,38 +488,74 @@ async def classify_v3(
     logger.info("[级联][%s] 门控: conf=%.2f intent=%s/%s decision=%s rounds=%d",
                 req_id, conf, intent["level1"], intent["level2"], decision, new_rounds)
 
-    # ── [6] 多意图拆分(build 类且轻量门控命中) ──
-    sub_tasks: list = []
-    split_reason = ""
-    if decision == "route" and intent.get("level1") == "build" and _lightweight_multi_check(messages):
-        try:
-            split = await maybe_split(messages, model_id, base_industry=industry)
-            if split.is_multi and split.sub_tasks:
-                decision = "split"
-                sub_tasks = split.sub_tasks
-                split_reason = split.split_reason
-                logger.info("[级联] 多意图拆分 decision=split tasks=%d", len(split.sub_tasks))
-        except Exception as e:
-            logger.warning("[级联] 多意图拆分异常, 降级单意图: %s", e)
-
-    observe_record(request_id=req_id, conversation_id=conversation_id, user_id=user_id,
-                   raw_input=current_user_msg, llm_intent=f"{intent['level1']}/{intent['level2']}",
-                   llm_confidence=conf, rules_triggered=[h.rule_id for h in rule_hits],
-                   belief_before=prior.get("confidence", 0.0), belief_after=conf,
-                   decision=decision, latency_ms=(time.time() - t0) * 1000, tokens_used=0,
-                   specialist_routed=selected_skill if decision in ("route", "clarify", "split") else None,
-                   outcome="pending",
-                   extra={"source": evidence["source"], "missing": still_missing})
+    await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
+                            user_id=user_id, raw_input=current_user_msg,
+                            llm_intent=f"{intent['level1']}/{intent['level2']}",
+                            llm_confidence=conf, rules_triggered=[h.rule_id for h in rule_hits],
+                            belief_before=prior.get("confidence", 0.0), belief_after=conf,
+                            decision=decision, latency_ms=(time.time() - t0) * 1000, tokens_used=0,
+                            specialist_routed=selected_skill if decision in ("route", "clarify") else None,
+                            outcome="pending",
+                            extra={"source": evidence["source"], "missing": still_missing})
 
     result = _emit_route(
         intent, conf, decision=decision, selected_skill=selected_skill, industry=industry,
         questions=questions, rounds=new_rounds, reason=ruling.reason, evidence=evidence,
-        safety=safety_result, sub_tasks=sub_tasks, split_reason=split_reason, request_id=req_id,
+        safety=safety_result, sub_tasks=[], split_reason="", request_id=req_id,
     )
-    # 收尾摘要日志: 一条即可复盘整次分类(决策/来源/意图/置信/耗时/子任务数)
+
+    # 收尾摘要日志
     dur_ms = (time.time() - t0) * 1000
     logger.info("[级联][%s] 完成 decision=%s source=%s intent=%s/%s conf=%.2f 耗时=%.1fms sub_tasks=%d",
                 req_id, result.decision, evidence["source"], intent["level1"], intent["level2"],
-                conf, dur_ms, len(sub_tasks))
+                conf, dur_ms, len(result.sub_tasks))
     await record_intent_classify(result.decision, evidence["source"], dur_ms, confidence=conf)
+    return result
+
+
+async def classify_v3(
+    messages: list[dict],
+    model_id: str = "deepseek",
+    *,
+    conversation_id: int | None = None,
+    context_hint: str = "",
+    project_status: str = "draft",
+    project_constraints: list[str] | None = None,
+    user_id: int | None = None,
+    project_id: int | None = None,
+    has_requirement_doc: bool = False,
+) -> PipelineResult:
+    """混合级联意图识别(v1.2.5)。
+
+    先单意图分类(_classify_segment), 若 decision==route 且轻量门控命中 ≥2 意图大类,
+    再做多意图拆分(A+B 路由: recognize_intents)。
+    """
+    result = await _classify_segment(
+        messages, model_id,
+        conversation_id=conversation_id, context_hint=context_hint,
+        project_status=project_status, project_constraints=project_constraints,
+        user_id=user_id, project_id=project_id, has_requirement_doc=has_requirement_doc,
+    )
+
+    # ── [6] 多意图拆分(A+B 路由: 方案B 混合分层优先, 必要时升级方案A LLM 深拆) ──
+    # 轻量门控在 recognize_intents 内部执行: 未命中多意图则原样返回 is_multi=False。
+    if result.decision == "route":
+        try:
+            split = await recognize_intents(
+                messages, model_id, base_industry=result.intent["industry"],
+                project_status=project_status, has_requirement_doc=has_requirement_doc,
+                project_constraints=project_constraints, conversation_id=conversation_id,
+                user_id=user_id, project_id=project_id,
+            )
+            if split.is_multi and split.sub_tasks:
+                result = replace(
+                    result, decision="split", sub_tasks=split.sub_tasks,
+                    split_reason=f"[{split.source}] {split.split_reason}",
+                    selected_skill=split.sub_tasks[0].selected_skill,
+                )
+                logger.info("[级联] 多意图拆分 decision=split source=%s tasks=%d",
+                            split.source, len(split.sub_tasks))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[级联] 多意图拆分异常, 降级单意图: %s", e)
+
     return result

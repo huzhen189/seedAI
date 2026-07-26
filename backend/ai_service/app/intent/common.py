@@ -210,8 +210,8 @@ _GENERIC_Q = [
 ]
 
 
-def _last_user_message(messages: list[dict]) -> str:
-    """取最近一条用户消息文本。"""
+def last_user_message(messages: list[dict]) -> str:
+    """取最近一条用户消息文本(包内统一来源, selection/multi_intent/cascade 共用)。"""
     for m in reversed(messages):
         if m.get("role") == "user":
             c = m.get("content") or ""

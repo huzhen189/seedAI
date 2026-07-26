@@ -67,6 +67,14 @@ class Settings(BaseSettings):
     intent_clarify_lo: float = 0.45        # 低于此值进入澄清/兜底判定
     intent_clarify_max_rounds: int = 2     # 最多追问轮次(≤2)
 
+    # ── 多意图识别 A+B 路由(v1.2.5) ──
+    # 方案B(混合分层): 结构切分 + 逐段 classify_v3 + 连词依赖链接, 作为默认快路径(可解释/复用现有分类器)
+    # 方案A(LLM 深拆, multi_intent.split_by_llm): 复杂/深层依赖兜底, 单次 LLM 全局推理
+    split_b_enabled: bool = True              # 启用方案B 作为默认快路径
+    split_b_max_subtasks: int = 6             # 方案B 子任务上限(超长则截断并提示分步)
+    split_escalate_low_conf: float = 0.6      # 方案B 有子任务置信 < 此值 → 升级到方案A(LLM 深拆)
+    split_repair_max_rounds: int = 2          # 方案A(LLM 深拆) JSON/结构校验失败自愈重生成上限
+
     # ── 后置质检(QC)配置(单一来源) ──
     qc_judges: str = "deepseek,qwen,hy3"    # 三裁判模型(逗号分隔, 顺序即 scores 下标)
     qc_needs_review_variance: float = 4.0   # 任一维方差 ≥ 此值 → needs_review(分歧大)

@@ -64,7 +64,7 @@ SUB_SKIPPED = "skipped"
 class SubTask:
     """一个可独立执行的子计划。
 
-    拆分约束(由 splitter 系统提示强制):
+    拆分约束(由 multi_intent 系统提示强制):
     - 不同目标才拆(原子性原则)
     - 每个子任务必须能独立执行并产出可交付结果
     - 依赖方必须在 context_hint 中声明需要上游的什么产出
@@ -93,6 +93,7 @@ class SplitResult:
     split_reason: str = ""                    # 为什么拆 / 为什么不拆
     confidence: float = 0.0                   # 拆分置信度
     strategy: str = "serial"                  # 默认策略(serial/parallel/mixed)
+    source: str = ""                          # 识别来源: "hybrid"(方案B) / "llm"(方案A) / ""(未拆分)
 
 
 @dataclass

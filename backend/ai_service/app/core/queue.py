@@ -649,9 +649,7 @@ async def worker_loop(concurrency: int = 1):
                                          project_status=proj_status,
                                          project_constraints=proj_constraints,
                                          user_id=user_id, project_id=project_id,
-                                         has_requirement_doc=has_req_doc,
-                                         site_generated=bool(job.get("site_generated", False)),
-                                         ),
+                                         has_requirement_doc=has_req_doc),
                         timeout=35.0,
                     )
                 except asyncio.TimeoutError:

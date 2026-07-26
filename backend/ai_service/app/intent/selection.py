@@ -97,10 +97,9 @@ def clear_pending_options(conversation_id: int) -> None:
 
 
 def last_user_text(messages: list[dict]) -> str:
-    for m in reversed(messages):
-        if m.get("role") == "user":
-            return (m.get("content", "") or "").strip()
-    return ""
+    """兼容别名: 取最近一条用户消息(统一来源见 common.last_user_message)。"""
+    from .common import last_user_message
+    return last_user_message(messages)
 
 
 def is_selection(text: str) -> bool:
