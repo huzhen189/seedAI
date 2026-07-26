@@ -33,8 +33,13 @@ async def reset() -> None:
             from sqlalchemy import inspect
             insp = inspect(sync_conn)
             tables = insp.get_table_names()
+            # MySQL DDL 隐式提交, session 级 FOREIGN_KEY_CHECKS 会被重置,
+            # 因此每张表 DROP 前都先关闭外键检查, 避免 "referenced by a foreign key
+            # constraint" (errno 3730) 因 inspect 返回顺序与被引用顺序冲突而中断。
             for t in tables:
+                sync_conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
                 sync_conn.execute(text(f"DROP TABLE IF EXISTS `{t}`"))
+            sync_conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
             return tables
         tables = await conn.run_sync(_drop)
         if tables:
