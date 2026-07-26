@@ -126,8 +126,6 @@ async def init_db():
     # 首次启动(或任何时候)把 SEED_SUPER_ADMIN 指定的用户名角色置为 super_admin,
     # 解决"角色自举"问题 —— 普通注册只能得到 user,初始超管只能由该环境变量赋予。
     await _seed_super_admin()
-    # 第四步:默认超管用户自动创建(清库重建表后无需手动注册)。
-    await _seed_default_user()
 
 
 async def _seed_super_admin() -> None:
@@ -156,47 +154,6 @@ async def _seed_super_admin() -> None:
                 logger.debug("用户 '%s' 已是 super_admin,无需变更", username)
     except Exception as e:  # 种子失败不应阻断启动
         logger.warning("super_admin 种子注入失败(已跳过): %s", e)
-
-
-async def _seed_default_user() -> None:
-    """重置/首次启动时确保默认超管存在(与 reset_all.py docstring 一致)。
-
-    默认创建 huzhen / huzhen189 / 超级管理员;用户名与密码可由 .env 的
-    SEED_ADMIN_USERNAME / SEED_ADMIN_PASSWORD / SEED_ADMIN_EMAIL / SEED_ADMIN_NICKNAME 覆盖。
-    已存在则跳过(幂等)。这样无论是否配置环境变量, 重置 DROP 重建后都始终存在可用超管,
-    不会锁死 require_super_admin 控制台。
-    """
-    from .models import User
-    from .security import hash_password
-
-    username = (settings.seed_admin_username or "").strip()
-    password = (settings.seed_admin_password or "").strip()
-    email = (settings.seed_admin_email or "").strip()
-    nickname = (settings.seed_admin_nickname or username).strip()
-    if not username or not password:
-        logger.warning("seed_admin_username/password 为空, 跳过默认超管创建")
-        return
-    try:
-        async with SessionLocal() as session:
-            existing = (
-                await session.execute(select(User).where(User.username == username))
-            ).scalar_one_or_none()
-            if existing is not None:
-                logger.debug("默认超管 '%s' 已存在,跳过", username)
-                return
-            user = User(
-                username=username,
-                nickname=nickname,
-                email=email or None,
-                password_hash=hash_password(password),
-                role="super_admin",
-                plan="enterprise",
-            )
-            session.add(user)
-            await session.commit()
-            logger.info("已创建默认超管用户: %s (role=super_admin)", username)
-    except Exception as e:
-        logger.warning("默认超管创建失败(已跳过): %s", e)
 
 
 async def reset_db() -> dict:

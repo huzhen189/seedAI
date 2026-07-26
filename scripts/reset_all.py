@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "backend" / "business"))
 
 from app.config import settings, ENV_FILE  # noqa: E402
 from app.db import SessionLocal, engine, init_db  # noqa: E402
-from sqlalchemy import text  # noqa: E402
+from sqlalchemy import text, select  # noqa: E402
 
 
 async def reset() -> None:
@@ -146,9 +146,14 @@ async def reset() -> None:
         await conn.run_sync(Base.metadata.create_all)
     print("  >> 表已重建")
 
-    # 4) 补齐缺失列 + 自动创建默认用户
+    # 4) 补齐缺失列(schema 迁移, 不含用户创建)
     await init_db()
-    print("  >> 默认用户已就绪")
+    print("  >> 表与列已补齐")
+
+    # 4.5) 确保默认超管存在(重置脚本专属)
+    #      生产运行代码(init_db)不自动创建用户, 仅在清库重建后由本脚本注入超管,
+    #      避免重置后锁死 require_super_admin 控制台。幂等: 已存在则跳过。
+    await _ensure_super_admin()
 
     # 5) 大表 HASH 分区(幂等, 已分区则跳过)
     _PARTITIONS = {
@@ -173,6 +178,38 @@ async def reset() -> None:
 
     await engine.dispose()
     print("\n完成。业务服务 7101 将自动重启; AI 服务 7102 请手动重启。")
+
+
+async def _ensure_super_admin() -> None:
+    """重置脚本专属: 确保默认超管账户存在(幂等)。
+
+    生产运行代码 init_db 不自动创建用户(避免生产环境硬编码/意外建账号);
+    仅在清库重建后由本重置脚本注入一个可用超管, 避免重置后锁死控制台。
+    凭据固定为 huzhen / huzhen189 / 超级管理员(仅用于开发/测试重置)。
+    """
+    from app.models import User
+    from app.security import hash_password
+
+    username, password = "huzhen", "huzhen189"
+    email, nickname = "huzhen@huzhen.net.cn", "超级管理员"
+    async with SessionLocal() as session:
+        existing = (
+            await session.execute(select(User).where(User.username == username))
+        ).scalar_one_or_none()
+        if existing is not None:
+            print(f"  >> 默认超管 '{username}' 已存在,跳过")
+            return
+        user = User(
+            username=username,
+            nickname=nickname,
+            email=email,
+            password_hash=hash_password(password),
+            role="super_admin",
+            plan="enterprise",
+        )
+        session.add(user)
+        await session.commit()
+        print(f"  >> 已创建默认超管: {username} / {password} (role=super_admin)")
 
 
 if __name__ == "__main__":
