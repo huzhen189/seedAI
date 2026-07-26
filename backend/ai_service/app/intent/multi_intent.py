@@ -37,6 +37,7 @@ from .common import (
     SAFETY_SOFT_HIGH,
 )
 from .tools import resolve_skill
+from ..analytics import record_multi_intent_path
 
 logger = logging.getLogger("ai_service.intent.multi_intent")
 
@@ -462,10 +463,14 @@ async def recognize_intents(
     user_id: int | None = None,
     project_id: int | None = None,
 ) -> SplitResult:
-    """A+B 路由: 先方案 B, 必要时升级方案 A, 返回统一 SplitResult(source=hybrid|llm)。"""
+    """A+B 路由: 先方案 B, 必要时升级方案 A, 返回统一 SplitResult(source=hybrid|llm)。
+
+    每次门控通过后记一次路径埋点(record_multi_intent_path), 供 A/B 占比统计。
+    """
     if not _lightweight_multi_check(messages):
         return SplitResult(is_multi=False, sub_tasks=[], split_reason="轻量门控: 单意图", source="")
 
+    t0 = time.time()
     # ── 方案 B(默认快路径) ──
     try:
         b = await split_hybrid(
@@ -479,7 +484,12 @@ async def recognize_intents(
         b = SplitResult(is_multi=False, sub_tasks=[], source="hybrid")
 
     if not _should_escalate(b):
-        logger.info("[A+B] 采用方案B source=hybrid tasks=%d", len(b.sub_tasks))
+        dur = (time.time() - t0) * 1000
+        logger.info("[A+B] 采用方案B source=hybrid tasks=%d 耗时=%.0fms", len(b.sub_tasks), dur)
+        await record_multi_intent_path(
+            "hybrid", escalated=False,
+            sub_task_count=len(b.sub_tasks), duration_ms=dur,
+        )
         return b
 
     # ── 升级方案 A(LLM 深拆兜底) ──
@@ -489,11 +499,20 @@ async def recognize_intents(
         logger.warning("[A+B] 方案A 异常, 退回方案B: %s", e)
         a = SplitResult(is_multi=False, sub_tasks=[], source="llm")
 
+    dur = (time.time() - t0) * 1000
     if a.is_multi and a.sub_tasks:
-        logger.info("[A+B] 升级方案A source=llm tasks=%d (方案B 平均置信=%.2f)",
-                    len(a.sub_tasks), b.confidence)
+        logger.info("[A+B] 升级方案A source=llm tasks=%d (方案B 平均置信=%.2f) 耗时=%.0fms",
+                    len(a.sub_tasks), b.confidence, dur)
+        await record_multi_intent_path(
+            "llm", escalated=True,
+            sub_task_count=len(a.sub_tasks), duration_ms=dur,
+        )
         return a
 
     # 两路都没拆出多意图 → 退回方案 B 的结果(可能 <2, 上层当单意图)
-    logger.info("[A+B] 两路均未识别多意图, 退回方案B(单意图)")
+    logger.info("[A+B] 两路均未识别多意图, 退回方案B(单意图) 耗时=%.0fms", dur)
+    await record_multi_intent_path(
+        b.source or "hybrid", escalated=True,
+        sub_task_count=len(b.sub_tasks), duration_ms=dur,
+    )
     return b

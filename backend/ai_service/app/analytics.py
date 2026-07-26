@@ -15,6 +15,7 @@
 7. 安全网关        ai:safe  (v1.2.3)   —— 入口风险等级分布 / 拦截·放行 / 拦截原因分布
 8. LLM Provider    ai:llm   (v1.2.3)   —— 每模型次数·成功·失败·错误类型·耗时 p50/p90/p99·Token 累计
 9. v0.9.0 功能     an:v090             —— repair/distill/code_index/refine/chat_retry 功能使用量 〔与业务端共享〕
+10. 多意图路由      ai:mi   (v1.2.5) —— A+B 路径分布(hybrid=方案B / llm=方案A 升级) / 升级率 / 子任务数 / 耗时
 
 ⚠️ 命名空间约定(避免与业务端 an:* 统计键冲突):
   - 标「与业务端共享」的 3 项(an:orch/an:subtask/an:generate/an:v090)由 AI 核心写入、业务端
@@ -57,6 +58,7 @@ P_QC = "ai:qc"          # v1.2.3 后置三裁判 QC 评分统计
 P_REV = "ai:rev"        # v1.2.3 生成内 Reviewer 自审统计
 P_SAFE = "ai:safe"      # v1.2.3 入口安全网关统计
 P_LLM = "ai:llm"        # v1.2.3 LLM Provider 调用统计
+P_MI = "ai:mi"          # v1.2.5 多意图 A+B 路由路径统计(hybrid=方案B / llm=方案A 升级 / 占比)
 
 # 模块级懒加载 Redis 客户端(进程内单例, 连接失败降级为 None)
 _redis_client = None
@@ -298,6 +300,79 @@ async def intent_stats() -> dict:
         }
     except Exception as e:  # noqa: BLE001
         logger.warning("AI analytics intent_stats failed: %s", e)
+        return {"total": 0, "available": True, "error": str(e)}
+
+
+# ──────────────────────────────────────────────────────────────
+# 10. 多意图 A+B 路由路径统计 (v1.2.5)
+# ──────────────────────────────────────────────────────────────
+
+async def record_multi_intent_path(
+    source: str,
+    escalated: bool,
+    sub_task_count: int = 0,
+    duration_ms: float = 0.0,
+) -> None:
+    """多意图 A+B 路由路径统计(v1.2.5)。
+
+    仅在轻量门控通过(疑似多意图)后调用, 每次 recognize_intents 记一次。
+
+    source ∈ {hybrid, llm}: 最终采用哪条路径的产出。
+      - hybrid: 方案B(混合分层)结果被采用(B 直出, 或 B 失败回退)
+      - llm:    方案A(LLM 深拆)升级成功被采用
+    escalated: 是否发生过 B→A 升级(B 未拆出 ≥2 子任务 / 平均置信 < 阈值 → 升方案A)。
+    sub_task_count: 最终子任务数(单意图回退为 0)。
+    A/B 路径占比 = path_dist[hybrid] / (hybrid + llm), 见 multi_intent_stats()。
+    所有记录「尽力而为」, Redis 缺失仅告警。
+    """
+    try:
+        r = _get_redis()
+        if r is None:
+            return
+        await r.hincrby(f"{P_MI}:total", "count", 1)
+        if source:
+            await r.hincrby(f"{P_MI}:path", source, 1)
+        if escalated:
+            await r.hincrby(f"{P_MI}:escalated", "count", 1)
+        if sub_task_count:
+            await r.zadd(f"{P_MI}:subtasks", {uuid.uuid4().hex: sub_task_count})
+            await r.zremrangebyrank(f"{P_MI}:subtasks", 0, -(LATENCY_MAX + 1))
+        if duration_ms:
+            await r.zadd(f"{P_MI}:duration", {uuid.uuid4().hex: duration_ms})
+            await r.zremrangebyrank(f"{P_MI}:duration", 0, -(LATENCY_MAX + 1))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("AI analytics record_multi_intent_path failed: %s", e)
+
+
+async def multi_intent_stats() -> dict:
+    """读取多意图 A+B 路由统计(路径分布 / A·B 占比 / 升级率 / 子任务数 / 耗时)。"""
+    try:
+        r = _get_redis()
+        if r is None:
+            return {"total": 0, "available": False}
+        total = int((await r.hget(f"{P_MI}:total", "count")) or 0)
+        if total == 0:
+            return {"total": 0, "available": True}
+        path = {k: int(v) for k, v in (await r.hgetall(f"{P_MI}:path") or {}).items()}
+        escalated = int((await r.hget(f"{P_MI}:escalated", "count")) or 0)
+        subtasks = await _pct_zset(r, f"{P_MI}:subtasks")
+        dur = await _pct_zset(r, f"{P_MI}:duration")
+        hy = path.get("hybrid", 0)
+        ll = path.get("llm", 0)
+        ab = hy + ll
+        ab_ratio = (
+            {"hybrid": round(hy / ab, 3), "llm": round(ll / ab, 3)}
+            if ab else {"hybrid": 0, "llm": 0}
+        )
+        return {
+            "total": total, "available": True,
+            "path_dist": path, "ab_ratio": ab_ratio,
+            "escalated": escalated,
+            "escalate_rate": round(escalated / max(total, 1), 3),
+            "sub_task_count": subtasks, "duration_ms": dur,
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("AI analytics multi_intent_stats failed: %s", e)
         return {"total": 0, "available": True, "error": str(e)}
 
 
@@ -709,6 +784,7 @@ async def ai_stats_summary() -> dict:
             "generate": await _gen_total(),
             "orchestration": await orchestration_stats(),
             "intent": await intent_stats(),
+            "multi_intent": await multi_intent_stats(),
             "qc": await qc_stats(),
             "reviewer": await reviewer_stats(),
             "safety": await safety_stats(),
