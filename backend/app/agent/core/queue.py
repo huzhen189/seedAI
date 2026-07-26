@@ -37,7 +37,9 @@ from ..analytics import (  # AI 核心原生统计(合并后同库, 命名空间
     record_repair, record_distill, record_code_index, record_refine,
     record_chat_retry, record_generate_request,
 )
-from ...analytics import record_skill_outcome, record_gen_stage  # 业务端每步统计: skill 成效 + 生成阶段耗时
+from ...analytics import (  # 业务端每步统计: skill 成效 + 生成阶段耗时 + 需求文档
+    record_skill_outcome, record_gen_stage, record_requirement_doc,
+)
 
 
 _JOB_QUEUE = "queue:generate"
@@ -634,6 +636,19 @@ async def worker_loop(concurrency: int = 1):
                 project_id = job.get("project_id")              # v0.9.0
                 version = job.get("version")                     # v0.9.x: 产物版本号(COS 版本化)
                 doc = job.get("requirement_doc")
+                # 需求文档统计(满足"新增功能必接统计"约定): 仅当本次确由 requirement_agent
+                # 产出了文档(job 传入非空前)时记一次成功, 并从正文粗算页面数/功能数供均值展示。
+                if isinstance(doc, (str, dict)) and doc:
+                    try:
+                        doc_text = doc if isinstance(doc, str) else json.dumps(doc, ensure_ascii=False)
+                        _pages = doc_text.count("```") // 2 + doc_text.count("页面") + doc_text.count("page")
+                        _features = doc_text.count("功能") + doc_text.count("特性") + doc_text.count("feature")
+                        await record_requirement_doc(
+                            project_id or 0, True, max(_pages, 1), max(_features, 1)
+                        )
+                        logger.info("[Worker] [3/6] 需求文档统计已记入(异步尽力) trace=%s", trace_id)
+                    except Exception as _rd_e:  # noqa: BLE001
+                        logger.debug("[Worker] 需求文档统计失败(忽略): %s", _rd_e)
                 proj_status = job.get("project_status", "draft")
                 has_req_doc = bool(doc)  # v1.0.7: 是否已存在需求文档(决定工具路由是否放行建站)
                 # Tier 1/2: 项目系统 prompt + 结构化硬约束(由 business 侧解析后下发)

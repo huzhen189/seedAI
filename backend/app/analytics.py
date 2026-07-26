@@ -537,11 +537,6 @@ async def analytics_snapshot() -> dict:
             gen_rate = round(done / max(total, 1), 3)
 
         # ---- v0.7.0 新增统计 ----
-        # 项目状态流转
-        project_status = await r.hgetall(P_PROJECT_STATUS)
-        status_stats = {k.decode() if isinstance(k, bytes) else k: int(v)
-                        for k, v in (project_status or {}).items()}
-
         # 需求文档
         req_ok = int((await r.hget(P_REQUIREMENT, "ok")) or 0)
         req_fail = int((await r.hget(P_REQUIREMENT, "fail")) or 0)
@@ -605,7 +600,6 @@ async def analytics_snapshot() -> dict:
             "error_stats": error_stats,
             "model_stats": model_stats,
             # v0.7.0 新增
-            "project_status": status_stats,
             "requirement_doc": {"ok": req_ok, "fail": req_fail,
                                 "avg_pages": round(req_pages_sum / max(req_pages_cnt, 1), 1),
                                 "avg_features": round(req_feat_sum / max(req_feat_cnt, 1), 1)},
@@ -649,36 +643,8 @@ async def analytics_snapshot() -> dict:
 
 
 # ---- v0.7.0 新增统计维度 ----
-P_PROJECT_STATUS = "an:project:status"  # 项目状态流转
 P_REQUIREMENT = "an:requirement"  # 需求文档生成
 P_CONTEXT = "an:context"          # 上下文检测方式
-P_COS = "an:cos"                  # COS 上传统计
-
-
-async def record_cos_upload(ok: bool, size_bytes: int = 0, elapsed_ms: float = 0) -> None:
-    """COS 上传统计: 成功/失败 + 文件大小 + 延迟"""
-    try:
-        r = await get_redis()
-        await r.hincrby(P_COS, "ok" if ok else "fail", 1)
-        if ok and size_bytes > 0:
-            await r.hincrby(f"{P_COS}:total_bytes", "sum", size_bytes)
-            await r.hincrby(f"{P_COS}:total_bytes", "count", 1)
-        if elapsed_ms > 0:
-            zkey = f"{P_COS}:latency"
-            await r.zadd(zkey, {uuid.uuid4().hex: elapsed_ms})
-            await r.zremrangebyrank(zkey, 0, -(LATENCY_MAX_SAMPLES + 1))
-    except Exception as e:
-        logger.warning("analytics record_cos_upload failed: %s", e)
-
-
-async def record_project_status_transition(project_id: int, old_status: str, new_status: str) -> None:
-    """项目状态流转计数"""
-    try:
-        r = await get_redis()
-        transition = f"{old_status}→{new_status}"
-        await r.hincrby(P_PROJECT_STATUS, transition, 1)
-    except Exception as e:
-        logger.warning("analytics record_project_status failed: %s", e)
 
 
 async def record_requirement_doc(project_id: int, ok: bool, pages: int = 0, features: int = 0) -> None:

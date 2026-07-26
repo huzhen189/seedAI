@@ -41,7 +41,7 @@ from .analytics import (  # 业务端统计接入(§「新增功能必接统计�
     record_user_active,
     record_intent_decision,
 )
-from .analytics import record_context_detection, record_requirement_doc, record_project_status_transition
+from .analytics import record_context_detection, record_requirement_doc
 from .analytics import record_qc, record_feedback
 from .cache import cache_get, cache_set, ck_delete, ck_get, ck_set, enqueue_write_error, get_redis
 from .config import settings
