@@ -72,6 +72,14 @@ class Settings(BaseSettings):
     # 避免角色自举漏洞 —— 不允许自助注册成 super_admin,只能由种子/已有 super_admin 赋予。
     seed_super_admin: str = ""
 
+    # 默认超管账户(重置 DROP 重建后自动创建, 与 reset_all.py docstring 一致):
+    # 用户名/密码/邮箱/昵称, 生产可在 .env 覆盖。reset_all.py 依赖此默认值确保重置后
+    # 始终存在一个可用超管, 不会因未配 SEED_ADMIN_* 而锁死控制台。
+    seed_admin_username: str = "huzhen"
+    seed_admin_password: str = "huzhen189"
+    seed_admin_email: str = "huzhen@huzhen.net.cn"
+    seed_admin_nickname: str = "超级管理员"
+
     # 缓存默认 TTL
     cache_user_ttl: int = 9000  # 150 min（×5）
 
