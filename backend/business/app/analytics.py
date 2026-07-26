@@ -177,11 +177,20 @@ async def record_frontend_perf(metric: str, value_ms: float) -> None:
         logger.warning("analytics record_frontend_perf failed: %s", e)
 
 
-async def record_frontend_access(route: str) -> None:
-    """前端页面访问统计(STAT-3): 按路由累计访问次数。"""
+async def record_frontend_access(route: str, uid: str | None = None) -> None:
+    """前端页面访问统计(STAT-3): 按路由累计访问次数(PV) + 匿名 UV。
+
+    uid 为前端生成的匿名访客 ID(localStorage 持久化); 传入时计入 UV 集合
+    (全局 an:frontend:uv + 当日 an:frontend:uv:{ymd}), 供「系统分析」展示独立访客数(R6)。
+    """
     try:
         r = await get_redis()
         await r.hincrby(f"{P_FRONTEND}:access", route or "unknown", 1)
+        if uid:
+            ymd = time.strftime("%Y-%m-%d")
+            await r.sadd(f"{P_FRONTEND}:uv", uid)
+            await r.sadd(f"{P_FRONTEND}:uv:{ymd}", uid)
+            await r.expire(f"{P_FRONTEND}:uv:{ymd}", 86400 * 8)
     except Exception as e:
         logger.warning("analytics record_frontend_access failed: %s", e)
 
@@ -499,6 +508,12 @@ async def analytics_snapshot() -> dict:
         frontend_clicks = {
             k: int(v) for k, v in sorted(fe_click_raw.items(), key=lambda x: int(x[1]), reverse=True)[:20]
         }
+        # 匿名 UV(累计独立访客 + 今日独立访客)(R6)
+        ymd = time.strftime("%Y-%m-%d")
+        frontend_uv = {
+            "total": await r.scard(f"{P_FRONTEND}:uv"),
+            "today": await r.scard(f"{P_FRONTEND}:uv:{ymd}"),
+        }
 
         # DAU(今天 + 昨天)
         today = datetime.utcnow().strftime("%Y%m%d")
@@ -605,6 +620,7 @@ async def analytics_snapshot() -> dict:
             "frontend_perf": fe_perf,
             "frontend_access": frontend_access,
             "frontend_clicks": frontend_clicks,
+            "frontend_uv": frontend_uv,
             "generation_rate": {"total": total, "done": done, "rate": gen_rate},
             "error_stats": error_stats,
             "model_stats": model_stats,

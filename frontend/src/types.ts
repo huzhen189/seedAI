@@ -234,16 +234,59 @@ export interface MetricsSnapshot {
   requests_error?: number
   requests_per_min?: number
   model_usage?: Record<string, ModelUsageItem>
-  api_latency?: Record<string, LatencyBucket>
+  /** API 接口延迟(R1): 业务端 + 需求端(AI 核心 7102)两组, 各为 path -> 百分位统计 */
+  api_latency?: {
+    business: Record<string, LatencyBucket>
+    ai_service: Record<string, LatencyBucket>
+  }
   ai_stats?: { generate_total: number; v090_features: Record<string, number> }
-  /** 三库健康状态(业务可检的 MySQL + Redis) */
+  /** 三库健康状态: MySQL + Redis + Chroma(向量库), 含容量/连接信息(R2) */
   db?: DbStatus
   error?: string
 }
 
+/** 单库容量展示(R2): 具体数值 + 百分比两行 */
+export interface DbCapacity {
+  value: string
+  value_bytes?: number
+  pct?: number | null
+  detail?: string
+}
+
+export interface MySqlStatus {
+  ok: boolean
+  pool_size?: number
+  checked_in?: number
+  overflow?: number
+  capacity?: DbCapacity
+  max_connections?: number
+  threads_connected?: number
+  error?: string
+}
+
+export interface RedisStatus {
+  ok: boolean
+  capacity?: DbCapacity
+  used_memory_human?: string
+  maxmemory_human?: string
+  connected_clients?: number
+  db_keys?: number
+  error?: string
+}
+
+export interface ChromaStatus {
+  ok: boolean
+  capacity?: DbCapacity
+  collection_count?: number
+  item_count?: number
+  collections?: { name: string; count: number }[]
+  error?: string
+}
+
 export interface DbStatus {
-  mysql?: { ok: boolean; pool_size?: number; checked_in?: number; overflow?: number; error?: string }
-  redis?: { ok: boolean; error?: string }
+  mysql?: MySqlStatus
+  redis?: RedisStatus
+  chroma?: ChromaStatus
 }
 
 /** 生成产物(Artifact 表) */

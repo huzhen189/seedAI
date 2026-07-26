@@ -10,6 +10,21 @@
 
 let installed = false
 
+/** 匿名访客 ID: localStorage 持久化, 用于 UV 统计(R6)。不关联任何用户身份。 */
+const VISITOR_KEY = 'seed_visitor_id'
+function getVisitorId(): string {
+  try {
+    let id = localStorage.getItem(VISITOR_KEY)
+    if (!id) {
+      id = 'v_' + Math.random().toString(36).slice(2) + Date.now().toString(36)
+      localStorage.setItem(VISITOR_KEY, id)
+    }
+    return id
+  } catch {
+    return 'anon'
+  }
+}
+
 function beacon(payload: Record<string, unknown>): void {
   try {
     const data = JSON.stringify(payload)
@@ -30,9 +45,9 @@ function beacon(payload: Record<string, unknown>): void {
   }
 }
 
-/** 上报页面访问(路由路径)。 */
+/** 上报页面访问(路由路径)。附带匿名访客 ID 用于 UV 统计(R6)。 */
 export function trackPageView(route: string): void {
-  beacon({ type: 'page_view', route: route || 'unknown' })
+  beacon({ type: 'page_view', route: route || 'unknown', uid: getVisitorId() })
 }
 
 /** 上报一次点击(标签 <= 60 字)。 */

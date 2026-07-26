@@ -10,9 +10,10 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta
+from urllib.parse import urlparse as _urlparse
 
 from .cache import get_redis
-from .config import settings
+from .config import ENV_FILE, settings
 
 
 logger = logging.getLogger("business.metrics")
@@ -130,21 +131,12 @@ async def snapshot() -> dict:
                 "raw_count": int((usage or {}).get(m, 0)),
             }
 
-        # API 延迟统计
-        latency = {}
-        for path in ["/api/chat", "/auth/login", "/admin/metrics"]:
-            vals = await r.lrange(f"stats:latency:{path}", 0, 49)
-            vals_f = [float(v) for v in vals if v]
-            if vals_f:
-                vals_f.sort()
-                n = len(vals_f)
-                latency[path] = {
-                    "p50": round(vals_f[int(n*0.5)], 1),
-                    "p90": round(vals_f[int(n*0.9)], 1),
-                    "p99": round(vals_f[int(n*0.99)], 1),
-                    "avg": round(sum(vals_f)/n, 1),
-                    "samples": n,
-                }
+        # API 延迟统计: 业务端(本服务中间件记录 an:latency:api:*) + 需求端(AI 核心 7102 记录 ai:api:latency:*)
+        # 两组各自扫描全部接口, 供前端用 nav+tab 分成两个表单切换(R1)。
+        latency = {
+            "business": await _latency_stats(r, "an:latency:api:"),
+            "ai_service": await _latency_stats(r, "ai:api:latency:"),
+        }
 
         # AI 核心统计(从共享Redis读取)
         ai_stats = {}
@@ -170,10 +162,112 @@ async def snapshot() -> dict:
         return {"uptime_s": int(time.time() - START_TIME), "error": str(e)}
 
 
+def _human_bytes(num: float) -> str:
+    """字节数 → 人类可读(如 1.24 GB)。"""
+    try:
+        num = float(num)
+    except Exception:
+        return "-"
+    if num <= 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    i = 0
+    while num >= 1024 and i < len(units) - 1:
+        num /= 1024
+        i += 1
+    return f"{num:.2f} {units[i]}"
+
+
+def _chroma_client():
+    """业务端只读探测 Chroma 向量库(地址来源与 db.reset_db 一致: 优先 env, 回退根 .env)。"""
+    import os
+
+    import chromadb
+
+    _cu = os.environ.get("CHROMA_URL")
+    if not _cu and ENV_FILE.exists():
+        try:
+            for _l in ENV_FILE.read_text(encoding="utf-8").splitlines():
+                _l = _l.strip()
+                if _l.startswith("CHROMA_URL="):
+                    _cu = _l.split("=", 1)[1].strip()
+                    break
+        except Exception:
+            pass
+    chroma_url = _cu or "http://chroma:8000"
+    p = _urlparse(chroma_url)
+    return chromadb.HttpClient(host=p.hostname or "localhost", port=p.port or 8000)
+
+
+async def _latency_stats(r, prefix: str) -> dict:
+    """扫描 Redis 指定前缀的延迟键, 计算 p50/p90/p99/avg/samples。
+
+    r 为 None 时返回空(降级)。供指标面板展示两组接口延迟:
+      - 业务端 an:latency:api:* → ZSET(member=uuid, score=耗时ms)
+      - 需求端 ai:api:latency:*  → LIST(每元素=str(耗时ms))
+    两种类型分别用 zrange(withscores) 与 lrange 读取。
+
+    业务端 writer 同时写分钟粒度子键 an:latency:api:{path}:{minute}(HASH, 非采样),
+    其 path 含 ':' 需跳过, 只统计纯接口路径的采样集合。
+    """
+    out: dict = {}
+    if r is None:
+        return out
+    try:
+        raw_keys = await r.keys(f"{prefix}*")
+    except Exception:
+        return out
+    for full in raw_keys:
+        key = full.decode() if isinstance(full, bytes) else full
+        path = key[len(prefix):]
+        # 跳过分钟粒度后缀子键(如 :api:{path}:{minute})
+        if ":" in path:
+            continue
+        try:
+            _raw_type = await r.type(key)
+            ktype = _raw_type.decode() if isinstance(_raw_type, bytes) else _raw_type
+        except Exception:
+            ktype = "list"
+        vals_f: list[float] = []
+        try:
+            if ktype == "zset":
+                rows = await r.zrange(key, 0, -1, withscores=True)
+                for _, score in rows:
+                    try:
+                        vals_f.append(float(score))
+                    except Exception:
+                        pass
+            else:
+                vals = await r.lrange(full, 0, 99)
+                for v in vals:
+                    try:
+                        sv = v.decode() if isinstance(v, bytes) else v
+                        vals_f.append(float(sv))
+                    except Exception:
+                        pass
+        except Exception:
+            continue
+        if vals_f:
+            vals_f.sort()
+            n = len(vals_f)
+            out[path] = {
+                "p50": round(vals_f[int(n * 0.5)], 1),
+                "p90": round(vals_f[int(n * 0.9)], 1),
+                "p99": round(vals_f[int(n * 0.99)], 1),
+                "avg": round(sum(vals_f) / n, 1),
+                "samples": n,
+            }
+    return out
+
+
 async def _db_status() -> dict:
-    """MySQL / Redis 连通性 + 连接池状态(每 2s 由 /admin/metrics 调用)。"""
+    """三库(MySQL / Redis / Chroma)连通性 + 容量 + 连接状态(每 2s 由 /admin/metrics 调用)。
+
+    返回结构统一含 capacity:{value, pct, detail} —— 供前端「具体数值 + 百分比」两行显示(R2)。
+    """
     result: dict = {}
-    # MySQL
+
+    # ── MySQL ──
     try:
         from sqlalchemy import text
 
@@ -182,22 +276,88 @@ async def _db_status() -> dict:
         pool = engine.pool
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
+            size_row = (await conn.execute(
+                text("SELECT SUM(data_length + index_length) AS bytes "
+                     "FROM information_schema.tables WHERE table_schema = :db")
+            )).fetchone()
+            data_bytes = int(size_row[0] or 0) if size_row else 0
+            max_conn_row = (await conn.execute(text("SHOW VARIABLES LIKE 'max_connections'"))).fetchone()
+            conn_row = (await conn.execute(text("SHOW GLOBAL STATUS LIKE 'Threads_connected'"))).fetchone()
+            max_conn = int(max_conn_row[1]) if max_conn_row else 0
+            threads = int(conn_row[1]) if conn_row else 0
+            conn_pct = round(threads / max_conn * 100, 1) if max_conn else None
         result["mysql"] = {
             "ok": True,
             "pool_size": pool.size(),
             "checked_in": getattr(pool, "checkedin", lambda: 0)(),
             "overflow": pool.overflow(),
+            "capacity": {
+                "value": _human_bytes(data_bytes),
+                "value_bytes": data_bytes,
+                "pct": conn_pct,  # 连接占用百分比(第二行)
+                "detail": f"连接 {threads}/{max_conn}",
+            },
+            "max_connections": max_conn,
+            "threads_connected": threads,
         }
     except Exception as e:
         result["mysql"] = {"ok": False, "error": str(e)[:200]}
 
-    # Redis
+    # ── Redis ──
     try:
         r = await get_redis()
         await r.ping()
-        result["redis"] = {"ok": True}
+        info = await r.info("memory")
+        used = int(info.get("used_memory", 0) or 0)
+        maxmem = int(info.get("maxmemory", 0) or 0)
+        used_pct = round(used / maxmem * 100, 1) if maxmem else None
+        clients = await r.info("clients")
+        keys = await r.dbsize()
+        result["redis"] = {
+            "ok": True,
+            "capacity": {
+                "value": _human_bytes(used),
+                "value_bytes": used,
+                "pct": used_pct,  # 内存占用百分比(第二行)
+                "detail": f"上限 {_human_bytes(maxmem) if maxmem else '无限制'}",
+            },
+            "used_memory_human": info.get("used_memory_human"),
+            "maxmemory_human": info.get("maxmemory_human"),
+            "connected_clients": int(clients.get("connected_clients", 0)),
+            "db_keys": int(keys),
+        }
     except Exception as e:
         result["redis"] = {"ok": False, "error": str(e)[:200]}
+
+    # ── Chroma(向量库, AI 服务托管, 业务端只读探测) ──
+    try:
+        c = _chroma_client()
+        c.heartbeat()  # 探测连通性(返回 epoch ms)
+        colls = c.list_collections()
+        items = 0
+        coll_info = []
+        for col in colls:
+            name = col.name if hasattr(col, "name") else str(col)
+            try:
+                cnt = c.get_collection(name).count()
+            except Exception:
+                cnt = 0
+            items += cnt
+            coll_info.append({"name": name, "count": cnt})
+        result["chroma"] = {
+            "ok": True,
+            "capacity": {
+                "value": f"{items} 向量",
+                "value_bytes": items,
+                "pct": None,  # 向量库无磁盘容量概念, 仅展示条目数
+                "detail": f"{len(colls)} 个集合",
+            },
+            "collection_count": len(colls),
+            "item_count": items,
+            "collections": coll_info,
+        }
+    except Exception as e:
+        result["chroma"] = {"ok": False, "error": str(e)[:200]}
 
     return result
 

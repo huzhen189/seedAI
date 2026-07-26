@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { get, post } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import RadarChart from '../components/RadarChart.vue'
-import { ROLE_LABELS, QC_DIM_LABELS, type AdminUser, type MetricsSnapshot, type Role } from '../types'
+import { ROLE_LABELS, QC_DIM_LABELS, type AdminUser, type DbCapacity, type MetricsSnapshot, type Role } from '../types'
 
 const auth = useAuthStore()
 const isSuper = computed(() => auth.user?.role === 'super_admin')
@@ -132,11 +132,41 @@ async function doReset() {
 }
 
 // ---- DB 状态展示(类型桥接 v-for) ----
-interface DbItem { key: string; ok: boolean; error?: string; pool_size?: number; checked_in?: number; overflow?: number }
+interface DbItem {
+  key: string
+  ok: boolean
+  error?: string
+  capacity?: DbCapacity
+  pool_size?: number
+  checked_in?: number
+  overflow?: number
+  max_connections?: number
+  threads_connected?: number
+  used_memory_human?: string
+  maxmemory_human?: string
+  connected_clients?: number
+  db_keys?: number
+  collection_count?: number
+  item_count?: number
+  collections?: { name: string; count: number }[]
+}
 const dbItems = computed<DbItem[]>(() => {
   const db = metrics.value.db
   if (!db) return []
   return Object.entries(db).map(([key, info]) => ({ key, ...(info as any) }))
+})
+
+// ---- R1: API 延迟两个子表单(业务端 / 需求端) ----
+type LatencyGroup = 'business' | 'ai_service'
+const latencyTab = ref<LatencyGroup>('business')
+const latencyGroups: { key: LatencyGroup; label: string }[] = [
+  { key: 'business', label: '业务端 (7101)' },
+  { key: 'ai_service', label: '需求端 (7102 AI 核心)' },
+]
+const currentLatency = computed<Record<string, LatencyBucket>>(() => {
+  const groups = metrics.value.api_latency
+  if (!groups) return {}
+  return groups[latencyTab.value] || {}
 })
 
 async function doScale() {
@@ -204,6 +234,20 @@ const qcSeries = computed(() => {
     mk('HY3', '#d97706', q.qc_model_avg?.['hy3'] || {}),
     mk('整体', '#7c3aed', q.qc_overall_dim_avg || {}),
   ]
+})
+
+// QC 评分明细表(三裁判 + 整体): 把"评分"以数字清晰呈现(R3)
+const qcTable = computed(() => {
+  const q = quality.value
+  if (!q || !q.qc_dimensions?.length) return []
+  return q.qc_dimensions.map((d) => ({
+    dim: d,
+    label: (QC_DIM_LABELS as Record<string, string>)[d] || d,
+    deepseek: q.qc_model_avg?.['deepseek']?.[d] ?? null,
+    qwen: q.qc_model_avg?.['qwen']?.[d] ?? null,
+    hy3: q.qc_model_avg?.['hy3']?.[d] ?? null,
+    overall: q.qc_overall_dim_avg?.[d] ?? null,
+  }))
 })
 
 // 维度 key -> 中文标签(兼容任意字符串 key, 避免模板内严格索引报错)
@@ -304,6 +348,7 @@ interface AnalyticsSnapshot {
   frontend_perf: Record<string, LatencyBucket>
   frontend_access: Record<string, number>
   frontend_clicks: Record<string, number>
+  frontend_uv?: { total: number; today: number }
   generation_rate: { total: number; done: number; rate: number }
   error_stats?: Record<string, number>
   model_stats?: Record<string, { total: number; ok: number; fail: number; rate: number }>
@@ -471,17 +516,36 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- 数据库状态 -->
+      <!-- 数据库状态(R2: MySQL + Redis + Chroma 三库, 含容量/连接) -->
       <div v-if="dbItems.length" class="block">
-        <h3>数据库状态</h3>
+        <h3>数据库状态（MySQL · Redis · Chroma 向量库）</h3>
         <div class="db-grid">
-          <div v-for="item in dbItems" :key="item.key" class="db-card">
-            <span class="db-icon" :class="item.ok ? 'ok' : 'err'">{{ item.ok ? '●' : '●' }}</span>
-            <span class="db-name">{{ item.key }}</span>
-            <span class="db-stat" :class="item.ok ? 'ok' : 'err'">{{ item.ok ? '正常' : (item.error || '不可达') }}</span>
-            <span v-if="item.ok && item.pool_size != null" class="db-pool">
-              连接池: {{ item.pool_size }} (在用 {{ item.checked_in ?? '-' }}, 溢出 {{ item.overflow ?? '-' }})
-            </span>
+          <div v-for="item in dbItems" :key="item.key" class="db-card" :class="item.ok ? 'ok' : 'err'">
+            <div class="db-head">
+              <span class="db-name">{{ item.key.toUpperCase() }}</span>
+              <span class="db-stat" :class="item.ok ? 'ok' : 'err'">{{ item.ok ? '正常' : (item.error || '不可达') }}</span>
+            </div>
+            <template v-if="item.ok">
+              <div class="db-cap">
+                <span class="db-cap-val">{{ item.capacity?.value }}</span>
+                <span class="db-cap-pct" :class="{ none: item.capacity?.pct == null }">
+                  {{ item.capacity?.pct != null ? item.capacity.pct + '%' : '—' }}
+                </span>
+              </div>
+              <div class="db-cap-detail">{{ item.capacity?.detail }}</div>
+              <div v-if="item.key === 'mysql'" class="db-extra">
+                连接池 {{ item.pool_size }} · 在用 {{ item.checked_in ?? '-' }} · 溢出 {{ item.overflow ?? '-' }}
+              </div>
+              <div v-else-if="item.key === 'redis'" class="db-extra">
+                内存 {{ item.used_memory_human }} · 客户端 {{ item.connected_clients }} · Keys {{ item.db_keys }}
+              </div>
+              <div v-else-if="item.key === 'chroma'" class="db-extra">
+                {{ item.collection_count }} 个集合 · 共 {{ item.item_count }} 向量
+              </div>
+              <div v-if="item.key === 'chroma' && item.collections?.length" class="db-colls">
+                <span v-for="c in item.collections" :key="c.name" class="pill">{{ c.name }}: {{ c.count }}</span>
+              </div>
+            </template>
           </div>
         </div>
       </div>
@@ -501,18 +565,27 @@ onUnmounted(() => {
           </tbody>
         </table>
       </div>
-      <div class="block" v-if="metrics.api_latency && Object.keys(metrics.api_latency).length">
+      <div class="block" v-if="metrics.api_latency">
         <h3>API 接口延迟 (ms)</h3>
-        <table class="model-table">
+        <div class="subtabs">
+          <button
+            v-for="g in latencyGroups"
+            :key="g.key"
+            :class="{ on: latencyTab === g.key }"
+            @click="latencyTab = g.key"
+          >{{ g.label }}</button>
+        </div>
+        <table v-if="Object.keys(currentLatency).length" class="model-table">
           <thead><tr><th>接口</th><th>P50</th><th>P90</th><th>P99</th><th>平均</th><th>样本</th></tr></thead>
           <tbody>
-            <tr v-for="(lat, path) in metrics.api_latency" :key="path">
+            <tr v-for="(lat, path) in currentLatency" :key="path">
               <td><code>{{ path }}</code></td>
               <td>{{ lat.p50 }}</td><td>{{ lat.p90 }}</td><td>{{ lat.p99 }}</td>
               <td>{{ lat.avg }}</td><td>{{ lat.samples }}</td>
             </tr>
           </tbody>
         </table>
+        <p v-else class="muted">该端点暂无延迟采样数据</p>
       </div>
     </section>
 
@@ -564,6 +637,23 @@ onUnmounted(() => {
           :series="qcSeries"
           :size="340"
         />
+      </div>
+      <!-- QC 评分明细(数字, R3) -->
+      <div v-if="qcTable.length" class="block">
+        <h3>QC 评分明细（三裁判 + 整体, 0-10）</h3>
+        <table class="qctable">
+          <thead><tr><th>维度</th><th>DeepSeek</th><th>Qwen</th><th>HY3</th><th>整体</th></tr></thead>
+          <tbody>
+            <tr v-for="r in qcTable" :key="r.dim">
+              <td>{{ r.label }}</td>
+              <td>{{ r.deepseek != null ? r.deepseek.toFixed(2) : '-' }}</td>
+              <td>{{ r.qwen != null ? r.qwen.toFixed(2) : '-' }}</td>
+              <td>{{ r.hy3 != null ? r.hy3.toFixed(2) : '-' }}</td>
+              <td><b>{{ r.overall != null ? r.overall.toFixed(2) : '-' }}</b></td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="!quality?.qc_count" class="hint">提示: QC 仅对「需复核」的 trace 触发三裁判评分, 样本数 = {{ quality?.qc_count ?? 0 }}。</p>
       </div>
       <div v-if="quality && quality.rating_distribution && Object.keys(quality.rating_distribution).length" class="block">
         <h3>评分分布</h3>
@@ -815,6 +905,14 @@ onUnmounted(() => {
             </tbody>
           </table>
           <p v-else class="muted">暂无数据</p>
+        </div>
+        <!-- 前端 UV / PV(R6) -->
+        <div v-if="al.frontend_uv" class="block">
+          <h4>前端访问概览（UV / PV）</h4>
+          <div class="card-row">
+            <div class="card"><div class="k">累计独立访客 (UV)</div><div class="v">{{ al.frontend_uv.total }}</div></div>
+            <div class="card"><div class="k">今日独立访客 (UV)</div><div class="v">{{ al.frontend_uv.today }}</div></div>
+          </div>
         </div>
         <!-- 前端访问统计(STAT-3) -->
         <div class="block">
@@ -1337,15 +1435,26 @@ onUnmounted(() => {
 .ecomment { color: var(--muted); font-style: italic; margin-left: auto; }
 .back { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 4px 12px; cursor: pointer; font-size: 13px; margin-bottom: 8px; }
 .db-grid { display: flex; gap: 12px; flex-wrap: wrap; }
-.db-card { display: flex; align-items: center; gap: 8px; background: #f8fafc; border-radius: 8px; padding: 10px 14px; min-width: 200px; }
-.db-icon { font-size: 12px; }
-.db-icon.ok { color: #22c55e; }
-.db-icon.err { color: var(--err); }
+.db-card { display: flex; flex-direction: column; gap: 4px; background: var(--panel); border: 1px solid var(--border); border-left: 3px solid #22c55e; border-radius: 10px; padding: 12px 14px; min-width: 220px; flex: 1; }
+.db-card.err { border-left-color: var(--err); }
+.db-head { display: flex; align-items: center; justify-content: space-between; }
 .db-name { font-weight: 700; font-size: 14px; color: #334155; text-transform: uppercase; }
-.db-stat { font-size: 12px; }
+.db-stat { font-size: 12px; font-weight: 600; }
 .db-stat.ok { color: #22c55e; }
 .db-stat.err { color: var(--err); }
-.db-pool { font-size: 11px; color: var(--muted); margin-left: auto; }
+.db-cap { display: flex; align-items: baseline; gap: 8px; }
+.db-cap-val { font-size: 20px; font-weight: 700; color: #1e293b; }
+.db-cap-pct { font-size: 14px; font-weight: 700; color: var(--brand); }
+.db-cap-pct.none { color: var(--muted); }
+.db-cap-detail { font-size: 12px; color: var(--muted); }
+.db-extra { font-size: 12px; color: #475569; margin-top: 2px; }
+.db-colls { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.db-colls .pill { background: #ecfeff; color: #0e7490; }
+
+/* R1: API 延迟子标签(业务端 / 需求端) */
+.subtabs { display: flex; gap: 8px; margin-bottom: 10px; }
+.subtabs button { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 5px 14px; cursor: pointer; font-size: 13px; color: var(--muted); }
+.subtabs button.on { color: var(--brand); border-color: var(--brand2, #c7d2fe); background: #eef2ff; font-weight: 600; }
 
 /* 系统分析表 */
 .atable { width: 100%; border-collapse: collapse; font-size: 13px; }

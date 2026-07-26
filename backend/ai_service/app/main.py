@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 
@@ -22,7 +23,7 @@ from .config import settings
 from .events import to_sse
 from .logging_config import setup_logging, set_trace
 from .providers import list_providers
-from .analytics import record_generate_request
+from .analytics import record_api_latency, record_generate_request
 from .core.queue import get_queue, worker_loop
 from .registry import SkillRegistry, ToolRegistry
 
@@ -94,6 +95,25 @@ app.add_middleware(
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _latency_middleware(request: Request, call_next):
+    """记录 AI 核心(需求端)全部 HTTP 接口耗时到 ai:api:latency:*(R1)。
+
+    /generate 为 SSE 流式端点(耗时=整段生成, 非请求延迟语义), 排除不计。
+    """
+    path = request.url.path
+    if path == "/generate":
+        return await call_next(request)
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    try:
+        await record_api_latency(path, elapsed_ms)
+    except Exception:
+        pass
+    return response
 
 
 class GenerateReq(BaseModel):

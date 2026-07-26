@@ -103,7 +103,8 @@ async def track_frontend(request: Request):
     try:
         t = body.get("type")
         if t == "page_view":
-            await record_frontend_access(body.get("route") or "unknown")
+            # uid: 前端匿名访客 ID, 用于 UV 统计(R6)
+            await record_frontend_access(body.get("route") or "unknown", body.get("uid"))
         elif t == "click":
             label = (body.get("label") or "").strip()
             if label:
@@ -249,26 +250,28 @@ async def list_traces(
     qc_by_trace: dict[str, float] = {q.trace_id: q.overall for q in qc_rows}
     fb_rows = (await db.execute(select(Feedback))).scalars().all()
     fb_by_trace: dict[str, int] = {f.trace_id: f.rating for f in fb_rows}
-    # 查每条 trace 的第一条用户消息(供列表预览,限20字)
+    # 查每条 trace 对应的第一条用户消息(供列表预览,限20字)。
+    # 注意: 必须按 trace_id 关联,而非 conversation_id —— 否则同一会话的多条
+    # trace 会全部显示该会话第一条用户消息(历史 bug: "几条都是一样的")。
     from sqlalchemy import text as sa_text
     user_inputs = {}
-    conv_ids = list(set(t.conversation_id for t in rows if t.conversation_id))
-    if conv_ids:
+    trace_ids = list(set(t.trace_id for t in rows if t.trace_id))
+    if trace_ids:
         try:
-            placeholders = ",".join([f":c{i}" for i in range(len(conv_ids))])
-            params = {f"c{i}": cid for i, cid in enumerate(conv_ids)}
+            placeholders = ",".join([f":t{i}" for i in range(len(trace_ids))])
+            params = {f"t{i}": tid for i, tid in enumerate(trace_ids)}
             mrows = (await db.execute(
                 sa_text(
-                    # MySQL 兼容: DISTINCT ON 是 PG 专有, 改用 GROUP BY + 子查询取每会话第一条 user 消息
-                    f"SELECT m.conversation_id, m.content FROM messages m "
-                    f"JOIN (SELECT conversation_id, MIN(id) AS min_id FROM messages "
-                    f"WHERE conversation_id IN ({placeholders}) AND role='user' "
-                    f"GROUP BY conversation_id) sub "
-                    f"ON m.conversation_id = sub.conversation_id AND m.id = sub.min_id"
+                    # 按 trace_id 取每条 trace 的第一条 user 消息(MySQL 兼容 GROUP BY + 子查询)
+                    f"SELECT m.trace_id, m.content FROM messages m "
+                    f"JOIN (SELECT trace_id, MIN(id) AS min_id FROM messages "
+                    f"WHERE trace_id IN ({placeholders}) AND role='user' "
+                    f"GROUP BY trace_id) sub "
+                    f"ON m.trace_id = sub.trace_id AND m.id = sub.min_id"
                 ), params,
             )).fetchall()
-            for cid, content in mrows:
-                user_inputs[cid] = (content or "")[:20] + ("..." if len(content or "") > 20 else "")
+            for tid, content in mrows:
+                user_inputs[tid] = (content or "")[:20] + ("..." if len(content or "") > 20 else "")
         except Exception:
             pass
 
@@ -277,7 +280,7 @@ async def list_traces(
             "id": t.id,
             "trace_id": t.trace_id,
             "user_id": t.user_id,
-            "user_input": user_inputs.get(t.conversation_id, "") if t.conversation_id else "",
+            "user_input": user_inputs.get(t.trace_id, "") if t.trace_id else "",
             "model_id": t.model_id,
             "status": t.status,
             "total_tokens": t.total_tokens,

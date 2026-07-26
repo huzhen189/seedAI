@@ -111,6 +111,26 @@ async def _pct_zset(r, zkey: str) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 0.5 HTTP 接口延迟(R1): 需求端(AI 核心 7102)全部 HTTP 接口耗时
+# ──────────────────────────────────────────────────────────────────────
+
+async def record_api_latency(path: str, elapsed_ms: float) -> None:
+    """记录 AI 核心(需求端)HTTP 接口耗时(R1), 写入 ai:api:latency:{path}。
+
+    与业务端 stats:latency:* 对称; 业务端 snapshot 扫描 ai:api:latency:* 聚合进管理后台
+    「运行指标」第二个 tab。注意 /generate 为 SSE 流式端点, 由中间件排除(不记入延迟)。
+    """
+    try:
+        r = _get_redis()
+        if r is None:
+            return
+        await r.lpush(f"ai:api:latency:{path}", str(round(elapsed_ms, 1)))
+        await r.ltrim(f"ai:api:latency:{path}", 0, 99)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("AI analytics record_api_latency failed: %s", e)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 1. 编排 / 2. 子任务 / 生成负载  (既有, 保持契约不变)
 # ──────────────────────────────────────────────────────────────────────
 
