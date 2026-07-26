@@ -724,6 +724,45 @@ async def chat(
         t_start_chat = time.time()  # v0.9.0: API 延迟起点
         # read 不超时(生成可能持续数分钟),connect 给 10s
         timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
+        # ── 断连自动取消(C1, 生产级闭环) ──
+        # 用"活跃连接集合 clients:<tid>"记录本 SSE 连接的唯一 id。只有最后一个客户端离开时
+        # 才置 cancel:<tid>, 避免刷新/多标签时旧连接误伤仍在使用同一 trace_id 的新连接(回放)。
+        conn_id = uuid.uuid4().hex
+        saw_terminal = False  # 是否已收到终止事件(done/aborted/error/unsupported/paused)
+        try:
+            r0 = await get_redis()
+            before = await r0.scard(f"clients:{tid}")
+            await r0.sadd(f"clients:{tid}", conn_id)
+            await r0.expire(f"clients:{tid}", 3600)  # 安全 TTL: 进程崩溃未 SREM 时自动清理
+            if before == 0:
+                # 首个连接(含刷新重连): 清除可能残留的取消标志, 保证回放/续跑不被旧标志误伤
+                await r0.delete(f"cancel:{tid}")
+                logger.info("[chat] 新连接清除残留 cancel 标志 trace=%s", tid)
+        except Exception as e:
+            logger.warning("[chat] 连接登记异常 trace=%s: %s", tid, e)
+
+        async def _on_disconnect() -> int:
+            """断连清理: 移除本连接; 若再无活跃客户端且本次未正常结束, 置 cancel 让 Worker 中断。
+
+            返回剩余活跃连接数(异常时返回 1, 保守地视为仍有其他客户端 → 不取消/不置 aborted,
+            避免误杀他人仍在消费的生成)。
+            """
+            try:
+                rc = await get_redis()
+                await rc.srem(f"clients:{tid}", conn_id)
+                remaining = await rc.scard(f"clients:{tid}")
+                if after is None and not saw_terminal and remaining == 0:
+                    # 与手动 /cancel 同标志、同语义(ex=3600): AI Worker 在下个 token/阶段前中断
+                    await rc.set(f"cancel:{tid}", "1", ex=3600)
+                    logger.info("[chat] 断连自动取消已触发(无活跃客户端) trace=%s", tid)
+                else:
+                    logger.info("[chat] 跳过自动取消 after=%s saw_terminal=%s remaining=%d trace=%s",
+                                bool(after), saw_terminal, remaining, tid)
+                return remaining
+            except Exception as e:
+                logger.warning("[chat] 断连清理异常 trace=%s: %s", tid, e)
+                return 1
+
         assistant_parts: list[str] = []
         preview_url: str | None = None  # 捕获预览直链(供分享「复制预览链接」使用)
         files_dict: dict[str, str] = {}  # 多文件产物: {文件名: COS URL} (v1.2.1+)
@@ -760,6 +799,16 @@ async def chat(
                         event = None
                         data_parts: list[str] = []
                         async for raw_line in resp.aiter_lines():
+                            # 主动检测客户端断连(关闭/刷新/导航离开): 立即终止读取上游并触发级联取消
+                            try:
+                                if await request.is_disconnected():
+                                    logger.info("[chat] 客户端已断开, 提前终止读取上游 trace=%s", tid)
+                                    remaining = await _on_disconnect()
+                                    if remaining == 0:
+                                        terminal_status = "aborted"
+                                    break
+                            except Exception:
+                                pass
                             if raw_line == "":
                                 if event is not None or data_parts:
                                     data = "\n".join(data_parts)
@@ -800,10 +849,13 @@ async def chat(
                                         # trace_event 暂存, 由 finally 批量写入
                                         if event == "aborted":
                                             terminal_status = "aborted"
+                                            saw_terminal = True
                                         elif event == "error":
                                             terminal_status = "error"
+                                            saw_terminal = True
                                     elif event == "unsupported":
                                         terminal_status = "unsupported"
+                                        saw_terminal = True
                                         await record_unsupported(user.id, user_text)
                                         await record_intent_decision("unsupported")
                                     elif event == "checkpoint" and isinstance(payload_obj, dict):
@@ -822,6 +874,7 @@ async def chat(
                                             conversation_id, stage, ck_data, progress_pct))
                                     elif event == "paused":
                                         terminal_status = "paused"
+                                        saw_terminal = True
                                         # 方案确认暂停: 保存阶段信息到 checkpoint, 恢复时锁死 generate_site
                                         if isinstance(payload_obj, dict) and payload_obj.get("stage") == "await_confirm":
                                             await ck_set(conversation_id, "await_confirm",
@@ -871,6 +924,9 @@ async def chat(
                                     elif event == "refined" and isinstance(payload_obj, dict):
                                         # 文字总结(v1.2.2): agent 生成完毕反馈文案, 持久化供刷新展示
                                         refined_text = payload_obj.get("data") or ""
+                                    elif event == "done":
+                                        # 正常完成: 标记已见终止事件, finally 不再触发自动取消
+                                        saw_terminal = True
                                     logger.info(
                                             "[chat] ◇ SSE #%d type=%s stage=%s data=%.200s",
                                             event_seq, event, stage or "-", data,
@@ -879,7 +935,16 @@ async def chat(
                                     if event:
                                         frame += f"event: {event}\n"
                                     frame += f"data: {data}\n\n"
-                                    yield frame.encode("utf-8")
+                                    try:
+                                        yield frame.encode("utf-8")
+                                    except (RuntimeError, ConnectionError, OSError, BrokenPipeError) as _e:
+                                        # 客户端在发送中途断开(浏览器关闭/刷新): 触发级联取消并停止读取
+                                        logger.info("[chat] 发送失败(客户端已断开) trace=%s: %s",
+                                                    tid, type(_e).__name__)
+                                        remaining = await _on_disconnect()
+                                        if remaining == 0:
+                                            terminal_status = "aborted"
+                                        break
                                 event, data_parts = None, []
                                 continue
                             if raw_line.startswith("event:"):
@@ -893,6 +958,10 @@ async def chat(
                     yield _error_frame("UPSTREAM_ERROR", "AI 服务暂时不可用，请稍后重试")
                     return
         finally:
+            # 断连自动取消: 用独立任务执行清理, 即便本流式任务被取消也能跑完(与 _do_persist 同模式,
+            # 避免清理在 finally 的 await 中被取消信号打断)。主动检测/发送失败路径已 await 过,
+            # 此处再跑一次幂等(SREM 无副作用, cancel 置位亦幂等)。
+            asyncio.create_task(_on_disconnect())
             # 获取完整 assistant 文本并立即落库(不依赖 finally 内异步)
             assistant_full_text = "".join(assistant_parts)
             approx_tokens = max(0, len(assistant_full_text) // 4)
