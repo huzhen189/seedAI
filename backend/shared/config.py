@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"
     qwen_api_key: str = ""
-    qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    qwen_base_url: str = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
     qwen_model: str = "qwen-plus"
     qwen_embedding_key: str = ""
     qwen_embedding_model: str = "text-embedding-v3"
@@ -67,7 +67,6 @@ class Settings(BaseSettings):
     hy3_api_key_demo: str = ""
     hy3_base_url: str = "https://tokenhub.tencentmaas.com/v1"
     hy3_model: str = "hy3"
-    qwen_api_host: str = ""
     default_model: str = "qwen"  # user's chosen default (Qwen)
 
     # ---- conversation / context ----

@@ -55,13 +55,30 @@ _GATE_KEYWORDS: dict[str, list[str]] = {
     "search": ["搜索", "查一下", "帮我查", "最新", "最近有什么"],
 }
 
+# 多意图强触发词(并列/顺接连词): 命中即进混合分层,
+# 不再要求命中 ≥2 意图大类(防止 13/14/19 多意图漏召回的主因)。
+# 与 OPTIMIZE_PLAN §2 对齐: 并且/而且/同时/再帮我/还要/另外/顺带/以及/，然后
+_MULTI_TRIGGER_WORDS: tuple[str, ...] = (
+    "并且", "而且", "同时", "再帮我", "还要", "另外", "顺带", "以及",
+    "，然后", ",然后", "顺手", "除此之外", "并且帮我", "然后再",
+)
+
 
 def _lightweight_multi_check(messages: list[dict]) -> bool:
-    """Stage 1: 规则门控(零 LLM)。命中 ≥2 个意图大类关键词 → 疑似多意图。"""
+    """Stage 1: 规则门控(零 LLM)。
+
+    满足任一即疑似多意图:
+      (a) 命中 ≥2 个意图大类关键词(旧逻辑);
+      (b) 命中多意图强触发连词(并列/顺接, 直接强触发, 防止漏召)。
+    """
     from .common import last_user_message
     text = last_user_message(messages)
     if not text:
         return False
+    # (b) 多意图强触发词短路(优先, 零额外开销)
+    if any(w in text for w in _MULTI_TRIGGER_WORDS):
+        return True
+    # (a) 命中 ≥2 意图大类
     hits = set()
     for intent, kws in _GATE_KEYWORDS.items():
         if any(kw in text for kw in kws):

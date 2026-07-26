@@ -775,8 +775,11 @@ async def worker_loop(concurrency: int = 1):
                 # 3) 二次确认(high): 未确认则发 confirm 事件等前端回传(确认后带 confirmed 重发)
                 if decision == "confirm" and not confirmed:
                     reason = (intent.get("plan") or [{}])[0].get("reason", "需确认")
-                    logger.info("[Worker] [5/6] 二次确认 等待用户确认 skill=%s reason=%s", skill_name, reason)
-                    await q.publish(trace_id, {"event": "confirm", "data": {"reason": reason, "skill": skill_name}})
+                    risk_level = (intent.get("plan") or [{}])[0].get("risk_level", "high")
+                    logger.info("[Worker] [5/6] 二次确认 等待用户确认 skill=%s reason=%s risk=%s",
+                                skill_name, reason, risk_level)
+                    await q.publish(trace_id, {"event": "confirm", "data": {
+                        "reason": reason, "skill": skill_name, "risk_level": risk_level}})
                     await q.publish(trace_id, {"event": "done", "data": {}})
                     continue
 

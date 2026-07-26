@@ -388,6 +388,36 @@ async def _classify_segment(
                       "source": "superfast"},
         )
 
+    # ── [3.5] 强规则直路由(OPTIMIZE_PLAN §2: 即便向量分低, 规则也要能直路由)。
+    #    `strong` 规则是人工高精模式(置信 0.95), 命中即直接提交到目标意图,
+    #    不依赖向量 top1 对齐 / 不降级到 LLM 终判。修复 10 号"写/文档"此前漏召回。
+    if strong_rule:
+        intent = get_intent(strong_rule.intent_id)
+        if intent:
+            logger.info("[级联] 强规则直路由: 规则=%s → intent=%s/%s (跳过向量/LLM 终判)",
+                        strong_rule.rule_id, intent["level1"], intent["level2"])
+            reset_slots(conversation_id)
+            await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
+                                    user_id=user_id, raw_input=current_user_msg,
+                                    llm_intent=f"{intent['level1']}/{intent['level2']}",
+                                    llm_confidence=strong_rule.confidence,
+                                    rules_triggered=[strong_rule.rule_id],
+                                    belief_before=0.0, belief_after=strong_rule.confidence,
+                                    decision="route", latency_ms=(time.time() - t0) * 1000,
+                                    tokens_used=0, specialist_routed=intent["skill"], outcome="pending",
+                                    extra={"source": "strong_rule"})
+            await record_intent_classify("route", "strong_rule", (time.time() - t0) * 1000,
+                                          confidence=strong_rule.confidence)
+            return _emit_route(
+                intent, strong_rule.confidence, decision="route",
+                selected_skill=intent["skill"], industry="other",
+                reason=f"strong_rule: {strong_rule.rule_id} 命中模式『{strong_rule.pattern}』",
+                request_id=req_id,
+                evidence={"rule": [h.rule_id for h in rule_hits],
+                          "vector_top": [(c["intent_id"], round(c["score"], 3)) for c in candidates[:5]],
+                          "source": "strong_rule"},
+            )
+
     # ── [8] 安全优先(critical 拦截, 可短路) ──
     safety_result = SafetyResult()
     try:

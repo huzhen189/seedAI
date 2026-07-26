@@ -187,8 +187,8 @@ function parseSelectionToken(text: string): number | null {
   if (nth) return _CN_NUM[nth] - 1
   return null
 }
-// 二次确认弹框(安全 high)
-const pendingConfirm = ref<{ reason: string; skill: string; planTitle?: string; planGoal?: string; planSteps?: string[] } | null>(null)
+// 二次确认弹框(安全 high / 删除确认 / 方案确认)
+const pendingConfirm = ref<{ reason: string; skill: string; riskLevel?: string; target?: string; planTitle?: string; planGoal?: string; planSteps?: string[] } | null>(null)
 const showConfirmModal = ref(false)
 // 高危拦截提示(安全 critical, 不可绕过)
 const blockReason = ref('')
@@ -911,7 +911,12 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     onConfirm: (d: ConfirmEvent) => {
       generating.value = false
       finished.value = true
-      pendingConfirm.value = { reason: d.reason || '该操作需二次确认', skill: d.skill || '' }
+      pendingConfirm.value = {
+        reason: d.reason || '该操作需二次确认',
+        skill: d.skill || '',
+        riskLevel: (d as any).risk_level || 'high',
+        target: (d as any).target || '',
+      }
       showConfirmModal.value = true
       clearActiveGen()
     },
@@ -1549,7 +1554,13 @@ class="clarify-confirm"
         </div>
         <!-- 二次确认对话框(安全 high) -->
         <div v-if="showConfirmModal && pendingConfirm" class="confirm-plan">
-          <div class="cp-title">⚠️ 安全确认</div>
+          <div class="cp-title">
+            ⚠️ 安全确认
+            <span
+              class="cp-risk"
+              :class="pendingConfirm.riskLevel === 'high' ? 'risk-high' : 'risk-medium'"
+            >{{ pendingConfirm.riskLevel === 'high' ? '高风险' : '中风险' }}</span>
+          </div>
           <div class="cp-body">
             <div class="cp-goal">{{ pendingConfirm.reason }}</div>
           </div>
@@ -1767,7 +1778,10 @@ class="clarify-confirm"
   padding: 14px;
   margin: 8px 0;
 }
-.cp-title { font-weight: 600; font-size: 14px; margin-bottom: 10px; color: #0369a1; }
+.cp-title { font-weight: 600; font-size: 14px; margin-bottom: 10px; color: #0369a1; display: flex; align-items: center; gap: 10px; }
+.cp-risk { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+.cp-risk.risk-high { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+.cp-risk.risk-medium { background: #fffbeb; color: #d97706; border: 1px solid #fde68a; }
 .cp-body { margin-bottom: 12px; }
 .cp-goal { font-size: 13px; color: #475569; margin-bottom: 8px; }
 .cp-steps { margin: 0; padding-left: 18px; }

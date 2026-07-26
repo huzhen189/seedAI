@@ -64,7 +64,7 @@ async def rag_retrieve(
         client = chromadb.HttpClient(host=p.hostname or "localhost", port=p.port or 8000)
         ef = embedding_functions.OpenAIEmbeddingFunction(
             api_key=settings.qwen_embedding_key,
-            api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            api_base=settings.qwen_base_url,
             model_name=settings.qwen_embedding_model,
         )
         col = client.get_or_create_collection(name=collection, embedding_function=ef)

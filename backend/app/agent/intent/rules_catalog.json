@@ -21,6 +21,12 @@
       "patterns": ["需求分析", "规划一下", "梳理需求", "帮我做需求", "先出个方案", "我还不确定做什么", "帮我规划", "想做个网站但没想好"]
     },
     {
+      "id": "r_requirement_doc",
+      "strength": "strong",
+      "target": "build_requirement",
+      "patterns": ["需求文档", "写一份需求文档", "出一份需求文档", "写个需求文档", "帮我写需求", "产品需求文档", "PRD文档", "写一份PRD", "写个PRD", "产品需求", "方案书", "规格说明", "功能清单", "用户故事"]
+    },
+    {
       "id": "r_doc",
       "strength": "strong",
       "target": "build_doc",

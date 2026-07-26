@@ -23,6 +23,12 @@ logger = logging.getLogger("ai_service.delete")
 _DELETE_KW = ("删除", "删掉", "删了", "删", "移除", "清空", "去掉", "干掉")
 _DELETE_ALL_KW = ("所有", "全部", "清空", "这些", "它们", "整个")
 
+# 项目级删除信号(18 号规则: 项目不可删, 仅可删内部产物)
+# 注意: 单字"站"易与"页面/首页"混淆, 故仅纳入带限定的短语(整个站/这个站/整个网站/网站本身)
+_PROJECT_KW = ("项目", "整个项目", "这个站", "那个站", "整个站", "整个网站", "工程", "网站本身", "把站")
+# 产物限定词(含义上把"项目"缩小到"项目内产物/文件", 不算删项目)
+_PRODUCT_LIMIT_KW = ("产物", "文件", "里面的", "内的", "里面", "页面", "代码", "生成的")
+
 # 修改类关键词: 含这些词的不走删除工具, 走 build/modify
 _MODIFY_KW = (
     "修改", "优化", "调整", "加上", "增加", "添加", "hover", "按钮", "布局",
@@ -31,6 +37,9 @@ _MODIFY_KW = (
     "banner", "Banner", "slogan", "Slogan", "标题", "菜单", "微调", "改一下",
     "美化和", "精致", "升级",
 )
+
+# 页面/模块级语义词(删除"某页/某模块" → 标记为待办, 不直接删)
+_PAGE_KW = ("首页", "主页", "关于页面", "关于页", "登录页", "产品页", "联系页", "页面", "模块", "章节", "板块")
 
 
 def _is_delete_request(msg: str) -> bool:
@@ -41,8 +50,25 @@ def _is_delete_request(msg: str) -> bool:
 
 
 def _is_delete_all(msg: str) -> bool:
-    """判断是否为「删除全部」请求。"""
+    """判断是否为「删除全部产物」请求。"""
     return any(k in msg for k in _DELETE_ALL_KW)
+
+
+def _is_project_delete(msg: str) -> bool:
+    """判断是否为『删除项目本身』(18 号: 必须 block)。
+
+    含项目级关键词(项目/工程/整个站/整个网站) 且 未被产物限定词缩小到"项目内部"。
+    """
+    has_proj = any(k in msg for k in _PROJECT_KW)
+    if not has_proj:
+        return False
+    has_limit = any(k in msg for k in _PRODUCT_LIMIT_KW)
+    return not has_limit
+
+
+def _is_delete_page(msg: str) -> bool:
+    """是否指向"某个页面/模块"(删除页面 → 标记待办, 非直接物理删)。"""
+    return any(k in msg for k in _PAGE_KW)
 
 
 def _extract_filename(msg: str) -> str:
@@ -97,6 +123,14 @@ async def run_delete(
         yield ev("token", data="抱歉，我只负责项目内生成物删除。如需其他帮助请重新描述需求。")
         return
 
+    # ── 删除项目本身 → 直接 block(18 号规则, 仅可删内部产物) ──
+    if _is_project_delete(user_msg):
+        logger.info("[agent_delete] 命中删项目信号, block trace=%s", trace_id)
+        yield ev("block", reason="项目本身不可删除（涉及对话、统计与协作数据）。"
+                                 "如需移除，请到『设置 → 删除项目』中走软删除流程；"
+                                 "我可以帮你删除项目内的生成产物文件。")
+        return
+
     # ── 无项目上下文或未生成站点 → 拒绝 ──
     if not site_generated:
         logger.info("[agent_delete] 无站点/项目上下文,拒绝 trace=%s", trace_id)
@@ -104,21 +138,36 @@ async def run_delete(
         return
 
     is_delete_all = _is_delete_all(user_msg)
+    is_page = _is_delete_page(user_msg)
     fname = _extract_filename(user_msg) if not is_delete_all else ""
 
-    # ── 未确认 → 发送确认事件 ──
+    # ── 四类边界判定(OPTIMIZE_PLAN §3): 决定 risk_level + 行为 ──
+    if is_delete_all:
+        risk_level = "high"          # 删全部产物 → 高风险
+    elif is_page:
+        # 删页面/模块: 标记待办(不直接物理删), 中等风险确认
+        risk_level = "medium"
+    elif fname:
+        risk_level = "medium"        # 删单个文件 → 中风险
+    else:
+        risk_level = "medium"        # 兜底: 目标不明确 → 中风险先确认
+
+    # ── 未确认 → 发送确认事件(带 risk_level, 前端按级别渲染) ──
     if not confirmed:
         if is_delete_all:
-            reason = "警告：你即将删除当前项目的全部生成产物，此操作不可撤销。确认继续吗？"
+            reason = "警告：你即将删除当前项目的【全部】生成产物，此操作不可撤销。确认继续吗？"
+        elif is_page:
+            reason = f"你希望删除「{user_msg[:30]}」——按页删需重建站点。先标记为待办，确认后我再处理？"
         elif fname:
             reason = f"你希望删除文件「{fname}」——删除后将无法恢复。确认删除吗？"
         else:
             reason = f"你希望「{user_msg[:30]}」——删除后将无法恢复。确认删除吗？"
             fname = user_msg[:30]
 
-        logger.info("[agent_delete] 发送确认 trace=%s delete_all=%s file=%s",
-                    trace_id, is_delete_all, fname)
-        yield ev("confirm", reason=reason, skill="agent_delete")
+        logger.info("[agent_delete] 发送确认 trace=%s delete_all=%s page=%s file=%s risk=%s",
+                    trace_id, is_delete_all, is_page, fname, risk_level)
+        yield ev("confirm", reason=reason, skill="agent_delete", risk_level=risk_level,
+                 target="all" if is_delete_all else ("page" if is_page else "file"))
         return
 
     # ── 已确认 → 执行删除(单进程合并: 直接调业务层删除逻辑, 不经 http 回环) ──
@@ -131,6 +180,13 @@ async def run_delete(
             if is_delete_all:
                 deleted = await artifact_repo.delete_all(db, project_id=project_id)
                 msg_text = f"已成功删除全部 {deleted} 个生成产物。如需重新生成网站，随时告诉我～"
+            elif is_page:
+                # 删页面/模块: 当前建站产物按整站交付, 精确删页需重建, 标记为待办(不物理删)
+                logger.info("[agent_delete] 页面删除→标记待办 trace=%s target=%s", trace_id, user_msg[:30])
+                yield ev("token", data=f"「{user_msg[:30]}」属于整站产物的一部份。已为你标记为待办："
+                                     "重建站点时会排除该页面。或者你也可以直接说『删除所有产物』后重新建站～")
+                yield ev("node", stage="done")
+                return
             elif fname:
                 deleted = await artifact_repo.delete_file(db, project_id=project_id, filename=fname)
                 if not deleted:

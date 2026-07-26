@@ -59,7 +59,7 @@ class Project(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
-    title: Mapped[str] = mapped_column(String(128), default="未命名项目", nullable=False)
+    name: Mapped[str] = mapped_column(String(128), default="未命名项目", nullable=False)
     share_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     is_public: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     preview_url: Mapped[str | None] = mapped_column(String(512))
@@ -75,11 +75,10 @@ class Project(Base):
         back_populates="project", cascade="all, delete-orphan"
     )
 
-    # 兼容层: 业务 API 沿用以 `name` 表达项目名, 模型列实为 `title`(单进程合并命名差)。
-    # 用只读 property 双向对齐, 避免 ProjectResp/其他读取处因缺 `name` 而校验失败。
     @property
-    def name(self) -> str:
-        return self.title
+    def title(self) -> str:
+        """向后兼容只读别名(单进程合并时旧调用方可能仍读 title)。统一命名后逐步移除。"""
+        return self.name
 
 
 class Conversation(Base):

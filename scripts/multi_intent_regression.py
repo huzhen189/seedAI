@@ -1,15 +1,9 @@
-"""多意图 A+B 路由离线回归(不依赖真实 Chroma/Redis/LLM, 可全环境运行)。
+"""多意图 A+B 路由 + 强规则离线回归(不依赖真实 Chroma/Redis/LLM, 可全环境运行)。
 
-通过 stub 重型依赖 + monkeypatch 逐段分类器与 LLM, 确定性覆盖:
-  T1 门控: 单意图 → 不拆(source="")
-  T2 门控: 多意图(≥2 意图大类) → 进入路由
-  T3 方案B 并行: 2 独立段 → source=hybrid, is_multi, strategy=parallel, 无依赖
-  T4 方案B 串行依赖: 含指代/串行连接词 → deps 非空, strategy=mixed
-  T5 升级判定 B→A: 方案B 平均置信过低 → 升级方案A 成功, source=llm
-  T6 两路失败回退: 方案B 合并为 1 块 + 方案A 判单意图 → 退回单意图(source=hybrid)
-  T7 方案B 禁用: split_b_enabled=False → 门控后仍直走方案A, source=llm
-  T8 超长截断: >split_b_max_subtasks → 仅保留前 N 个
-  T9 埋点: record_multi_intent_path 写入 ai:mi(路径分布 / 升级率 / A·B 占比)
+覆盖 OPTIMIZE_PLAN:
+  §2.1 强规则白名单: 10 号(写 PRD)直路由 build_requirement; 诗歌/摘要不误伤 doc。
+  §2.2 多意图门控: 并列连词(并且/还要/另外/同时)直接强触发 hybrid split。
+  T1~T9 方案 A+B 路由既有回归。
 
 运行: python scripts/multi_intent_regression.py
 """
@@ -19,15 +13,25 @@ import sys
 import types
 import asyncio
 
-# ── 1) stub 重型依赖, 让 multi_intent/cascade/analytics 可导入(真实依赖在运行环境已装) ──
-_ROOT = os.path.join(os.path.dirname(__file__), "..", "backend", "ai_service")
+# ── 1) 把 backend/ 加到 sys.path(单进程后代码在 backend/app/agent/intent) ──
+_ROOT = os.path.join(os.path.dirname(__file__), "..", "backend")
 sys.path.insert(0, os.path.abspath(_ROOT))
 
-for _name in ("langchain_openai", "httpx", "redis", "chromadb", "langchain"):
+for _name in ("langchain_openai", "httpx", "chromadb", "langchain"):
     if _name not in sys.modules:
         sys.modules[_name] = types.ModuleType(_name)
 sys.modules["langchain_openai"].ChatOpenAI = object
 sys.modules["httpx"].Timeout = object
+
+# redis 伪包: 支持 `import redis.asyncio as aioredis`
+if "redis" not in sys.modules:
+    _redis_pkg = types.ModuleType("redis")
+    _redis_asyncio = types.ModuleType("redis.asyncio")
+    _redis_asyncio.from_url = lambda *a, **k: None
+    _redis_asyncio.Redis = object
+    _redis_pkg.asyncio = _redis_asyncio
+    sys.modules["redis"] = _redis_pkg
+    sys.modules["redis.asyncio"] = _redis_asyncio
 
 if "pydantic_settings" not in sys.modules:
     _ps = types.ModuleType("pydantic_settings")
@@ -35,14 +39,14 @@ if "pydantic_settings" not in sys.modules:
     _ps.SettingsConfigDict = dict
     sys.modules["pydantic_settings"] = _ps
 
-import app.analytics as _analytics
-# 默认埋点 no-op; T9 会用内存假 Redis 验证计数
+import app.agent.analytics as _analytics
 _analytics._get_redis = lambda: None  # type: ignore
 
-from app.intent import multi_intent as mi  # noqa: E402
-from app.intent import cascade as _cascade  # noqa: E402
-from app.intent.cascade import PipelineResult  # noqa: E402
-from app.intent.catalog import skill_for  # noqa: E402
+from app.agent.intent import multi_intent as mi  # noqa: E402
+from app.agent.intent import cascade as _cascade  # noqa: E402
+from app.agent.intent.cascade import PipelineResult  # noqa: E402
+from app.agent.intent.catalog import skill_for  # noqa: E402
+from app.agent.intent.rulesmatcher import match_rules  # noqa: E402
 
 failures = []
 
@@ -55,8 +59,13 @@ def check(name, cond, detail=""):
         failures.append(name)
 
 
+def strong_target(text: str):
+    hits = match_rules(text)
+    s = next((h for h in hits if h.strength == "strong"), None)
+    return s.intent_id if s else None
+
+
 # ── 2) monkeypatch 逐段分类器(_classify_segment) ──
-# 用子串 → (level1, level2, industry, confidence, skill) 映射, 让拆分确定性可断言
 _SEG_MAP: dict[str, tuple] = {}
 
 
@@ -86,7 +95,7 @@ _cascade._classify_segment = _afake_classify_segment  # type: ignore
 
 
 # ── 3) monkeypatch 方案A 的 LLM(_classify 走 get_chat_model) ──
-_A_JSON = {"v": None}  # 方案A 返回的 JSON 字符串(由测试设置); 用容器避免闭包捕获局部变量
+_A_JSON = {"v": None}
 
 
 class _FakeChat:
@@ -99,13 +108,36 @@ mi.resolve_fallback_order = lambda *a, **k: ["stub"]  # type: ignore
 
 
 async def _run():
+    # ── §2.1 强规则白名单 ──
+    check("§2.1-10号 PRD 直路由 build_requirement",
+          strong_target("帮我写一份产品需求文档，关于一个待办事项应用") == "build_requirement",
+          strong_target("帮我写一份产品需求文档，关于一个待办事项应用"))
+    check("§2.1-『写一份PRD』直路由 build_requirement",
+          strong_target("帮我写一份PRD") == "build_requirement")
+    check("§2.1-诗歌(写首诗)不误伤 doc 强规则",
+          strong_target("帮我写一首关于春天的短诗") is None,
+          strong_target("帮我写一首关于春天的短诗"))
+    check("§2.1-摘要(总结这段话)不误伤 doc 强规则",
+          strong_target("帮我总结一下这段话：人工智能...") is None,
+          strong_target("帮我总结一下这段话"))
+
+    # ── §2.2 多意图并列连词门控 ──
+    check("§2.2-『并且』直接强触发多意图",
+          mi._lightweight_multi_check([{"role": "user", "content": "帮我生成一个公司官网，并且写一篇介绍文章"}]))
+    check("§2.2-『还要』直接强触发多意图",
+          mi._lightweight_multi_check([{"role": "user", "content": "生成电商站，还要配上用户故事"}]))
+    check("§2.2-『另外』直接强触发多意图",
+          mi._lightweight_multi_check([{"role": "user", "content": "做个博客，另外再写份部署文档"}]))
+    check("§2.2-单一建站意图不误触发",
+          not mi._lightweight_multi_check([{"role": "user", "content": "帮我做一个个人博客网站"}]))
+
     # ── T1 单意图门控 ──
     _SEG_MAP.clear()
     r = await mi.recognize_intents([{"role": "user", "content": "什么是闭包?帮我解释一下"}])
     check("T1-单意图门控→不拆", (not r.is_multi) and r.source == "",
           f"(is_multi={r.is_multi}, source={r.source!r})")
 
-    # ── T2 多意图门控(≥2 意图大类) ──
+    # ── T2 多意图门控(≥2 意图大类 或 连词强触发) ──
     r = await mi.recognize_intents([{"role": "user", "content": "帮我做个电商官网，另外再写一份部署文档。"}])
     check("T2-多意图门控→进入路由", r.source != "", f"(source={r.source!r})")
 
@@ -122,7 +154,7 @@ async def _run():
     check("T3-无依赖边", not any(s.dependencies for s in r.sub_tasks),
           f"(deps={[s.dependencies for s in r.sub_tasks]})")
 
-    # ── T4 方案B 串行依赖(第二段以串行词「然后」开头 + 含指代词「刚生成」) ──
+    # ── T4 方案B 串行依赖 ──
     _SEG_MAP.clear()
     _SEG_MAP.update({
         "电商官网": ("build", "site", "corp", 0.9, skill_for("build", "site") or "agent_generate_site"),
@@ -158,7 +190,6 @@ async def _run():
     # ── T6 两路均未拆出多意图 → 退回单意图 ──
     _SEG_MAP.clear()
     _SEG_MAP.update({
-        # 两段都被判成同一意图, 且以句号(非连接词)分隔 → 合并为 1 块 → 方案B 子任务 <2 → 升级
         "电商官网": ("build", "site", "corp", 0.1, skill_for("build", "site") or "agent_generate_site"),
         "部署文档": ("build", "site", "corp", 0.1, skill_for("build", "site") or "agent_generate_site"),
     })
@@ -240,7 +271,6 @@ async def _run():
     _fr = _FakeRedis()
     _analytics._get_redis = lambda: _fr  # type: ignore
 
-    # 跑一个方案B 多意图(计入 hybrid)
     _SEG_MAP.clear()
     _SEG_MAP.update({
         "电商官网": ("build", "site", "corp", 0.9, skill_for("build", "site") or "agent_generate_site"),
@@ -249,7 +279,6 @@ async def _run():
     _A_JSON['v'] = '{"is_multi":false,"reason":"单意图"}'
     await mi.recognize_intents([{"role": "user", "content": "帮我做个电商官网，另外再写一份部署文档。"}])
 
-    # 再跑一个升级到方案A(计入 llm + escalated)
     _SEG_MAP.clear()
     _SEG_MAP.update({
         "电商官网": ("build", "site", "corp", 0.1, skill_for("build", "site") or "agent_generate_site"),
@@ -267,13 +296,12 @@ async def _run():
     await mi.recognize_intents([{"role": "user", "content": "做个电商官网并写部署文档"}])
 
     stats = await _analytics.multi_intent_stats()
-    check("T9-埋点总数≥2", stats["total"] >= 2, f"(total={stats['total']})")
-    check("T9-路径 hybrid≥1", stats["path_dist"].get("hybrid", 0) >= 1, f"({stats['path_dist']})")
-    check("T9-路径 llm≥1", stats["path_dist"].get("llm", 0) >= 1, f"({stats['path_dist']})")
-    check("T9-升级计数≥1", stats["escalated"] >= 1, f"(escalated={stats['escalated']})")
+    check("T9-埋点总数≥2", stats.get("total", 0) >= 2, f"(total={stats.get('total')})")
+    check("T9-路径 hybrid≥1", stats.get("path_dist", {}).get("hybrid", 0) >= 1, f"({stats.get('path_dist')})")
+    check("T9-路径 llm≥1", stats.get("path_dist", {}).get("llm", 0) >= 1, f"({stats.get('path_dist')})")
+    check("T9-升级计数≥1", stats.get("escalated", 0) >= 1, f"(escalated={stats.get('escalated')})")
     check("T9-升级率存在", "escalate_rate" in stats, f"(escalate_rate={stats.get('escalate_rate')})")
     check("T9-A/B 占比存在", "ab_ratio" in stats, f"(ab_ratio={stats.get('ab_ratio')})")
-    # 还原 no-op, 避免影响后续
     _analytics._get_redis = lambda: None  # type: ignore
 
 
