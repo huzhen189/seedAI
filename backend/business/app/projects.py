@@ -2,15 +2,17 @@
 
 - 项目(Project) 1—N 会话(Conversation) 1—N 消息(Message)。
 - 所有写操作先校验归属(user_id),非本人 404。
-- 删除项目级联删会话与消息;删除会话级联删消息。
+- 删除项目为软删除(置 deleted_at 标志),保留全部关联数据与统计;前端过滤不显示。
+- 删除会话级联删消息。
 """
 import logging
 
 import json
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .cache import cache_delete, cache_get, cache_invalidate, cache_set
@@ -133,7 +135,7 @@ async def get_shared_project(
     db: AsyncSession = Depends(get_db),
 ):
     proj = await project_repo.get_by_share_id(db, share_id)
-    if proj is None or not proj.is_public:
+    if proj is None or not proj.is_public or proj.deleted_at is not None:
         raise HTTPException(status_code=404, detail="share not found or not public")
     return proj
 
@@ -147,15 +149,15 @@ async def delete_project(
     proj = await project_repo.get_by(db, id=project_id, user_id=user.id)
     if proj is None:
         raise HTTPException(status_code=404, detail="project not found")
-    # 级联: 删消息 → 删会话 → 删项目
-    conv_ids = (
-        (await db.execute(select(Conversation.id).where(Conversation.project_id == project_id)))
-        .scalars().all()
+    # 软删除: 仅打 deleted_at 标志, 保留全部关联数据(对话/消息/产物/向量库/统计),
+    # 前端与列表查询据此过滤不显示; 同时撤销公开分享, 避免已隐藏项目仍可经分享链接访问。
+    # 行保留以维持统计与历史记录的连续性(硬删会影响统计与其他流程)。
+    await project_repo.update(
+        db, proj,
+        deleted_at=datetime.utcnow(),
+        is_public=False,
+        share_id=None,
     )
-    if conv_ids:
-        await db.execute(delete(Message).where(Message.conversation_id.in_(conv_ids)))
-        await db.execute(delete(Conversation).where(Conversation.project_id == project_id))
-    await project_repo.delete(db, proj)
     await cache_invalidate(f"conv:list:{project_id}:*")
     return None
 
@@ -268,7 +270,11 @@ async def search(
     like = f"%{q}%"
     results: list[SearchItemResp] = []
     projs = (await db.execute(
-        select(Project).where(Project.user_id == user.id, Project.name.like(like))
+        select(Project).where(
+            Project.user_id == user.id,
+            Project.deleted_at.is_(None),
+            Project.name.like(like),
+        )
     )).scalars().all()
     for p in projs:
         results.append(SearchItemResp(type="project", id=p.id, title=p.name, project_id=None))
@@ -299,6 +305,7 @@ async def search_messages(
         .join(Project, Conversation.project_id == Project.id)
         .where(
             Conversation.user_id == user.id,
+            Project.deleted_at.is_(None),
             Message.role == "user",
             Message.content.like(like),
         )

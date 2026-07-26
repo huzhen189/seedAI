@@ -11,7 +11,7 @@ onMounted(() => {
 })
 
 async function del(id: number) {
-  if (confirm('确认删除该项目及其下所有会话？')) {
+  if (confirm('确认隐藏该项目？项目、全部对话、生成产物及项目向量库将保留（仅在前端隐藏，不影响统计与历史记录）。')) {
     await projectStore.remove(id)
   }
 }

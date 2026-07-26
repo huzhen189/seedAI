@@ -21,7 +21,8 @@ class ProjectRepo(BaseRepo[Project]):
     cache_enabled = True
 
     async def list_by_user(self, db: AsyncSession, user_id: int) -> list[Project]:
-        return await self.list_by(db, user_id=user_id)
+        # 软删除: 过滤已打 deleted_at 标志的项目(前端不再显示), 关联数据保留。
+        return await self.list_by(db, user_id=user_id, deleted_at=None)
 
     async def get_by_share_id(self, db: AsyncSession, share_id: str) -> Optional[Project]:
         return await self.get_by(db, share_id=share_id)

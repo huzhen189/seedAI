@@ -53,6 +53,9 @@ class Project(Base):
     status: Mapped[str] = mapped_column(String(20), default="draft", server_default="draft", index=True)
     # 需求文档 JSON(requirement_agent 产出)
     requirement_doc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 软删除标志: delete_project 仅置 deleted_at, 保留全部关联数据(对话/消息/产物/向量库/统计),
+    # 前端与列表查询据此过滤不显示; 行保留以维持统计与历史记录的连续性(硬删会影响统计与其他流程)。
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
 
 
 class Conversation(Base):
