@@ -342,6 +342,31 @@ async def _read_ai_core(r) -> dict:
     except Exception as e:  # noqa: BLE001
         logger.warning("analytics _read_ai_core llm failed: %s", e)
 
+    # 9) 多意图 A+B 路由路径(v1.2.5)
+    try:
+        mi_total = int((await r.hget("ai:mi:total", "count")) or 0)
+        if mi_total:
+            mi_path = {k: int(v) for k, v in (await r.hgetall("ai:mi:path") or {}).items()}
+            mi_escalated = int((await r.hget("ai:mi:escalated", "count")) or 0)
+            hy = mi_path.get("hybrid", 0)
+            ll = mi_path.get("llm", 0)
+            ab = hy + ll
+            ab_ratio = (
+                {"hybrid": round(hy / ab, 3), "llm": round(ll / ab, 3)}
+                if ab else {"hybrid": 0, "llm": 0}
+            )
+            out["multi_intent"] = {
+                "total": mi_total,
+                "path_dist": mi_path,
+                "ab_ratio": ab_ratio,
+                "escalated": mi_escalated,
+                "escalate_rate": round(mi_escalated / mi_total, 3),
+                "sub_task_count": await _zset_percentiles(r, "ai:mi:subtasks"),
+                "duration_ms": await _zset_percentiles(r, "ai:mi:duration"),
+            }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics _read_ai_core multi_intent failed: %s", e)
+
     return out
 
 

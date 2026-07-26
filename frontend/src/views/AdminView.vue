@@ -283,7 +283,16 @@ interface AiCoreReviewer { total: number; per_skill: Record<string, AiCoreReview
 interface AiCoreSafety { total: number; risk_dist: Record<string, number>; outcome_dist: Record<string, number>; reason_dist: Record<string, number> }
 interface AiCoreLlmModel { total: number; ok: number; fail: number; success_rate: number; err_dist: Record<string, number>; duration_ms: LatencyBucket; tokens_in: number; tokens_out: number }
 interface AiCoreLlm { total: number; models: Record<string, AiCoreLlmModel> }
-interface AiCore { intent?: AiCoreIntent; qc?: AiCoreQc; reviewer?: AiCoreReviewer; safety?: AiCoreSafety; llm?: AiCoreLlm }
+interface AiCoreMultiIntent {
+  total: number
+  path_dist: Record<string, number>
+  ab_ratio: { hybrid: number; llm: number }
+  escalated: number
+  escalate_rate: number
+  sub_task_count: LatencyBucket
+  duration_ms: LatencyBucket
+}
+interface AiCore { intent?: AiCoreIntent; qc?: AiCoreQc; reviewer?: AiCoreReviewer; safety?: AiCoreSafety; llm?: AiCoreLlm; multi_intent?: AiCoreMultiIntent }
 interface AnalyticsSnapshot {
   ai_core?: AiCore
   intent_stats: Record<string, IntentStat>
@@ -371,6 +380,10 @@ function decisionLabel(d: string) {
 
 function intentSourceLabel(s: string): string {
   const m: Record<string, string> = { selection: '规则选中', reset: '重置', superfast: '强信号直路由', novelty: '新颖兜底', llm_ruling: 'LLM 终判', block: '安全拦截' }
+  return m[s] || s
+}
+function miPathLabel(s: string): string {
+  const m: Record<string, string> = { hybrid: '方案B(混合分层)', llm: '方案A(LLM深拆)' }
   return m[s] || s
 }
 function reviewReasonLabel(r: string): string {
@@ -957,6 +970,22 @@ onUnmounted(() => {
                 </template>
               </div>
             </template>
+          </div>
+          <!-- 多意图 A+B 路由路径(v1.2.5) -->
+          <div v-if="al.ai_core.multi_intent && al.ai_core.multi_intent.total" class="block">
+            <h4>多意图 A+B 路由路径（AI 核心）</h4>
+            <div class="card-row">
+              <div class="card"><div class="k">拆分总次数</div><div class="v">{{ al.ai_core.multi_intent.total }}</div></div>
+              <div class="card"><div class="k">方案 B 占比</div><div class="v">{{ (al.ai_core.multi_intent.ab_ratio.hybrid * 100).toFixed(1) }}%</div></div>
+              <div class="card"><div class="k">方案 A 升级占比</div><div class="v">{{ (al.ai_core.multi_intent.ab_ratio.llm * 100).toFixed(1) }}%</div></div>
+              <div class="card"><div class="k">B→A 升级率</div><div class="v">{{ (al.ai_core.multi_intent.escalate_rate * 100).toFixed(1) }}%</div></div>
+            </div>
+            <h5>路径分布</h5>
+            <div class="muted"><span v-for="(v, k) in al.ai_core.multi_intent.path_dist" :key="k" class="pill">{{ miPathLabel(k) }} {{ v }}</span></div>
+            <div class="card-row">
+              <div class="card"><div class="k">平均子任务数</div><div class="v">{{ al.ai_core.multi_intent.sub_task_count?.avg != null ? al.ai_core.multi_intent.sub_task_count.avg.toFixed(1) : '-' }}</div></div>
+              <div class="card"><div class="k">平均拆分耗时</div><div class="v">{{ fmtMs(al.ai_core.multi_intent.duration_ms?.avg ?? 0) }}</div></div>
+            </div>
           </div>
         </template>
         <!-- 用户评价(v0.8.5, 含六维子星) -->
