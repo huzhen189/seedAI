@@ -39,7 +39,7 @@ const STAGE_LABELS: Record<string, string> = {
 
 // ---- 本地 UI 状态 ----
 const models = ref<ModelInfo[]>([])
-const model = ref('deepseek')
+const model = ref('qwen')
 const input = ref('')
 const generating = ref(false)
 const finished = ref(false)

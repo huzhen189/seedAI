@@ -75,6 +75,31 @@ class Settings(BaseSettings):
     # 缓存默认 TTL
     cache_user_ttl: int = 9000  # 150 min（×5）
 
+    # ───────────────────────────────────────────────────────────
+    # 对话/上下文相关配置（集中管理，避免 proxy.py 内散落魔法数字）
+    # ───────────────────────────────────────────────────────────
+    # 最近对话消息上下文的 Redis 滑动窗口 TTL（秒）。
+    # 原先硬编码 600s(10min)，现统一为 30min：用户两次对话间隔较长时，
+    # 仍命中缓存、不回源 MySQL，避免 LIMIT 截断导致的上下文塌缩。
+    chat_recent_redis_ttl: int = 1800
+
+    # 组装给 AI 核心的「最近 N 条消息」条数上限（原代码硬编码 limit(5)）。
+    # 提到 10 条，保留更早的建站/生成意图，配合 TTL 放大，缓解上下文丢失。
+    chat_recent_limit: int = 10
+
+    # 对话摘要（summary:* / summary_cnt:*）的 Redis TTL（秒）。
+    # 原先硬编码 86400(1d)，现统一为 30min，与对话上下文窗口对齐；
+    # 1d 过久会让陈旧摘要长期污染后续意图判断，且无 MySQL 兜底回写，
+    # 过期后反而丢失。30min 滑动窗口更贴近「最近会话语义」。
+    conversation_summary_ttl: int = 1800
+
+    # 分布式 AI 服务发现：业务端 /api/chat 不直连单一 AI 核心，而是返回一个
+    # 经过健康/负载筛选的 AI 服务地址，由前端 EventSource 直连（省一层 SSE 转发）。
+    # 格式：逗号分隔的 base URL 列表；为空时回退到单实例 ai_service_url。
+    ai_servers: str = ""
+    # AI 服务健康探测路径（用于 /api/chat 选址时探活）
+    ai_server_health_path: str = "/healthz"
+
     # 配额限流(①-b):free 套餐默认 50 次/天;可扩展各套餐每日上限。
     # 全局令牌桶(方案 a)本期未做,仅做基于 user_id 的每日配额。
     free_daily_quota: int = 50

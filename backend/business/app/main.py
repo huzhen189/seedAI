@@ -17,6 +17,7 @@ from .metrics import record_request
 from .analytics import record_api_latency, record_api_call
 from .projects import router as projects_router
 from .proxy import router as proxy_router
+from .chat_entry import router as chat_entry_router
 from .reconciler import start_reconciler
 
 
@@ -116,6 +117,7 @@ async def ready():
 app.include_router(auth_router)
 app.include_router(proxy_router)
 app.include_router(projects_router)
+app.include_router(chat_entry_router)
 app.include_router(admin_router)
 
 

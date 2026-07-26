@@ -232,6 +232,7 @@ async def _build_messages_from_db(db: AsyncSession, conversation_id: int, reques
 
     redis_key = f"chat:msgs:{conversation_id}:{cursor_id or 'latest'}"
     r = await get_redis()
+    ttl = settings.chat_recent_redis_ttl  # 30min 滑动窗口（原硬编码 600s）
 
     # ── 1) Redis ──
     try:
@@ -240,9 +241,9 @@ async def _build_messages_from_db(db: AsyncSession, conversation_id: int, reques
             messages = json.loads(cached)
             # 过滤旧缓存中残留的 trail 消息
             messages = [m for m in messages if _strip_trail(m.get("content", "")) is not None]
-            await r.expire(redis_key, 600)
-            logger.info("[chat] Redis命中 conv=%d cursor=%s cnt=%d TTL已刷新",
-                       conversation_id, cursor_id or 'latest', len(messages))
+            await r.expire(redis_key, ttl)
+            logger.info("[chat] Redis命中 conv=%d cursor=%s cnt=%d TTL已刷新(%ds)",
+                       conversation_id, cursor_id or 'latest', len(messages), ttl)
             return _append_q(messages, request, from_cache=True)
     except Exception as e:
         logger.warning("[chat] Redis读失败 conv=%d err=%s", conversation_id, e)
@@ -254,7 +255,7 @@ async def _build_messages_from_db(db: AsyncSession, conversation_id: int, reques
             stmt = select(Message).where(Message.conversation_id == conversation_id)
             if cursor_id:
                 stmt = stmt.where(Message.id < cursor_id)
-            stmt = stmt.order_by(desc(Message.id)).limit(5)
+            stmt = stmt.order_by(desc(Message.id)).limit(settings.chat_recent_limit)
             result = await db.execute(stmt)
             db_msgs = list(result.scalars().all())
             db_msgs.reverse()  # 恢复时间线升序
@@ -274,9 +275,9 @@ async def _build_messages_from_db(db: AsyncSession, conversation_id: int, reques
     # ── 3) 回填 Redis ──
     if messages:
         try:
-            await r.set(redis_key, json.dumps(messages, ensure_ascii=False), ex=600)
-            logger.info("[chat] Redis回填 conv=%d cursor=%s cnt=%d TTL=600s",
-                       conversation_id, cursor_id or 'latest', len(messages))
+            await r.set(redis_key, json.dumps(messages, ensure_ascii=False), ex=ttl)
+            logger.info("[chat] Redis回填 conv=%d cursor=%s cnt=%d TTL=%ds",
+                       conversation_id, cursor_id or 'latest', len(messages), ttl)
         except Exception as e:
             logger.warning("[chat] Redis回填失败 conv=%d err=%s", conversation_id, e)
 
@@ -389,7 +390,7 @@ async def get_summary(conversation_id: int) -> str:
                 new_summary = resp.json()["choices"][0]["message"]["content"].strip()
             # 写回 Redis
             r2 = await get_redis()
-            await r2.setex(f"summary:{conversation_id}", 86400, new_summary[:1000])
+            await r2.setex(f"summary:{conversation_id}", settings.conversation_summary_ttl, new_summary[:1000])
             logger.info("[chat] 摘要过期回退重压 conv=%s len=%d", conversation_id, len(new_summary))
             from .analytics import record_summary_fallback
             await record_summary_fallback(conversation_id)  # v0.9.0 统计
@@ -400,10 +401,10 @@ async def get_summary(conversation_id: int) -> str:
 
 
 async def save_summary(conversation_id: int, text: str) -> None:
-    """写入对话摘要, 1天过期(v0.9.0: 从7天缩短)"""
+    """写入对话摘要, TTL 由 settings.conversation_summary_ttl 控制(默认30min滑动窗口)"""
     try:
         r = await get_redis()
-        await r.setex(f"summary:{conversation_id}", 86400, text[:1000])
+        await r.setex(f"summary:{conversation_id}", settings.conversation_summary_ttl, text[:1000])
     except Exception:
         pass
 
@@ -414,7 +415,7 @@ async def maybe_compress_summary(conversation_id: int, model: str, latest_user: 
         r = await get_redis()
         # Redis 计数器: 每轮递增
         cnt = await r.incr(f"summary_cnt:{conversation_id}")
-        await r.expire(f"summary_cnt:{conversation_id}", 86400)
+        await r.expire(f"summary_cnt:{conversation_id}", settings.conversation_summary_ttl)
         if cnt % 6 != 1:  # 每6条才压缩一次(第1/7/13...条)
             return
         old_summary = await get_summary(conversation_id)
@@ -532,7 +533,7 @@ async def chat(
     request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
-    model: str = Query("deepseek", description="模型 id"),
+    model: str = Query("qwen", description="模型 id"),
     conversation_id: int = Query(..., description="会话 id,必填(前端先建会话)"),
     trace_id: str | None = Query(None, description="前端生成的链路 id,用于取消/续传"),
     after: str | None = Query(None, description="断点续传:仅回放该 stream id 之后的增量(留空=全量回放)"),

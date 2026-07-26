@@ -1,0 +1,150 @@
+"""Shared ORM models — single source of truth for business & agent.
+
+Project 1:N Conversation (explicit per user requirement):
+  - Project = asset / site container (system_prompt, requirement_doc, build_status, share)
+  - Conversation = one dialogue inside a project
+  - Message -> Conversation -> Project -> User
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    JSON,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+logger = logging.getLogger("shared.models")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    email: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
+    nickname: Mapped[str | None] = mapped_column(String(64))
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), default="user", nullable=False)  # user | super_admin
+    plan: Mapped[str] = mapped_column(String(32), default="free", nullable=False)  # free | pro | enterprise
+    is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    projects: Mapped[list["Project"]] = relationship(back_populates="owner", cascade="all, delete-orphan")
+    conversations: Mapped[list["Conversation"]] = relationship(back_populates="user")
+
+
+class Project(Base):
+    """Asset / site container. One project owns many conversations."""
+
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    title: Mapped[str] = mapped_column(String(128), default="未命名项目", nullable=False)
+    share_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    preview_url: Mapped[str | None] = mapped_column(String(512))
+    system_prompt: Mapped[str | None] = mapped_column(Text)
+    build_status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False)
+    requirement_doc: Mapped[str | None] = mapped_column(JSON)  # structured requirement JSON
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)  # soft delete
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    owner: Mapped["User"] = relationship(back_populates="projects")
+    conversations: Mapped[list["Conversation"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+
+
+class Conversation(Base):
+    """A single dialogue inside a project."""
+
+    __tablename__ = "conversations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    title: Mapped[str] = mapped_column(String(128), default="新对话", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    checkpoint_stage: Mapped[str | None] = mapped_column(String(64))
+    checkpoint_data: Mapped[str | None] = mapped_column(Text)  # JSON snapshot
+    progress_pct: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    project: Mapped["Project"] = relationship(back_populates="conversations")
+    user: Mapped["User"] = relationship(back_populates="conversations")
+    messages: Mapped[list["Message"]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
+
+
+class Message(Base):
+    __tablename__ = "messages"
+    __table_args__ = (Index("ix_messages_conv_created", "conversation_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)  # user | assistant | system
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    model_id: Mapped[str | None] = mapped_column(String(48))
+    trace_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    parent_msg_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+    conversation: Mapped["Conversation"] = relationship(back_populates="messages")
+
+
+class Artifact(Base):
+    """Versioned generated artifact (site / doc) stored on COS."""
+
+    __tablename__ = "artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False)
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id", ondelete="SET NULL"))
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    url: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_artifacts_project_version", "project_id", "version"),
+    )
+
+
+class Trace(Base):
+    """Per-stream call record for analytics / admin."""
+
+    __tablename__ = "traces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trace_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"))
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id", ondelete="SET NULL"))
+    model_id: Mapped[str | None] = mapped_column(String(48))
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    events: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
