@@ -148,3 +148,67 @@ class Trace(Base):
     duration_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
+# ── 对话追踪补充表(③-a 回放 / QC 雷达图 / 多维反馈) ──
+# 合并自 business/app/models.py 的单表定义, 统一为单一事实源。
+class TraceEvent(Base):
+    """Trace 的结构化事件序列(按 seq 追加),用于前端回放与质量指标。"""
+
+    __tablename__ = "trace_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    event_type: Mapped[str] = mapped_column(String(16))
+    stage: Mapped[str | None] = mapped_column(String(32))
+    payload: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
+class Feedback(Base):
+    """用户对一次生成的评价(1—10 分 + 评论 + 多维细分);统计 + 回归数据集。"""
+
+    __tablename__ = "feedbacks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id", ondelete="SET NULL"), index=True)
+    rating: Mapped[int] = mapped_column(Integer)
+    comment: Mapped[str | None] = mapped_column(Text)
+    dimensions: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
+class QcScore(Base):
+    """后置 QC 三裁判评分: 以 trace_id 串联生成, 供后台雷达图复盘。"""
+
+    __tablename__ = "qc_scores"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id", ondelete="SET NULL"), index=True)
+    model_id: Mapped[str | None] = mapped_column(String(48))
+    overall: Mapped[float] = mapped_column(default=0.0)
+    result: Mapped[dict | None] = mapped_column(JSON)
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    safety_risk: Mapped[str] = mapped_column(String(16), default="low")
+    partial: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
+class UsageLog(Base):
+    """每次生成的用量账本(成本归集 / 运营统计)。"""
+
+    __tablename__ = "usage_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    provider: Mapped[str | None] = mapped_column(String(32))
+    model: Mapped[str | None] = mapped_column(String(64))
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost: Mapped[float] = mapped_column(default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)

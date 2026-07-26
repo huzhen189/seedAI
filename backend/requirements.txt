@@ -1,0 +1,28 @@
+# SeedAI 后端统一依赖(单进程 FastAPI 全量合并版, v2.0.0)。
+# 业务服务 + AI 核心已合并为同一进程(backend/app,uicorn app.main:app,监听 7101),
+# 故两份旧 requirements(business/ai_service)在此合并为一份。
+# 安装: pip install -r backend/requirements.txt
+
+fastapi>=0.110
+uvicorn[standard]>=0.29
+sqlalchemy[asyncio]>=2.0
+aiosqlite>=0.20
+aiomysql>=0.2.0
+redis>=5.0
+pyjwt>=2.8
+bcrypt>=4.1
+pydantic>=2.6
+pydantic-settings>=2.2
+python-multipart>=0.0.9
+email-validator>=2.1
+sse-starlette>=2.0
+httpx>=0.27
+
+# AI 核心(Agent)运行时
+langgraph
+langchain-openai
+openai
+chromadb
+cos-python-sdk-v5
+beautifulsoup4
+playwright

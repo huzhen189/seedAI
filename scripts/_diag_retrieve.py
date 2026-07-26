@@ -1,5 +1,5 @@
 import sys, time
-sys.path.insert(0, "backend/ai_service")
+sys.path.insert(0, "backend")
 from app.config import settings
 from app.knowledge.chroma import _available, _ef, _client
 from app.intent.vector_store import retrieve_intents

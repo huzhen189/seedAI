@@ -6,8 +6,7 @@
   python scripts/run_tests.py --csv      # 导出 CSV 报告
 
 前提:
-  - 业务服务 7101 已启动
-  - AI 服务 7102 已启动
+  - 单进程后端 7101 已启动(业务服务 + AI 核心已合并为同一进程)
 """
 
 import asyncio
@@ -480,7 +479,7 @@ async def main():
             f.write(f"测试结束: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"项目ID: {PROJ_ID} | 对话ID: {CONV_ID}\n")
             f.write(f"```\n")
-            f.write(f"\n> 完整后端日志见: `backend/business/logs/business.log` / `backend/ai_service/logs/ai_service.log`\n")
+            f.write(f"\n> 完整后端日志见: `backend/app/logs/app.log`\n")
 
         print(f"\n📄 报告: {report_path}")
 

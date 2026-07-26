@@ -511,32 +511,36 @@ async def retry_upload(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """重传 COS 失败的产物: 找 status=uploading 的 artifact, 读本地 HTML 重新上传, 更新 DB。"""
-    import httpx
+    """重传 COS 失败的产物: 找 status=uploading 的 artifact, 读本地 HTML 重新上传, 更新 DB。
+    单进程合并后直接读本地产物目录并调 COS(不再经 httpx 转发到独立 AI 服务)。"""
+    import os
+    from pathlib import Path
+
     proj = await project_repo.get_by(db, id=project_id, user_id=user.id)
     if proj is None:
         raise HTTPException(status_code=404, detail="project not found")
     artifacts = await artifact_repo.list_by(db, project_id=project_id, status="uploading")
     results = []
+    art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
     for art in artifacts:
         if not art.trace_id:
             continue
+        idx = art_dir / "anon" / art.trace_id / "index.html"
+        if not idx.exists():
+            results.append({"id": art.id, "ok": False, "error": "本地产物文件不存在"})
+            continue
         try:
-            async with httpx.AsyncClient(timeout=30) as c:
-                resp = await c.post(
-                    f"{settings.ai_service_url}/retry-upload",
-                    json={"trace_id": art.trace_id},
-                )
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("ok"):
-                    art.preview_url = data["url"]
-                    art.download_url = data["url"]
-                    art.status = "done"
-                    await db.commit()
-                    results.append({"id": art.id, "ok": True, "url": data["url"]})
-                    continue
-            results.append({"id": art.id, "ok": False, "error": f"AI service {resp.status_code}"})
+            from ..agent.tools.cos_upload import cos_upload
+            cos_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/anon/{art.trace_id}/index.html"
+            res = cos_upload(str(idx), cos_key)
+            if res.get("ok"):
+                art.preview_url = res["url"]
+                art.download_url = res["url"]
+                art.status = "done"
+                await db.commit()
+                results.append({"id": art.id, "ok": True, "url": res["url"]})
+            else:
+                results.append({"id": art.id, "ok": False, "error": res.get("error", "COS 上传失败")})
         except Exception as e:
             results.append({"id": art.id, "ok": False, "error": str(e)})
     return {"results": results}

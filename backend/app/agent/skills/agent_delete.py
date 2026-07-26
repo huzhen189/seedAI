@@ -121,39 +121,33 @@ async def run_delete(
         yield ev("confirm", reason=reason, skill="agent_delete")
         return
 
-    # ── 已确认 → 执行删除 ──
-    import aiohttp
-    from ..config import settings
-
-    biz_url = settings.business_service_url or "http://localhost:7101"
-
-    if is_delete_all:
-        url = f"{biz_url}/api/projects/{project_id}/artifacts?confirmed=true"
-        method = "DELETE"
-    elif fname:
-        from urllib.parse import quote
-        url = f"{biz_url}/api/projects/{project_id}/artifacts/files?confirmed=true&name={quote(fname)}"
-        method = "DELETE"
-    else:
-        yield ev("token", data="未能确定要删除的目标，请换个方式说（如「删除index.html」或「删除所有产物」）。")
-        return
+    # ── 已确认 → 执行删除(单进程合并: 直接调业务层删除逻辑, 不经 http 回环) ──
+    from ...db import SessionLocal
+    from ...repos.business_repos import artifact_repo, conv_repo
+    from ...cache import cache_delete
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.request(method, url) as resp:
-                data = await resp.json()
-                if data.get("ok"):
-                    deleted = data.get("deleted", 0)
-                    if is_delete_all:
-                        msg_text = f"已成功删除全部 {deleted} 个生成产物。如需重新生成网站，随时告诉我～"
-                    else:
-                        msg_text = f"已删除文件「{fname}」。"
-                    logger.info("[agent_delete] 删除成功 trace=%s deleted=%s", trace_id, deleted)
-                    yield ev("token", data=msg_text)
+        async with SessionLocal() as db:
+            if is_delete_all:
+                deleted = await artifact_repo.delete_all(db, project_id=project_id)
+                msg_text = f"已成功删除全部 {deleted} 个生成产物。如需重新生成网站，随时告诉我～"
+            elif fname:
+                deleted = await artifact_repo.delete_file(db, project_id=project_id, filename=fname)
+                if not deleted:
+                    yield ev("token", data=f"未找到文件「{fname}」，无需删除。")
                     yield ev("node", stage="done")
-                else:
-                    logger.warning("[agent_delete] 删除失败 trace=%s resp=%s", trace_id, data)
-                    yield ev("token", data=f"删除失败：{data.get('detail', '未知错误')}")
+                    return
+                msg_text = f"已删除文件「{fname}」。"
+            else:
+                yield ev("token", data="未能确定要删除的目标，请换个方式说（如「删除index.html」或「删除所有产物」）。")
+                return
+            # 清除 site_generated 缓存, 防止删除后 cascade 仍认为站点已生成
+            conversations = await conv_repo.list_by(db, project_id=project_id)
+            for c in conversations:
+                await cache_delete(f"site_generated:{c.id}")
+            logger.info("[agent_delete] 删除成功 trace=%s deleted=%s", trace_id, deleted)
+        yield ev("token", data=msg_text)
+        yield ev("node", stage="done")
     except Exception as e:
         logger.error("[agent_delete] 删除异常 trace=%s: %s", trace_id, e)
         yield ev("token", data="删除请求未能完成，请稍后重试或检查网络连接。")

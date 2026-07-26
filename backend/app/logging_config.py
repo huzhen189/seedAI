@@ -5,16 +5,16 @@
 此前后端日志只走 uvicorn 默认 stdout,容器/进程一重启就丢失,且无法按天回溯。
 按需求,这里把日志同时写到:
   1. 控制台(stdout)——保持原有体验,docker 场景仍可由容器收集;
-  2. 本地文件 `backend/business/logs/<service>.log`——按**自然日**滚动切分,
+  2. 本地文件 `backend/app/logs/<service>.log`——按**自然日**滚动切分,
      过期文件自动命名为 `<service>.log.YYYY-MM-DD`(由 TimedRotatingFileHandler
      在每天午夜切换时重命名),保留最近 30 天。
 
-这样"按日期保存本地"即:今天写 `business.log`,昨天的内容在 `business.log.2026-07-17`,
-前天在 `business.log.2026-07-16`…… 一目了然、可用编辑器直接打开排查。
+这样"按日期保存本地"即:今天写 `app.log`,昨天的内容在 `app.log.2026-07-17`,
+前天在 `app.log.2026-07-16`…… 一目了然、可用编辑器直接打开排查。
 
 覆盖范围
 ------
-- 应用内所有 `logging.getLogger(...)` 日志(如 business.cache / business.metrics / business.proxy);
+- 应用内所有 `logging.getLogger(...)` 日志(如 app.cache / app.metrics / app.proxy);
 - uvicorn 自身的访问日志(uvicorn.access,含每行请求方法/路径/状态码/耗时)与
   错误日志(uvicorn.error),一并落盘,便于事后核对请求链路。
 
@@ -28,7 +28,7 @@ import logging
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
-# 日志目录固定放在本服务包的上一级(backend/business/logs),
+# 日志目录固定放在本服务包的上一级(backend/app/logs),
 # 不受进程启动 CWD 影响,保证本地直跑与 docker 内路径一致。
 _LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 

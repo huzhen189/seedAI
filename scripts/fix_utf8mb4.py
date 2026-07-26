@@ -1,6 +1,6 @@
 """一次性的：把所有文本列改为 utf8mb4 支持 emoji"""
 import asyncio, sys
-sys.path.insert(0, 'backend/business')
+sys.path.insert(0, 'backend')
 from app.db import engine
 from sqlalchemy import text
 

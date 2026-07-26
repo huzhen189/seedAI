@@ -354,8 +354,8 @@ async def _classify_segment(
     rule_hits = match_rules(current_user_msg)
     strong_rule = next((h for h in rule_hits if h.strength == "strong"), None)
 
-    # ── [2] 向量召回 top5(to_thread 隔离阻塞 I/O) ──
-    candidates = await asyncio.to_thread(retrieve_intents, current_user_msg, 5)
+    # ── [2] 向量召回 top-k(R2 修复: 原硬编码 5, 现由 settings.intent_top_k 控制) ──
+    candidates = await asyncio.to_thread(retrieve_intents, current_user_msg, settings.intent_top_k)
     top_score = candidates[0]["score"] if candidates else 0.0
     top_intent_id = candidates[0]["intent_id"] if candidates else ""
 
@@ -388,30 +388,6 @@ async def _classify_segment(
                       "source": "superfast"},
         )
 
-    # ── [7] 新奇度兜底: 无规则命中 且 向量全低 → 闲聊 ──
-    if not rule_hits and top_score < NOVELTY:
-        logger.info("[级联] 新奇度兜底: top_score=%.2f < %.2f → 闲聊", top_score, NOVELTY)
-        chat_intent = get_intent(_CHAT_CASUAL) or {"level1": "chat", "level2": "casual", "skill": "agent_chat"}
-        await asyncio.to_thread(save_slots, conversation_id, {
-            "intent_id": _CHAT_CASUAL, "slots": {}, "clarify_rounds": 0, "confidence": top_score,
-        })
-        await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
-                                user_id=user_id, raw_input=current_user_msg, llm_intent="chat/casual",
-                                llm_confidence=top_score, rules_triggered=[],
-                                belief_before=0.0, belief_after=top_score, decision="route",
-                                latency_ms=(time.time() - t0) * 1000, tokens_used=0,
-                                specialist_routed="agent_chat", outcome="pending",
-                                extra={"source": "novelty"})
-        await record_intent_classify("route", "novelty", (time.time() - t0) * 1000,
-                                      confidence=top_score)
-        return _emit_route(
-            chat_intent, max(top_score, 0.3), decision="route",
-            selected_skill="agent_chat", industry="other", reason="novelty_fallback",
-            request_id=req_id,
-            evidence={"vector_top": [(c["intent_id"], round(c["score"], 3)) for c in candidates[:5]],
-                      "source": "novelty"},
-        )
-
     # ── [8] 安全优先(critical 拦截, 可短路) ──
     safety_result = SafetyResult()
     try:
@@ -440,6 +416,33 @@ async def _classify_segment(
     prior = await asyncio.to_thread(load_slots, conversation_id)
     prior_intent_id = prior.get("intent_id", "") or ""
     prior_collected = prior.get("slots", {}) or {}
+
+    # ── [7→9] 新奇度兜底(R3 修复: 必须放在 load_slots 之后,
+    #    否则跨轮 memory/prior slots 尚未加载就被闲聊短路, 丢失上下文):
+    #    无规则命中 且 向量全低 → 闲聊 ──
+    if not rule_hits and top_score < NOVELTY:
+        logger.info("[级联] 新奇度兜底: top_score=%.2f < %.2f → 闲聊", top_score, NOVELTY)
+        chat_intent = get_intent(_CHAT_CASUAL) or {"level1": "chat", "level2": "casual", "skill": "agent_chat"}
+        await asyncio.to_thread(save_slots, conversation_id, {
+            "intent_id": _CHAT_CASUAL, "slots": {}, "clarify_rounds": 0, "confidence": top_score,
+        })
+        await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
+                                user_id=user_id, raw_input=current_user_msg, llm_intent="chat/casual",
+                                llm_confidence=top_score, rules_triggered=[],
+                                belief_before=0.0, belief_after=top_score, decision="route",
+                                latency_ms=(time.time() - t0) * 1000, tokens_used=0,
+                                specialist_routed="agent_chat", outcome="pending",
+                                extra={"source": "novelty"})
+        await record_intent_classify("route", "novelty", (time.time() - t0) * 1000,
+                                      confidence=top_score)
+        return _emit_route(
+            chat_intent, max(top_score, 0.3), decision="route",
+            selected_skill="agent_chat", industry="other", reason="novelty_fallback",
+            request_id=req_id,
+            evidence={"vector_top": [(c["intent_id"], round(c["score"], 3)) for c in candidates[:5]],
+                      "source": "novelty"},
+        )
+
     ruling = await _llm_rule(
         current_user_msg, candidates, model_id=model_id, context_hint=context_hint,
         project_status=project_status, has_requirement_doc=has_requirement_doc,

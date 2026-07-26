@@ -1,7 +1,9 @@
-# SeedAI 本地/生产一体编排(M0 · 文档 §3 / §4)。
-# 服务名即内网 DNS 主机名,与 .env 中 redis/mysql/chroma/ai-service 一致。
-# 前端(frontend/nginx)对外 7100;业务服务(business)对外 7101;
-# AI 服务(ai-service)仅内网 7102;前端反向代理 /api 到 business。
+# SeedAI 本地/生产一体编排(单进程合并版, v2.0.0)。
+# 架构变更(2026-07-26): 业务服务 + AI 核心已合并为【单一 FastAPI 进程】
+# (backend/app,uicorn app.main:app,监听 7101)。不再有独立的 7102 AI 服务,
+# 因此本 compose 也只有一个 backend 服务,前端 /api 反向代理直接打到 7101。
+# 服务名即内网 DNS 主机名,与 .env 中 redis/mysql/chroma 一致。
+# 前端(frontend/nginx)对外 7100;后端(backend)对外 7101。
 services:
   mysql:
     image: mysql:8.0
@@ -43,31 +45,16 @@ services:
       - chroma_data:/chroma/chroma
     networks: [seed-net]
 
-  ai-service:
-    build: ./backend/ai_service
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      CHROMA_URL: http://chroma:8000
-      AI_SERVICE_PORT: 7102
-    expose:
-      - "7102"
-    depends_on:
-      redis:
-        condition: service_healthy
-    networks: [seed-net]
-
-  business:
-    build: ./backend/business
+  backend:
+    build: ./backend
     restart: unless-stopped
     env_file: .env
     environment:
       # M0 用 MySQL(aiomysql 异步驱动);本地直跑可用 .env 默认 SQLite
       DATABASE_URL: mysql+aiomysql://seedai:seedai@mysql:3306/seedai
       REDIS_URL: redis://redis:6379/0
-      AI_SERVICE_URL: http://ai-service:7102
-      BUSINESS_API_PORT: 7101
+      CHROMA_URL: http://chroma:8000
+      APP_PORT: 7101
     ports:
       - "7101:7101"
     depends_on:
@@ -75,8 +62,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      ai-service:
-        condition: service_started
     networks: [seed-net]
 
   frontend:
@@ -85,7 +70,7 @@ services:
     ports:
       - "7100:80"
     depends_on:
-      - business
+      - backend
     networks: [seed-net]
 
 volumes:

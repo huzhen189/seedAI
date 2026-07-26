@@ -11,20 +11,20 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: backend/business
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - name: Install dev deps
-        run: pip install -r ../requirements-dev.txt
+        run: pip install -r requirements-dev.txt
       - name: Ruff lint
-        run: python -m ruff check ../business/app ../ai_service/app
+        run: python -m ruff check app shared
       - name: Ruff format check
-        run: python -m ruff format --check ../business/app ../ai_service/app
+        run: python -m ruff format --check app shared
       - name: Mypy type check
-        run: python -m mypy ../business/app
+        run: python -m mypy app
       - name: Pytest
         run: python -m pytest -q
 

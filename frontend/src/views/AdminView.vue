@@ -120,7 +120,7 @@ async function doReset() {
     // 2) 调后端清库
     const r = await post('/admin/reset?confirm=yes')
     if (r.success) {
-      resetMsg.value = `✅ ${r.message}\n已 DROP ${r.tables_dropped} 张表, Redis ${r.redis_cleared ? '已清空' : '清理失败'}。\n请立即重启两个后端服务(业务 7101 + AI 7102)，刷新本页面重新登录。`
+      resetMsg.value = `✅ ${r.message}\n已 DROP ${r.tables_dropped} 张表, Redis ${r.redis_cleared ? '已清空' : '清理失败'}。\n请手动重启单进程后端(7101)，刷新本页面重新登录。`
     } else {
       resetMsg.value = `❌ 重置失败: ${r.error || '未知错误'}`
     }
@@ -161,7 +161,7 @@ type LatencyGroup = 'business' | 'ai_service'
 const latencyTab = ref<LatencyGroup>('business')
 const latencyGroups: { key: LatencyGroup; label: string }[] = [
   { key: 'business', label: '业务端 (7101)' },
-  { key: 'ai_service', label: '需求端 (7102 AI 核心)' },
+  { key: 'ai_service', label: '需求端 (AI 核心, 进程内)' },
 ]
 const currentLatency = computed<Record<string, LatencyBucket>>(() => {
   const groups = metrics.value.api_latency

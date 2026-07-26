@@ -60,8 +60,8 @@ case "$MODE" in
     exit 0
     ;;
   *)
-    echo "==> 构建并起全套(数据栈 + 业务 + AI + 前端)"
-    echo "    ⚠ 若 7100/7101/7102 被裸跑的 vite/uvicorn 占用,请先停掉避免端口冲突:"
+    echo "==> 构建并起全套(数据栈 + 单进程后端 + 前端)"
+    echo "    ⚠ 若 7100/7101 被裸跑的 vite/uvicorn 占用,请先停掉避免端口冲突:"
     echo "       pkill -f 'vite' ; pkill -f 'uvicorn app.main:app'"
     docker compose up -d --build
     ;;
@@ -81,13 +81,11 @@ echo "==> 验证端点"
 curl -s -o /dev/null -w "  business /health              = %{http_code}\n" "http://localhost:7101/health"
 curl -s -o /dev/null -w "  business /api/chat(无登录)    = %{http_code}\n" "http://localhost:7101/api/chat?conversation_id=1&messages=x"
 echo "    · /api/chat(无登录) 返回 401 且 body 含 'Missing authentication' => 旧代码仍在"
-echo "    · 返回 200 且为 SSE error 帧(code=AUTH_REQUIRED)        => v0.3.1 已生效"
-echo "  AI 核心 /generate 连通性探测(会入队一条测试任务,可忽略):"
-curl -s -o /dev/null -w "  ai /generate                  = %{http_code}\n" \
-  -X POST "http://localhost:7102/generate" \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"hi"}]}' || true
-echo "    · /generate 返回 200/202 => Redis 已连通; 仍 500 => 数据栈未就绪,稍候重跑 ./deploy-prod.sh status"
+echo "    · 返回 200 且为 SSE error 帧(code=AUTH_REQUIRED)        => 鉴权已生效"
+echo "  单进程后端 /models 连通性探测(确认 AI 核心随业务进程一并就绪):"
+curl -s -o /dev/null -w "  backend /models               = %{http_code}\n" \
+  "http://localhost:7101/models" || true
+echo "    · /models 返回 200 => 单进程后端 + 模型注册表就绪"
 
 echo ""
 echo "==> 部署完成。访问 http://<your-domain>:7100"

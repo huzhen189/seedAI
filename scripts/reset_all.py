@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "backend" / "business"))
+sys.path.insert(0, str(ROOT / "backend"))
 
 from app.config import settings, ENV_FILE  # noqa: E402
 from app.db import SessionLocal, engine, init_db  # noqa: E402
@@ -57,7 +57,7 @@ async def reset() -> None:
             print(f"  >> Redis 清理失败: {e}")
 
     # 2.5) 清空 Chroma 运行数据集合, 保留配置/知识类集合(规则/意图/组件库等)
-    #      集合名与 backend/ai_service/app/config.py 保持一致。
+    #      集合名与 backend/shared/config.py 保持一致。
     #      - 配置/知识集合(保留): components(组件库) / error_patterns(错误模式库) / intents(意图向量索引)
     #      - 运行数据集合(清空): memory / cache_gen / user_preferences / project_memory / project_code
     #      说明: 规则 JSON 文件(intent_catalog.json / rules_catalog.json / ruleset.json)在磁盘上,
@@ -177,7 +177,7 @@ async def reset() -> None:
         await conn.run_sync(_do_partitions)
 
     await engine.dispose()
-    print("\n完成。业务服务 7101 将自动重启; AI 服务 7102 请手动重启。")
+    print("\n完成。单进程服务 7101 将自动重启(前端请手动刷新登录态)。")
 
 
 async def _ensure_super_admin() -> None:

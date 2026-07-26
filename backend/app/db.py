@@ -229,49 +229,9 @@ async def reset_db() -> dict:
     await init_db()
 
     await engine.dispose()
-    result["message"] = "数据已清理并重建。业务服务(7101)将在 3 秒后自动重启；AI 服务(7102)请手动重启。"
-    logger.info("reset_db: 完成, engine 已 dispose, 3s 后自动重启业务服务")
+    result["message"] = "数据已清理并重建。单进程服务(7101)已 dispose,请手动重启后端使连接池与 Chroma 客户端重新初始化。"
+    logger.info("reset_db: 完成, engine 已 dispose, 等待用户手动重启服务")
     return result
-
-
-def schedule_biz_restart() -> None:
-    """重置完成后延迟 3 秒重启业务服务(7101)。
-
-    通过写 bat 脚本 + subprocess.Popen 启动, 旧进程 os._exit(0)
-    避免端口冲突。AI 服务(7102)由用户手动重启。
-    """
-    import os as _os
-    import subprocess as _sp
-    import sys as _sys
-    import tempfile as _tmp
-    import time as _time
-
-    def _restart() -> None:
-        _time.sleep(3)
-        old_pid = _os.getpid()
-        venv_py = _sys.executable
-        cwd = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..")
-        bat = _os.path.join(_tmp.gettempdir(), "seedai_biz_restart.bat")
-        lines = [
-            "@echo off",
-            # 先杀 7101 上所有 LISTENING 进程, 再起新的, 避免端口残留幽灵进程
-            "for /f \"tokens=5\" %%a in ('netstat -ano ^| findstr :7101 ^| findstr LISTENING') do taskkill /PID %%a /F 2>nul",
-            f"taskkill /PID {old_pid} /F 2>nul",
-            "timeout /t 2 /nobreak >nul",
-            f'cd /d "{cwd}"',
-            f'"{venv_py}" -m uvicorn app.main:app --app-dir backend\\\\business --host 0.0.0.0 --port 7101',
-        ]
-        with open(bat, "w", encoding="ascii") as f:
-            f.write("\n".join(lines))
-        _sp.Popen(
-            ["cmd", "/c", bat],
-            creationflags=0x00000008,  # DETACHED_PROCESS
-            close_fds=True,
-        )
-
-    import threading as _th
-    t = _th.Thread(target=_restart, daemon=True)
-    t.start()
 
 
 async def get_db():

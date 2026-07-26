@@ -1,20 +1,22 @@
-"""生成代理:业务服务作为唯一对外入口。
+"""生成代理:统一单进程应用的唯一对外对话入口(业务层 + 推理层同进程)。
 
 - 前端永不直接触达 AI 服务。
 - 鉴权门禁:GET /api/chat 需登录(从 HttpOnly Cookie 取 JWT);未登录时下发
   SSE error 事件(code=AUTH_REQUIRED, message="Missing authentication"),而非 JSON 401,
   以便前端 EventSource 识别并主动弹出登录框(文档 §3.7 / §5 / §2.1)。
-- 这里负责把前端的 GET 请求翻译成 AI 服务的 POST /generate,并把 SSE 帧
-  透明透传回去;同时转发取消信号到 AI 的 POST /cancel。
+- 单进程合并后:本模块不再用 httpx 把请求转发给独立的 AI 服务。
+  取而代之 —— 直接把 job 投递给同进程的 Worker 队列,订阅同一个
+  `gen:stream:<tid>` 频道,把 Worker 产出的事件字典原样序列化为 SSE 帧吐出。
+  彻底消除了「双进程 SSE 二次转发 + business→ai_service httpx 代理」这一历史包袱。
 - 鉴权 / 限流 / 用量计量在此拦截(已登录用户按真实 user_id 计量)。
 - **落库(M1)**:/api/chat 入参新增 conversation_id;SSE 流结束(或中断)时,
   把首条用户消息 + AI 完整回复双写进 Message,并更新 Conversation.updated_at,
   首条时自动生成会话标题。落库失败不阻塞已完成的流。
 
-SSE 透传策略:上游 AI 返回标准 SSE 文本帧(event:/data: 行 + 空行)。
-我们用 httpx aiter_lines 逐行解析,重建标准 SSE 帧原样吐出(保证
-think/token/node/preview/done/error/aborted/degraded 一字不差地转发,兼容
-前端 EventSource),同时收集 token 帧内容用于落库。
+SSE 透传策略:Worker 经队列产出 `{"event":..,"data":..}` 字典事件。
+我们用 to_sse() 序列化为标准 SSE 文本帧(event:/data: 行 + 空行),
+保证 think/token/node/preview/done/error/aborted/degraded 一字不差地转发,
+兼容前端 EventSource,同时收集 token 帧内容用于落库。
 """
 
 import json
@@ -43,6 +45,8 @@ from .repos.business_repos import conv_repo, message_repo
 from .repos.trace_repos import feedback_repo, qc_score_repo, trace_repo
 from .schemas import FeedbackReq
 from .security import ACCESS_COOKIE, CurrentUser, _set_access_cookie, create_access_token, decode_token, get_current_user
+# 单进程合并:直接复用同进程的推理队列(取代 httpx 转发)
+from .agent.core.queue import get_queue
 from .tracing import append_trace_event, create_trace, finish_trace, log_usage
 
 import html as _html
@@ -652,7 +656,12 @@ async def chat(
     summary = await get_summary(conversation_id)
     if summary:
         payload["conversation_summary"] = summary
-    gen_url = f"{settings.ai_service_url}/generate"
+    # 单进程合并后: AI 核心与业务同进程, 不再走 httpx 转发。
+    # 直接把 job 投递给同进程的队列 Worker(SSE 端点订阅同一 gen:stream 频道回放)。
+    if after:
+        from urllib.parse import urlencode
+        # 续传游标仅用于 SSE 订阅端(after= 透传给 q.subscribe), 不再拼到 http URL。
+        logger.info("[chat] 续传游标 after=%s", after)
     # 项目上下文: 状态+需求文档+系统prompt+硬约束
     # 注意: 必须先取 Conversation 得到 project_id(此前此处直接引用 conv 而未定义,
     # 整段被 try/except 吞掉, 导致 project_status/requirement_doc 从未下发 —— 已修正)
@@ -696,9 +705,6 @@ async def chat(
             #   技能注册表里不存在 → 续跑时 Worker 报 "Skill 'generate_site' 不存在"。
             payload["skill"] = "agent_generate_site"
             use_skill_override = True
-    if after:
-        from urllib.parse import urlencode
-        gen_url += "?" + urlencode({"after": after})
 
     # 断点续跑(§7): 注入 checkpoint_data + resume_mode。Redis 优先, MySQL 兜底。
     if resume:
@@ -780,7 +786,7 @@ async def chat(
         terminal_status: str = "done"
         captured_level1: str = "unknown"  # 从 intent 事件捕获, 供统计
         event_counts: dict[str, int] = {}  # 各类 SSE 事件计数(供日志)
-        logger.info("[chat] [5/8] 连接 AI 服务 %s", gen_url)
+        logger.info("[chat] [5/8] 同进程 Worker 队列就绪 trace=%s", tid)
         logger.info("[chat] ▸ 请求体 model=%s resume=%s after=%s msgs=%d checkpoint=%s",
                      model, resume, after or "-",
                      len(payload.get("messages", [])),
@@ -788,24 +794,37 @@ async def chat(
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 try:
-                    async with client.stream(
-                        "POST",
-                        gen_url,
-                        json=payload,
-                    ) as resp:
-                        if resp.status_code >= 400:
-                            err_text = await resp.aread()
-                            code, message = _map_upstream_error(resp.status_code, err_text)
-                            terminal_status = "error"
-                            logger.warning(
-                                "[chat] AI 服务返回 %s: %s", resp.status_code, message
-                            )
-                            yield _error_frame(code, message)
-                            return
-                        logger.info("[chat] [6/8] AI 服务已连接, 开始接收事件流")
-                        event = None
-                        data_parts: list[str] = []
-                        async for raw_line in resp.aiter_lines():
+                    # 单进程合并: 不再经 httpx 转发, 直接把 job 投递给同进程 Worker 队列,
+                    # 订阅同一 gen:stream:<tid> 频道, 把事件字典序列化为 SSE 帧透传(零逻辑改动)。
+                    q = get_queue()
+                    resuming = await q.stream_exists(tid)
+                    if not resuming:
+                        await q.open_channel(tid)
+                        await q.enqueue(payload)
+                        logger.info("[chat] [2/3] 新任务入队 trace=%s queue=%s", tid, type(q).__name__)
+                    else:
+                        logger.info("[chat] [2/3] 续接已有流 trace=%s after=%s 全量回放", tid, after or "无")
+                    logger.info("[chat] [6/8] 订阅同进程事件流, 开始接收事件")
+
+                    async def _sse_lines():
+                        # 把同进程 Worker 产出的事件字典 -> 标准 SSE 文本行序列,
+                        # 复用下方既有的 `if raw_line == ""` 解析分支(零逻辑改动)。
+                        async for ev in q.subscribe(tid, after):
+                            event = ev.get("event") or "message"
+                            data = ev.get("data")
+                            if isinstance(data, (dict, list)):
+                                data = json.dumps(data, ensure_ascii=False)
+                            elif data is None:
+                                data = ""
+                            else:
+                                data = str(data)
+                            yield f"event: {event}"
+                            yield f"data: {data}"
+                            yield ""  # 空行: 触达 `if raw_line == ""` 处理分支
+
+                    event = None
+                    data_parts: list[str] = []
+                    async for raw_line in _sse_lines():
                             # 主动检测客户端断连(关闭/刷新/导航离开): 立即终止读取上游并触发级联取消
                             try:
                                 if await request.is_disconnected():
@@ -958,8 +977,8 @@ async def chat(
                                 event = raw_line[6:].strip()
                             elif raw_line.startswith("data:"):
                                 data_parts.append(raw_line[5:].strip())
-                except httpx.HTTPError as e:
-                    logger.warning("[chat] AI 连接异常: %s", e)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[chat] 订阅事件流异常: %s", e)
                     terminal_status = "error"
                     await record_error("upstream_error")
                     yield _error_frame("UPSTREAM_ERROR", "AI 服务暂时不可用，请稍后重试")

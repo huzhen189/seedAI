@@ -91,10 +91,27 @@ async def init_db():
     logger.debug("shared.init_db: schema consistent")
 
 
+_pool = None
+
+
 async def get_redis():
-    """Lazy redis client (aioredis) — imported here to avoid hard dep at import time."""
-    import redis.asyncio as aioredis
-    return aioredis.from_url(settings.redis_url, decode_responses=True)
+    """Lazy redis client (aioredis) with a shared connection pool.
+
+    Matches the business cache.py pool (health_check_interval + socket_keepalive)
+    to survive the cloud NAT idle-kill that historically dropped idle connections.
+    """
+    global _pool
+    if _pool is None:
+        import redis.asyncio as aioredis
+        _pool = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            protocol=2,
+            health_check_interval=30,
+            socket_keepalive=True,
+            socket_timeout=10,
+        )
+    return _pool
 
 
 async def dispose_engine():

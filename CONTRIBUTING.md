@@ -6,10 +6,10 @@
 
 | 层 | 工具 | 检查项 | 本地命令 |
 | --- | --- | --- | --- |
-| 后端 lint | ruff | 风格/未用导入/正确性(B/SIM/C4) | `python -m ruff check backend/business/app backend/ai_service/app` |
-| 后端 format | ruff | 格式化一致性 | `python -m ruff format backend/business/app`（写） / `--check`（查） |
-| 后端 类型 | mypy | 类型错误（目标 3.10+） | `python -m mypy backend/business/app` |
-| 后端 测试 | pytest | 单元/集成测试 | `cd backend/business && python -m pytest -q` |
+| 后端 lint | ruff | 风格/未用导入/正确性(B/SIM/C4) | `cd backend && python -m ruff check app shared` |
+| 后端 format | ruff | 格式化一致性 | `cd backend && python -m ruff format app shared`（写） / `--check`（查） |
+| 后端 类型 | mypy | 类型错误（目标 3.10+） | `cd backend && python -m mypy app` |
+| 后端 测试 | pytest | 单元/集成测试 | `cd backend && python -m pytest -q` |
 | 前端 lint | eslint | Vue/TS 规范 | `cd frontend && npm run lint` |
 | 前端 format | prettier | 格式化一致性 | `npm run format:check` |
 | 前端 测试 | vitest | 单元测试 | `npm run test` |
@@ -55,6 +55,8 @@ CI（`.github/workflows/ci.yml`）任一环节失败即阻断合入。**本地�
 - 一键部署：`bash scripts/deploy-prod.sh` —— 拉最新代码 + `docker compose up -d --build` 全套（含数据栈）。
 - 仅起数据栈：`bash scripts/deploy-prod.sh data`（redis/mysql/chroma，不动前后端）。
 - 状态 / 日志：`bash scripts/deploy-prod.sh status` / `logs`。
-- 部署后验证：`/api/chat` 无登录应返回 SSE error 帧（`v0.3.1+`，`code=AUTH_REQUIRED`）；`/generate` 应返回 `200/202`（说明 Redis 已通）。
+- 部署后验证：`/api/chat` 无登录应返回 SSE error 帧（`v0.3.1+`，`code=AUTH_REQUIRED`）；`/models` 应返回 `200`（单进程后端 + 模型注册表就绪）。
 - 前置条件：服务器需装 **Docker Engine（含 compose v2）**，且存在 `.env`（从 `.env.example` 复制并填真实连接串）。
-- 端口冲突：部署前若 `7100/7101/7102` 被裸跑进程占用，先 `pkill -f vite; pkill -f 'uvicorn app.main:app'`，避免端口争用。
+- 端口冲突：部署前若 `7100/7101` 被裸跑进程占用，先 `pkill -f vite; pkill -f 'uvicorn app.main:app'`，避免端口争用。
+
+> 架构说明（v2.0.0）：后端已合并为单一 FastAPI 进程（`backend/app`，监听 7101），业务服务与 AI 核心不再分两个进程/两个端口，故部署只需一个 `backend` 服务、前端 `/api` 代理直接打 7101。`shared/` 为模型/配置/DB 单一真相源。
