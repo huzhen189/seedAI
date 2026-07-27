@@ -7,8 +7,10 @@ token 事件不逐条落库,仅记录聚合 token 数;结构化事件逐条落�
 
 import json
 import logging
+from contextlib import suppress
 from datetime import datetime
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Feedback, TraceEvent, UsageLog
@@ -23,11 +25,23 @@ async def create_trace(
     trace_id: str, model_id: str | None,
 ) -> int:
     try:
+        # 幂等优先: 已存在该 trace_id(如刷新后断点续跑复用同一 tid)直接返回已有 id,
+        # 避免重复 INSERT 触发 IntegrityError 把会话置为「待回滚」毒化状态。
+        existing = await trace_repo.get_by(db, trace_id=trace_id)
+        if existing is not None:
+            return existing.id
         t = await trace_repo.create(
             db, user_id=user_id, conversation_id=conversation_id,
             trace_id=trace_id, model_id=model_id, status="running",
         )
         return t.id
+    except IntegrityError as e:
+        # 并发插入/重复 tid: 必须回滚被污染的会话, 否则后续 db 操作会抛
+        # PendingRollbackError(断点续跑路径的 db.get 会 500)。回滚仅丢弃本条失败的 insert。
+        with suppress(Exception):
+            await db.rollback()
+        logger.warning("create_trace 重复(幂等忽略, 会话已回滚): %s", e)
+        return 0
     except Exception as e:
         logger.warning("create_trace failed: %s", e)
         return 0

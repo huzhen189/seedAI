@@ -699,14 +699,18 @@ async def chat(
             logger.info("[chat] 断点恢复(Redis) trace=%s stage=%s", tid, ck_stage)
         else:
             # ② Redis 未命中, 回退 MySQL
-            conv = await db.get(Conversation, conversation_id)
-            if conv and conv.checkpoint_data and conv.status == "paused":
-                try:
-                    ck_data = json.loads(conv.checkpoint_data)
-                    ck_stage = conv.checkpoint_stage or "?"
-                    logger.info("[chat] 断点恢复(MySQL) trace=%s stage=%s", tid, ck_stage)
-                except json.JSONDecodeError:
-                    logger.warning("[chat] checkpoint_data 解析失败, 降级为普通对话")
+            try:
+                conv = await db.get(Conversation, conversation_id)
+                if conv and conv.checkpoint_data and conv.status == "paused":
+                    try:
+                        ck_data = json.loads(conv.checkpoint_data)
+                        ck_stage = conv.checkpoint_stage or "?"
+                        logger.info("[chat] 断点恢复(MySQL) trace=%s stage=%s", tid, ck_stage)
+                    except json.JSONDecodeError:
+                        logger.warning("[chat] checkpoint_data 解析失败, 降级为普通对话")
+            except Exception as _ck_e:  # noqa: BLE001
+                # 会话不可用(断连/毒化等)时降级为普通对话, 绝不 500(防御 create_trace 之外的异常)
+                logger.warning("[chat] 断点恢复(MySQL) 失败, 降级为普通对话 conv=%s: %s", conversation_id, _ck_e)
         if ck_data:
             payload["checkpoint"] = ck_data
             payload["resume_mode"] = "correct" if correct else "resume"

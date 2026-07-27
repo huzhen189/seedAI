@@ -42,8 +42,18 @@ function submit() {
       <button v-if="!generating" class="send" data-track="发送" :disabled="!value.trim()" @click="submit">
         发送 ⏎
       </button>
-      <button v-else-if="cancelling" class="stop" disabled>取消中…</button>
-      <button v-else class="stop" data-track="停止" @click="emit('stop')">停止</button>
+      <template v-else>
+        <button v-if="cancelling" class="stop" disabled>取消中…</button>
+        <template v-else>
+          <button
+            class="queuesend"
+            title="加入队列, 当前生成完成后自动发送"
+            :disabled="!value.trim()"
+            @click="submit"
+          >＋排队</button>
+          <button class="stop" data-track="停止" @click="emit('stop')">停止</button>
+        </template>
+      </template>
     </div>
   </div>
 </template>
@@ -53,8 +63,10 @@ function submit() {
 .bar { display: flex; align-items: center; gap: 8px; }
 .row { display: flex; gap: 8px; align-items: flex-end; }
 textarea { flex: 1; resize: none; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-family: inherit; font-size: 14px; }
-.send, .stop { border: none; border-radius: 10px; padding: 10px 18px; font-weight: 600; cursor: pointer; color: #fff; }
+.send, .stop, .queuesend { border: none; border-radius: 10px; padding: 10px 18px; font-weight: 600; cursor: pointer; color: #fff; }
 .send { background: var(--brand); }
 .send:disabled { opacity: 0.5; cursor: not-allowed; }
 .stop { background: var(--err); }
+.queuesend { background: var(--brand); opacity: 0.9; }
+.queuesend:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

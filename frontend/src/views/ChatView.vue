@@ -83,8 +83,13 @@ function enqueue(text: string) {
 function dequeueAndSend() {
   const next = msgQueue.value.shift()
   if (!next) { queueVisible.value = false; return }
+  // 同步置位 generating: 关闭 onDone(false)→doSend 内部 await 之间的竞态窗口,
+  // 确保此期间用户输入仍走 enqueue(而非误判为「未生成中」直接并发发送)。
+  generating.value = true
   input.value = next.text
   doSend(next.text)
+  // 队列已全部取出发送完: 立即隐藏等待条(避免停在「等待发送 (0)」)
+  if (msgQueue.value.length === 0) queueVisible.value = false
 }
 
 function editQueueItem(idx: number) {
@@ -771,6 +776,29 @@ function findAssistantIdx(): number {
   return -1
 }
 
+// ── 气泡内实时思考(Problem 2): 标识当前正在生成的那条 assistant 气泡, 并暴露实时阶段/思考文本 ──
+const streamingMsgKey = computed<string | null>(() => {
+  if (!generating.value) return null
+  const sessions = allSessions.value
+  for (let si = sessions.length - 1; si >= 0; si--) {
+    const msgs = sessions[si].msgs
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'assistant') return `s${si}-${i}`
+    }
+  }
+  return null
+})
+// 实时思考文本: 优先取「进行中」步骤的思考, 否则取最近一个有思考文本的步骤
+const liveThinkText = computed(() => {
+  const active = thoughtSteps.value.find((s) => s.status === 'active' && s.think)
+  if (active) return active.think
+  const withThink = thoughtSteps.value.filter((s) => s.think)
+  return withThink.length ? withThink[withThink.length - 1].think : ''
+})
+const streamingStageLabel = computed(
+  () => STAGE_LABELS[currentStage.value] || currentStage.value || '思考中',
+)
+
 // 统一的 SSE 事件回调:把 node/think/plan/token 映射到本地状态。
 function makeCallbacks(assistantIdx: number): ChatCallbacks {
   return {
@@ -1103,6 +1131,9 @@ async function send() {
 }
 
 async function doSend(text: string) {
+  // 同步置位生成态: 必须在首个 await(自动建项目/建会话)之前,
+  // 否则 onDone→dequeueAndSend 的窗口期内 generating 仍为 false, 用户输入会绕过队列直接并发发送。
+  generating.value = true
   let pid = projectStore.currentProjectId
   // 首条对话无项目: 按对话文本自动建项目+会话
   if (pid == null) {
@@ -1266,8 +1297,21 @@ watch(
   () => projectStore.currentProjectId,
   async (id) => {
     if (id != null) {
+      // 清理旧项目的全部生成状态: 避免 trail-wrap / thoughtSteps / cancelSummary 等
+      // 在切换到空/新项目后残留旧项目数据
+      resetGenState()
+      generating.value = false
+      // 关闭旧项目可能还活着的 SSE 连接, 防止跨项目断点续跑
+      esRef.value?.close()
+      clearActiveGen()
+
       requirementDoc.value = null  // 切换项目, 先清空旧项目的需求文档
       await convStore.loadConversations(id)
+      // 空项目: 没有会话则清空消息和当前会话 id, 确保干净渲染
+      if (convStore.conversations.length === 0) {
+        convStore.messages = []
+        convStore.currentConvId = null
+      }
       await loadArtifacts()
       await nextTick(() => { setupScrollLoading(); scrollToBottom(false); handleSearchNav() })
       await maybeResume()
@@ -1420,6 +1464,9 @@ watch(pendingRetry, (r) => {
             :my-dims="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].dims : null"
             :my-comment="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].comment : null"
             :can-rate="!!auth.user"
+            :streaming="streamingMsgKey === 's' + si + '-' + i"
+            :stage-label="streamingMsgKey === 's' + si + '-' + i ? streamingStageLabel : ''"
+            :live-think="streamingMsgKey === 's' + si + '-' + i ? liveThinkText : ''"
             @rate="(p) => m.trace_id && onRate(m.trace_id, p)"
             @open-file="(name) => openArtifact(name, 'file')"
           />

@@ -44,3 +44,6 @@ frontend/vite.config.js
 frontend/vite.config.d.ts
 backend/ai_service/.env
 logs/
+
+# ===== 私人文件(绝不入库) =====
+胡振的简历*.docx
