@@ -492,7 +492,7 @@ async function loadArtifacts() {
     try {
       const resp = await fetch(`/api/conversations/${convStore.currentConvId}/status`)
       const s = await resp.json()
-      if (s.status === 'processing' && s.active_trace_id) {
+      if (s.status === 'running' && s.active_trace_id) {
         generating.value = true
         resume(convStore.currentConvId, s.active_trace_id)
       }

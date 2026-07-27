@@ -426,7 +426,20 @@ async def maybe_compress_summary(conversation_id: int, model: str, latest_user: 
 
 async def _sync_checkpoint_to_mysql(conversation_id: int, stage: str,
                                      ck_data: dict, progress_pct: int) -> None:
-    """后台异步: 将 Redis checkpoint 同步到 MySQL(不阻塞 SSE)"""
+    """将 Redis checkpoint 同步到 MySQL(conversations 表的 checkpoint_* 字段), 供服务重启后恢复断点; 不阻塞 SSE。"""
+    from .db import SessionLocal as _S
+    try:
+        async with _S() as s:
+            conv = await conv_repo.get_by_id(s, conversation_id)
+            if conv is not None:
+                await conv_repo.update(
+                    s, conv,
+                    checkpoint_stage=stage,
+                    checkpoint_data=json.dumps(ck_data, ensure_ascii=False),
+                    progress_pct=progress_pct,
+                )
+    except Exception as e:
+        logger.warning("[chat] checkpoint MySQL 同步失败 conv=%s: %s", conversation_id, e)
 
 
 async def _persist_worker_result(
@@ -471,17 +484,6 @@ async def _persist_worker_result(
                         trace_id, conversation_id, terminal_status, len(assistant_text))
     except Exception as e:
         logger.warning("[chat] Worker 兜底落库失败 trace=%s: %s", trace_id, e)
-    try:
-        from .db import SessionLocal as _S
-        async with _S() as s:
-            conv = await conv_repo.get_by_id(s, conversation_id)
-            if conv:
-                await conv_repo.update(s, conv,
-                    status="paused", checkpoint_stage=stage,
-                    checkpoint_data=json.dumps(ck_data, ensure_ascii=False),
-                    progress_pct=progress_pct)
-    except Exception as e:
-        logger.warning("[chat] checkpoint MySQL 同步失败 conv=%s: %s", conversation_id, e)
 
 
 async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
@@ -812,7 +814,7 @@ async def chat(
         qc_result: dict | None = None  # 捕获后置 QC 三裁判聚合结果(供落库 + 前端展示)
         requirement_doc_captured: dict | None = None  # 捕获需求文档(供落库 + 前端重启还原)
         event_seq: int = 0  # 结构化事件序号(供回放重建时间线)
-        terminal_status: str = "done"
+        terminal_status: str = "running"
         captured_level1: str = "unknown"  # 从 intent 事件捕获, 供统计
         event_counts: dict[str, int] = {}  # 各类 SSE 事件计数(供日志)
         logger.info("[chat] [5/8] 同进程 Worker 队列就绪 trace=%s", tid)
@@ -999,6 +1001,7 @@ async def chat(
                                     elif event == "done":
                                         # 正常完成: 标记已见终止事件, finally 不再触发自动取消
                                         saw_terminal = True
+                                        terminal_status = "done"
                                     logger.info(
                                             "[chat] ◇ SSE #%d type=%s stage=%s data=%.200s",
                                             event_seq, event, stage or "-", data,

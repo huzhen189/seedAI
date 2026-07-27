@@ -410,13 +410,13 @@ async def get_conversation_status(
         select(Trace).where(
             Trace.conversation_id == conversation_id,
             Trace.user_id == user.id,
-            Trace.status == "processing",
+            Trace.status == "running",
         ).order_by(Trace.started_at.desc()).limit(1)
     )).scalar_one_or_none()
 
     if active_trace:
         return {
-            "status": "processing",
+            "status": "running",
             "active_trace_id": active_trace.trace_id,
             "started_at": active_trace.started_at.isoformat() if active_trace.started_at else None,
         }
