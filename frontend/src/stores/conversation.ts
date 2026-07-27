@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import * as projectsApi from '../api/projects'
 import type { Conversation, Message } from '../types'
+import { loadCache, saveCache } from '../utils/messageCache'
 
 export interface PastSession {
   conv: Conversation
@@ -48,18 +49,35 @@ export const useConversationStore = defineStore('conversation', () => {
 
       if (targetConv) {
         currentConvId.value = targetConv.id
+
+        // ① localStorage 缓存优先: 立即渲染, 用户刷新后秒见历史对话
+        const cached = loadCache(projectId)
+        if (cached && cached.length) {
+          messages.value = cached as Message[]
+        }
+
         const c = await projectsApi.getConversation(targetConv.id)
-        const dbMsgs = c.messages || []
-        // 切换项目 → 无条件替换；同项目 → 保护生成中的乐观消息
+        // ② 从独立 /messages 端点拉取消息(Conversation 元数据不含 messages)
+        let dbMsgs: Message[] = []
+        try {
+          dbMsgs = await projectsApi.getConversationMessages(targetConv.id)
+        } catch {
+          // /messages 拉取失败 → 回退 localStorage 缓存(若已渲染)
+        }
+
+        // ③ 合并: 切换项目 → 无条件替换; 同项目 → 保护生成中的乐观消息
         const switching = _currentProjectId.value !== projectId
         if (switching) {
           messages.value = dbMsgs
-        } else {
+        } else if (dbMsgs.length > 0) {
           const localHasContent = messages.value.some(m => m.content)
           if (!localHasContent || dbMsgs.length > messages.value.length) {
             messages.value = dbMsgs
           }
         }
+        // ④ 更新 localStorage 缓存(保存最终展示的消息, 含本地乐观更新的部分)
+        if (messages.value.length) saveCache(projectId, messages.value)
+
         _currentProjectId.value = projectId
       } else {
         currentConvId.value = null
@@ -88,8 +106,7 @@ export const useConversationStore = defineStore('conversation', () => {
         // 加载历史会话的消息(与当前会话同接口, 保证格式统一)
         let msgs: Message[] = []
         try {
-          const c = await projectsApi.getConversation(conv.id)
-          msgs = c.messages || []
+          msgs = await projectsApi.getConversationMessages(conv.id)
         } catch { /* 忽略单条加载失败 */ }
         pastSessions.value.push({
           conv,
@@ -117,8 +134,7 @@ export const useConversationStore = defineStore('conversation', () => {
     if (s.messages.length === 0) {
       s.loading = true
       try {
-        const c = await projectsApi.getConversation(s.conv.id)
-        s.messages = c.messages || []
+        s.messages = await projectsApi.getConversationMessages(s.conv.id)
       } finally {
         s.loading = false
       }
@@ -168,9 +184,16 @@ export const useConversationStore = defineStore('conversation', () => {
       }
     }
     currentConvId.value = convId
+    const cached = loadCache(pid!)
+    if (cached && cached.length) messages.value = cached as Message[]
     const c = await projectsApi.getConversation(convId)
-    messages.value = c.messages || []
-    sessionStorage.setItem('activeConv_' + pid, String(convId))
+    let dbMsgs: Message[] = []
+    try { dbMsgs = await projectsApi.getConversationMessages(convId) } catch { /* ignore */ }
+    if (dbMsgs.length > 0) {
+      messages.value = dbMsgs
+      saveCache(pid!, dbMsgs)
+    }
+    sessionStorage.setItem('activeConv_' + pid!, String(convId))
   }
 
   function reset() {

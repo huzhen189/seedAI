@@ -1,4 +1,4 @@
-import type { Artifact, Conversation, Project, SearchItem } from '../types'
+import type { Artifact, Conversation, Project, SearchItem, Message } from '../types'
 import { del, get, patch, post } from './client'
 
 export { patch }
@@ -16,6 +16,9 @@ export const createConversation = (projectId: number, name?: string): Promise<Co
   post('/api/conversations', { project_id: projectId, name })
 export const getConversation = (id: number): Promise<Conversation> =>
   get(`/api/conversations/${id}`)
+/** 获取会话的消息列表(独立端点: /api/conversations/{id}/messages) */
+export const getConversationMessages = (id: number): Promise<Message[]> =>
+  get(`/api/conversations/${id}/messages`)
 export const renameConversation = (id: number, name: string): Promise<Conversation> =>
   patch(`/api/conversations/${id}`, { name })
 export const deleteConversation = (id: number): Promise<null> =>
