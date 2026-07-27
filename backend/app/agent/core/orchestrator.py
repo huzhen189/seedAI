@@ -109,6 +109,13 @@ class Orchestrator:
         layers = build_layers(sub_tasks)
         logger.info("[编排] 开始执行 策略=%s 层数=%d 子任务=%d",
                     strategy, len(layers), len(sub_tasks))
+        # 精细日志:打印完整 subtask 列表(目标/技能/依赖/风险/状态)
+        for _i, _s in enumerate(sub_tasks):
+            logger.info(
+                "[编排][subtask #%d] id=%s goal=%s skill=%s risk=%s deps=%s status=%s",
+                _i, _s.id, (_s.goal or "")[:80], _s.selected_skill, _s.risk_level,
+                _s.dependencies, _s.status,
+            )
         results: list[SubTaskResult] = []
 
         for layer_idx, layer in enumerate(layers):

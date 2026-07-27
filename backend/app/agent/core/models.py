@@ -104,12 +104,22 @@ class SharedContext:
     requirement_doc: Optional[dict] = None
     artifacts: list = field(default_factory=list)      # 已生成文件
     dep_outputs: dict[str, Any] = field(default_factory=dict)  # sub_task_id → 产出摘要
+    # §4 角色重构:强 Schema 交接物(按角色名索引:product/design/dev/qa),
+    # 由 RoleOrchestrator 捕获并写入,供下游角色按 SOP 顺序消费(上下文隔离)。
+    handoffs: dict[str, Any] = field(default_factory=dict)
     conversation_summary: str = ""
     conversation_history: list = field(default_factory=list)
 
     def register_output(self, sub_task_id: str, output: Any) -> None:
         """子任务完成后注册产出,供下游依赖方读取。"""
         self.dep_outputs[sub_task_id] = output
+
+    def register_handoff(self, sub_task_id: str, handoff: Any) -> None:
+        """§4:注册强 Schema 交接物(同时保留 dep_outputs 兼容,并按角色名索引)。"""
+        self.dep_outputs[sub_task_id] = getattr(handoff, "summary", str(handoff))
+        role = getattr(handoff, "role", None)
+        if role:
+            self.handoffs[role] = handoff
 
     def get_dep_outputs(self, deps: list[str]) -> str:
         """把依赖方的产出格式化为可注入的上下文文本。"""

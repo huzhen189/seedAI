@@ -12,12 +12,55 @@ ToolEntry 字段严格对齐设计文档 §5.9:
 """
 
 from __future__ import annotations
+import functools
 import logging
 
 import inspect
 from dataclasses import dataclass
 from typing import Any, Callable
 logger = logging.getLogger("ai_service.registry.tool_registry")
+
+
+def _safe_repr(obj: Any, limit: int = 500) -> str:
+    """安全截断 repr,避免超长参数/结果刷屏或泄露敏感内容。"""
+    try:
+        s = repr(obj)
+    except Exception:
+        s = f"<{type(obj).__name__}>"
+    return s[:limit]
+
+
+def _wrap_logged(func: Callable) -> Callable:
+    """为 tool 函数包一层入参/出参日志(精细日志要求:tool 入参出参打印)。
+
+    同步/异步自适应,保留原函数签名(functools.wraps)以便 _infer_schema 正常工作。
+    """
+    name = getattr(func, "__name__", "tool")
+
+    if inspect.iscoroutinefunction(func):
+        @functools.wraps(func)
+        async def _async_wrapper(*args, **kwargs):
+            logger.info("[Tool][入参] %s args=%s kwargs=%s", name, args, _safe_repr(kwargs))
+            try:
+                res = await func(*args, **kwargs)
+                logger.info("[Tool][出参] %s -> %s", name, _safe_repr(res))
+                return res
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[Tool][异常] %s 错误=%s: %s", name, type(e).__name__, e)
+                raise
+        return _async_wrapper
+
+    @functools.wraps(func)
+    def _sync_wrapper(*args, **kwargs):
+        logger.info("[Tool][入参] %s args=%s kwargs=%s", name, args, _safe_repr(kwargs))
+        try:
+            res = func(*args, **kwargs)
+            logger.info("[Tool][出参] %s -> %s", name, _safe_repr(res))
+            return res
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[Tool][异常] %s 错误=%s: %s", name, type(e).__name__, e)
+            raise
+    return _sync_wrapper
 
 
 @dataclass
@@ -77,6 +120,8 @@ def register_tool(
     risk: str = "safe",
     description: str = "",
 ) -> ToolEntry:
+    # 包裹日志:统一打印 tool 入参/出参(精细日志要求)
+    func = _wrap_logged(func)
     entry = ToolEntry(
         name=name,
         schema=schema,
@@ -87,6 +132,19 @@ def register_tool(
     )
     ToolRegistry.register(entry)
     return entry
+
+
+async def invoke(name: str, *args, **kwargs) -> Any:
+    """统一执行入口(可选):经此调用 tool 自动带入参/出参日志。
+
+    自动适配 sync/async func;返回执行结果。找不到工具时抛出 KeyError。
+    """
+    entry = ToolRegistry.get(name)
+    if entry is None:
+        raise KeyError(f"Tool '{name}' 未注册")
+    if inspect.iscoroutinefunction(entry.func):
+        return await entry.func(*args, **kwargs)
+    return entry.func(*args, **kwargs)
 
 
 def _infer_schema(func: Callable, description: str) -> dict:

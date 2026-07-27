@@ -51,6 +51,19 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
     v1.2.0: 收敛为单一分类器(cascade), 移除 SIR(classify_v2)双轨分支。
     """
     t0 = time.time()
+    # 精细日志[发送结构体]:打印意图识别的完整入参(消息数 + 末条用户输入 + 全部透传参数)
+    _last_user = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            _last_user = (m.get("content", "") or "")[:200]
+            break
+    logger.info(
+        "[意图][发送结构体] msgs=%d model=%s "
+        "conversation_id=%s project_status=%s has_req_doc=%s user_id=%s project_id=%s "
+        "context_hint=%.80s project_constraints=%s | 末条用户输入=%.200s",
+        len(messages), model_id, conversation_id, project_status, has_requirement_doc,
+        user_id, project_id, context_hint or "无", project_constraints or [], _last_user,
+    )
     logger.info("[意图] ENTER 混合级联 msgs=%d model=%s", len(messages), model_id)
     # 单一分类器: 混合级联(不再有 SIR 回退分支, 避免双轨不一致)
     result = await classify_v3(
@@ -71,6 +84,14 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
     logger.info("[意图v2] %s→%s | 决策=%s skill=%s | 置信度%.0f%% | 耗时%.1fs",
                 label1, label2, result.decision, result.selected_skill,
                 result.intent["confidence"] * 100, elapsed)
+    # 精细日志[返回结构体]:打印意图识别返回的完整 PipelineResult 关键字段
+    logger.info(
+        "[意图][返回结构体] intent=%s industry=%s decision=%s selected_skill=%s "
+        "risk=%s sub_tasks=%d split_reason=%s clarify=%s",
+        result.intent, result.intent.get("industry"), result.decision, result.selected_skill,
+        result.risk.risk_level if result.risk else "?", len(result.sub_tasks),
+        result.split_reason or "", result.clarify_questions or [],
+    )
     return {
         "level1": l1, "level2": l2,
         "confidence": result.intent["confidence"],

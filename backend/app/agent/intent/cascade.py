@@ -358,6 +358,9 @@ async def _classify_segment(
     candidates = await asyncio.to_thread(retrieve_intents, current_user_msg, settings.intent_top_k)
     top_score = candidates[0]["score"] if candidates else 0.0
     top_intent_id = candidates[0]["intent_id"] if candidates else ""
+    # 精细日志:打印本次召回的全部向量(意图 + 相似度),便于排查召回质量
+    _cand_dump = [(c.get("intent_id"), round(float(c.get("score", 0.0)), 3)) for c in candidates]
+    logger.info("[级联][%s] 召回向量 top_k=%d 条: %s", req_id, settings.intent_top_k, _cand_dump)
 
     # ── [3] 向量 super-fast 直通: 强规则 + top1 高相似且对齐 → 跳过 LLM ──
     if strong_rule and candidates and top_intent_id == strong_rule.intent_id and top_score >= SUPER_FAST:

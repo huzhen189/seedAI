@@ -25,7 +25,21 @@ async def run_skill(
     intent_info: Optional[dict] = None,
     **extra_kwargs,  # 透传: requirement_doc, project_status, conversation_summary 等
 ) -> AsyncGenerator[Dict[str, Any], None]:
-    """统一入口:意图 → 分发 → Skill 执行 → done。"""
+    """统一入口:意图 → 分发 → Skill 执行 → done。
+
+    精细日志(skill/agent 入参出参):
+    - [入参] 打印本次执行的完整入参结构体(skill/model/意图/透传参数/消息数)。
+    - [出参] 打印产出事件数 + 文本产出摘要(截断)。
+    §4 角色编排:按技能映射角色,记录 ai:role:* 统计(单一路径,避免双记)。
+    """
+    # ── [入参] 精细日志:完整入参结构体 ──
+    _extra_keys = {k: (f"<{type(v).__name__}>" if not isinstance(v, (str, int, float, bool, list, dict)) else v)
+                   for k, v in extra_kwargs.items()}
+    logger.info(
+        "[Runner][入参] skill=%s model=%s trace=%s msgs=%d intent_info=%s extra_kwargs=%s",
+        skill_name, model_id, trace_id, len(messages),
+        intent_info, _extra_keys,
+    )
     logger.info(
         "▶ 开始执行 trace=%s skill=%s model=%s intent=%s/%s msgs=%d",
         trace_id, skill_name, model_id,
@@ -92,6 +106,8 @@ async def run_skill(
     handler = entry.handler
     t0 = time.time()
     event_cnt = 0
+    out_buf: list[str] = []  # 收集文本产出,供出参日志摘要
+    _ok = True
     try:
         if entry.is_graph or inspect.isasyncgenfunction(handler):
             logger.info("[Runner] [2/3] 开始执行 skill=%s (async生成器)", entry.name)
@@ -107,8 +123,13 @@ async def run_skill(
             ):
                 event_cnt += 1
                 if isinstance(item, dict) and "event" in item:
+                    if item.get("event") == "token":
+                        d = item.get("data")
+                        if isinstance(d, str):
+                            out_buf.append(d)
                     yield item
                 else:
+                    out_buf.append(item if isinstance(item, str) else str(item))
                     yield ev("token", data=item if isinstance(item, str) else str(item))
         else:
             logger.info("[Runner] [2/3] 开始执行 skill=%s (同步)", entry.name)
@@ -117,12 +138,28 @@ async def run_skill(
             if isinstance(result, dict) and "event" in result:
                 yield result
             else:
+                out_buf.append(result if isinstance(result, str) else str(result))
                 yield ev("token", data=result if isinstance(result, str) else str(result))
     except Exception as e:
+        _ok = False
         elapsed = (time.time() - t0) * 1000
         logger.error("[Runner] skill=%s 执行异常 耗时=%.0fms 错误=%s: %s",
                     entry.name, elapsed, type(e).__name__, e)
         yield ev("error", message=f"{type(e).__name__}: {e}")
     elapsed = (time.time() - t0) * 1000
+    # ── [出参] 精细日志:事件数 + 文本产出摘要 ──
+    out_text = "".join(out_buf)
+    logger.info("[Runner][出参] skill=%s 事件数=%d 文本长度=%d 摘要=%.200s",
+                entry.name, event_cnt, len(out_text), out_text.replace("\n", " "))
     logger.info("[Runner] [3/3] 执行完毕 skill=%s 事件数=%d 耗时=%.0fms", entry.name, event_cnt, elapsed)
+    # ── §4 角色编排统计(单一路径记录,避免双记) ──
+    try:
+        from ..roles.handoff import map_skill_to_role
+        from ..analytics import record_role_dispatch
+        role = map_skill_to_role(skill_name)
+        if role:
+            status = "done" if _ok else "failed"
+            await record_role_dispatch(role, skill_name, status, elapsed)
+    except Exception as _re:  # noqa: BLE001
+        logger.debug("[Runner] 角色统计记录失败(忽略): %s", _re)
     yield ev("done")

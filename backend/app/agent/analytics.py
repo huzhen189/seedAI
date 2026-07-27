@@ -59,6 +59,7 @@ P_REV = "ai:rev"        # v1.2.3 生成内 Reviewer 自审统计
 P_SAFE = "ai:safe"      # v1.2.3 入口安全网关统计
 P_LLM = "ai:llm"        # v1.2.3 LLM Provider 调用统计
 P_MI = "ai:mi"          # v1.2.5 多意图 A+B 路由路径统计(hybrid=方案B / llm=方案A 升级 / 占比)
+P_ROLE = "ai:role"       # §4 角色编排:四角色(product/design/dev/qa)分发/状态/耗时统计
 
 # 模块级懒加载 Redis 客户端(进程内单例, 连接失败降级为 None)
 _redis_client = None
@@ -401,6 +402,73 @@ async def multi_intent_stats() -> dict:
         }
     except Exception as e:  # noqa: BLE001
         logger.warning("AI analytics multi_intent_stats failed: %s", e)
+        return {"total": 0, "available": True, "error": str(e)}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 11. §4 角色编排统计(四角色 product/design/dev/qa)
+# ──────────────────────────────────────────────────────────────────────
+
+async def record_role_dispatch(
+    role: str,
+    skill: str,
+    status: str,
+    duration_ms: float = 0.0,
+) -> None:
+    """§4 角色编排:每次由 RoleAgent 分发执行一次技能的统计。
+
+    role   ∈ {product, design, dev, qa}
+    skill  : 实际执行的技能名(agent_requirement / agent_design / agent_build ...)
+    status ∈ {done, failed, blocked, skipped}
+    键: ai:role:total / ai:role:role:{role}:{status} / ai:role:skill:{skill}:{status}
+        / ai:role:duration(zset)
+    与现有 an:subtask 互补:an:subtask 是「技能级」,ai:role:* 是「角色级」,
+    便于观察 SOP 各阶段(产品→设计→开发→评审)的负载与成功率。
+    """
+    try:
+        r = _get_redis()
+        if r is None:
+            return
+        await r.hincrby(f"{P_ROLE}:total", "count", 1)
+        if role:
+            await r.hincrby(f"{P_ROLE}:role:{role}", status, 1)
+        if skill:
+            await r.hincrby(f"{P_ROLE}:skill:{skill}", status, 1)
+        if duration_ms:
+            await r.zadd(f"{P_ROLE}:duration", {uuid.uuid4().hex: duration_ms})
+            await r.zremrangebyrank(f"{P_ROLE}:duration", 0, -(LATENCY_MAX + 1))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("AI analytics record_role_dispatch failed: %s", e)
+
+
+async def role_stats() -> dict:
+    """读取 §4 角色编排统计(四角色状态分布 / per-skill 状态分布 / 耗时)。"""
+    try:
+        r = _get_redis()
+        if r is None:
+            return {"total": 0, "available": False}
+        total = int((await r.hget(f"{P_ROLE}:total", "count")) or 0)
+        if total == 0:
+            return {"total": 0, "available": True}
+        # 四角色状态分布
+        roles: dict = {}
+        for role in ("product", "design", "dev", "qa"):
+            h = {k: int(v) for k, v in (await r.hgetall(f"{P_ROLE}:role:{role}") or {}).items()}
+            if h:
+                roles[role] = h
+        # per-skill 状态分布
+        skill_keys = await r.keys(f"{P_ROLE}:skill:*")
+        skill_stats: dict = {}
+        for k in skill_keys:
+            key = k.decode() if isinstance(k, bytes) else k
+            sk = key.replace(f"{P_ROLE}:skill:", "")
+            h = {kk: int(vv) for kk, vv in (await r.hgetall(key) or {}).items()}
+            skill_stats[sk] = h
+        dur = await _pct_zset(r, f"{P_ROLE}:duration")
+        return {"total": total, "available": True,
+                "roles": roles, "per_skill": skill_stats, "duration_ms": dur}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("AI analytics role_stats failed: %s", e)
         return {"total": 0, "available": True, "error": str(e)}
 
 
@@ -818,6 +886,7 @@ async def ai_stats_summary() -> dict:
             "safety": await safety_stats(),
             "llm": await llm_stats(),
             "v090": await v090_stats(),
+            "role": await role_stats(),
         }
     except Exception as e:  # noqa: BLE001
         logger.warning("AI analytics ai_stats_summary failed: %s", e)

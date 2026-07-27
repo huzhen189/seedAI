@@ -663,6 +663,22 @@ async def worker_loop(concurrency: int = 1):
                 logger.info("[Worker] [3/6] 上下文检测 输入=\"%.80s\" ctx_hint=%.40s summary=%.40s (+%.0fms)",
                            user_text, ctx_hint[:40] if ctx_hint else "无", summary[:40] if summary else "无",
                            (time.time() - t_job) * 1000)
+                # 精细日志:打印本次所有上下文内容(完整,不截断关键信息)
+                _msg_preview = [
+                    {"role": m.get("role"), "len": len(m.get("content", "") or "")}
+                    for m in messages
+                ]
+                _doc_preview = (doc if isinstance(doc, str) else json.dumps(doc, ensure_ascii=False)) if doc else ""
+                logger.info(
+                    "[Worker][3/6][上下文内容] user_id=%s project_id=%s version=%s "
+                    "project_status=%s has_req_doc=%s\n"
+                    "  ctx_hint=%s\n  summary=%s\n  project_system_prompt=%.300s\n"
+                    "  project_constraints=%s\n  messages(role/len)=%s\n"
+                    "  requirement_doc(长度=%d)=%.1500s",
+                    user_id, project_id, version, proj_status, bool(doc),
+                    ctx_hint or "无", summary or "无", proj_prompt[:300] if proj_prompt else "无",
+                    proj_constraints or [], _msg_preview, len(_doc_preview), _doc_preview,
+                )
                 # ── [3.5] 澄清续跑(clarified 重发): 跳过意图分类, 复用已存意图直接路由 ──
                 #    用户在前端 clarify 卡选完并确认后, 带 clarified=1 重发(答案作为 q 已随 messages 追加)。
                 #    这里直接用首轮判定存的 pending_clarify 意图路由执行, 补齐槽位, 不走 2 轮对话。
@@ -849,6 +865,8 @@ async def worker_loop(concurrency: int = 1):
                     else:
                         from ..core.orchestrator import Orchestrator
                         from ..core.models import SharedContext, SubTask
+                        from ..roles.handoff import ROLE_ORCHESTRATOR_ENABLED
+                        from ..roles.orchestrator import RoleOrchestrator
 
                         def _dict_to_subtask(d: dict) -> SubTask:
                             valid = {k: v for k, v in d.items() if k in SubTask.__dataclass_fields__}
@@ -862,7 +880,13 @@ async def worker_loop(concurrency: int = 1):
                             conversation_summary=summary,
                             conversation_history=messages,
                         )
-                        orch = Orchestrator()
+                        # §4 角色编排层:默认开启(ROLE_ORCHESTRATOR_ENABLED),关闭则回退原生 Orchestrator
+                        if ROLE_ORCHESTRATOR_ENABLED:
+                            orch = RoleOrchestrator()
+                            logger.info("[Worker] [5/6] 启用角色编排层 RoleOrchestrator(SOP:产品→设计→开发→评审)")
+                        else:
+                            orch = Orchestrator()
+                            logger.info("[Worker] [5/6] 角色编排层已关闭,回退原生 Orchestrator")
                         logger.info("[Worker] [5/6] 多意图编排 sub_tasks=%d confirmed=%s",
                                     len(sub_tasks), confirmed_subtasks)
                         # 编排统计埋点(补充 6: 多意图必接统计)
