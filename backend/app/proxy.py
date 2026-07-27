@@ -427,6 +427,50 @@ async def maybe_compress_summary(conversation_id: int, model: str, latest_user: 
 async def _sync_checkpoint_to_mysql(conversation_id: int, stage: str,
                                      ck_data: dict, progress_pct: int) -> None:
     """后台异步: 将 Redis checkpoint 同步到 MySQL(不阻塞 SSE)"""
+
+
+async def _persist_worker_result(
+    trace_id: str,
+    conversation_id: int,
+    user_id: int,
+    model_id: str,
+    user_text: str,
+    assistant_text: str,
+    terminal_status: str = "done",
+    skill_name: str = "",
+) -> None:
+    """Worker 侧兜底落库: 与 SSE publisher 的 _do_persist 互补。
+    
+    当 SSE 客户端断开时 publisher 的 finally 仍会运行 _do_persist,
+    但若 Worker 在 publisher 退出流读取后才产出内容, 该内容无法被 publisher 捕获。
+    本函数在 Worker 完成时直接写 DB(幂等 upsert, 不依赖 SSE 通道)。
+    """
+    from .db import SessionLocal as _S
+
+    try:
+        async with _S() as s:
+            conv = await conv_repo.get_by(s, id=conversation_id, user_id=user_id)
+            if conv is None:
+                return
+            # user 消息(幂等: 已有则跳过)
+            existing_user = await message_repo.get_by_trace(s, trace_id, "user")
+            if existing_user is None and user_text:
+                s.add(Message(
+                    conversation_id=conv.id, role="user",
+                    content=user_text, model_id=model_id, trace_id=trace_id,
+                ))
+            # assistant 消息(幂等 upsert)
+            if assistant_text.strip():
+                await message_repo.upsert_assistant(s, conv.id, trace_id, assistant_text, model_id)
+            # 更新会话标题(首次)
+            if not conv.name and user_text:
+                conv.name = user_text[:20]
+            conv.updated_at = datetime.utcnow()
+            await s.commit()
+            logger.info("[chat] Worker 兜底落库完成 trace=%s conv=%s status=%s chars=%d",
+                        trace_id, conversation_id, terminal_status, len(assistant_text))
+    except Exception as e:
+        logger.warning("[chat] Worker 兜底落库失败 trace=%s: %s", trace_id, e)
     try:
         from .db import SessionLocal as _S
         async with _S() as s:

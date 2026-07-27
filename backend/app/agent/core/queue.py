@@ -1183,6 +1183,26 @@ async def worker_loop(concurrency: int = 1):
                         logger.debug("[Worker] 代码索引失败: %s", _ie)
                 logger.info("[Worker] [6/6] 执行完毕 trace=%s skill=%s 共发出%d个事件 总耗时%.0fms",
                            trace_id, skill_name, event_cnt, (time.time() - t_job) * 1000)
+                # [7/7] ── 兜底落库: 无论 SSE 客户端是否还活着, Worker 侧直接保存对话消息到 DB。
+                #   解决「客户端断开→_do_persist 缺失→刷新后对话空白」的问题(与 publisher finally 互补, upsert 幂等无重复风险)
+                if qc_assistant_text.strip():
+                    try:
+                        _conv_id = job.get("conversation_id"); _uid = job.get("user_id")
+                        if _conv_id and _uid:
+                            from ...proxy import _persist_worker_result
+                            await _persist_worker_result(
+                                trace_id=trace_id,
+                                conversation_id=_conv_id,
+                                user_id=_uid,
+                                model_id=model_id,
+                                user_text=qc_user_text,
+                                assistant_text=qc_assistant_text,
+                                terminal_status=done_event.get("event") == "paused" and "paused" or "done",
+                                skill_name=skill_name,
+                            )
+                            logger.info("[Worker] [7/7] 兜底落库完成 trace=%s chars=%d", trace_id, len(qc_assistant_text))
+                    except Exception as _pe:  # noqa: BLE001
+                        logger.warning("[Worker] [7/7] 兜底落库失败(忽略) trace=%s: %s", trace_id, _pe)
                 # 统计: 单 skill 路径成效(成功/失败/中断 + 耗时), 供「系统分析」skill 维度成功率
                 try:
                     _ok = done_event is not None and not (qc_result and qc_result.get("error"))
