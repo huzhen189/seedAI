@@ -700,6 +700,32 @@ function getActiveGen(): { convId: number; traceId: string } | null {
   return null
 }
 
+// ---- 用户级生成状态(localStorage, 跨标签持久化, 供 F5 刷新后判定是否续接) ----
+const USER_STATUS_KEY = 'seedai:userStatus'
+interface UserStatus {
+  convId: number
+  traceId: string
+  status: 'running' | 'paused' | 'idle'
+  after: string | null
+}
+function loadUserStatus(): UserStatus | null {
+  try {
+    const raw = localStorage.getItem(USER_STATUS_KEY)
+    if (!raw) return null
+    const o = JSON.parse(raw)
+    if (o && typeof o.convId === 'number' && o.traceId) return o
+  } catch {
+    /* 忽略 */
+  }
+  return null
+}
+function saveUserStatus(s: UserStatus) {
+  try { localStorage.setItem(USER_STATUS_KEY, JSON.stringify(s)) } catch { /* 忽略 */ }
+}
+function clearUserStatus() {
+  try { localStorage.removeItem(USER_STATUS_KEY) } catch { /* 忽略 */ }
+}
+
 // ---- 生成中消息本地快照(刷新/崩溃恢复) ----
 const DRAFT_KEY_PREFIX = 'seedai:draft:'
 
@@ -889,6 +915,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planNodes.value = []
       planPreview.value = null
       clearActiveGen()
+      clearUserStatus()
       v4Pause.value = null
       clearDraft()
       loadArtifacts()
@@ -905,6 +932,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planNodes.value = []
       errorMsg.value = '已取消'
       clearActiveGen()
+      clearUserStatus()
       v4Pause.value = null
       if (projectStore.currentProjectId) {
         convStore.loadConversations(projectStore.currentProjectId).then(() => scrollToBottom(false))
@@ -941,6 +969,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       errorMsg.value = '暂不支持此功能，请尝试其他类型请求'
       clearActiveGen()
+      clearUserStatus()
     },
     onClarify: (d) => {
       // SIR 澄清: 意图模糊/缺规格 → 底部浮动卡片, 含结构化选项 + 自由输入 + 确认按钮
@@ -961,12 +990,14 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       clarifySelected.value = []
       clarifyFreeText.value = ''
       clearActiveGen()
+      clearUserStatus()
     },
     onBlock: (d: BlockEvent) => {
       generating.value = false
       finished.value = true
       blockReason.value = d.reason || '该操作存在高风险，已被安全策略拦截'
       clearActiveGen()
+      clearUserStatus()
     },
     onConfirm: (d: ConfirmEvent) => {
       generating.value = false
@@ -1012,7 +1043,13 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planNodes.value = []
       errorMsg.value = m
       clearActiveGen()
+      clearUserStatus()
       v4Pause.value = null
+    },
+    // F5 续接游标: 每个 SSE 事件回传 lastEventId → 存 localStorage 供刷新后 after 续接
+    onEventId: (id: string) => {
+      const us = loadUserStatus()
+      if (us) saveUserStatus({ ...us, after: id })
     },
     onQc: (data: QcResult) => {
       // 后置 QC 三裁判结果:按当前 trace_id 存入 qcMap, 气泡徽标读取
@@ -1189,6 +1226,8 @@ async function doSend(text: string) {
   traceId.value = genTraceId()
   const cid = convStore.currentConvId!
   setActiveGen(cid, traceId.value)
+  // v4 续接: 发送即记录本地 userStatus(running), 供 F5 后据 after 游标续接
+  saveUserStatus({ convId: cid, traceId: traceId.value, status: 'running', after: null })
 
   // C13 清理: 本地 WebLLM 推理已弃用(v1.0 起统一走服务端), 原死代码块已删除。
   // 若未来需恢复, 历史实现见 git 历史(src/webllm/* 已一并移除)。
@@ -1272,19 +1311,50 @@ async function resume(convId: number, tid: string, q?: string) {
 }
 
 // 若当前存在未完成的 active 生成,则重连恢复(刷新/切会话时调用)。
+// v4 续接: 刷新不暂停后端 —— 据 localStorage 的 userStatus 判定, 若仍在 running/paused,
+// 用记录的 after 游标重新订阅 /api/chat(不带 q/resume), 后端命中 stream_exists 则回放+续实时。
 async function maybeResume() {
-  const ag = getActiveGen()
-  if (!ag || generating.value) return
-  if (convStore.currentConvId !== ag.convId) {
+  const us = loadUserStatus()
+  if (!us || generating.value) return
+  if (us.status !== 'running' && us.status !== 'paused') { clearUserStatus(); return }
+  if (convStore.currentConvId !== us.convId) {
     await convStore.loadConversations(projectStore.currentProjectId!)
   }
-  resume(ag.convId, ag.traceId)
+  resumeStream(us.convId, us.traceId, us.after)
+}
+
+// 续接在跑的流(F5 刷新/重开/切会话): 不带 q/resume, 后端 stream_exists 命中则回放历史并续接实时。
+// 区别于 resume()(断点续跑: resume:true 删旧流重新入队, 用于用户主动暂停后继续)。
+async function resumeStream(convId: number, tid: string, after?: string | null) {
+  if (generating.value) return
+  resetGenState()
+  const idx = findAssistantIdx()
+  if (idx >= 0) convStore.messages[idx].content = ''
+  generating.value = true
+  traceId.value = tid
+  setActiveGen(convId, tid)
+  let assistantIdx = idx
+  if (assistantIdx < 0) {
+    convStore.messages.push({
+      role: 'assistant', content: '', conversation_id: convId, id: 0,
+      created_at: '', model_id: model.value,
+    } as any)
+    assistantIdx = convStore.messages.length - 1
+  }
+  openEs({
+    model: model.value,
+    traceId: tid,
+    conversationId: convId,
+    ...(after ? { after } : {}),
+    cb: makeCallbacks(assistantIdx),
+  })
 }
 
 // v4 断点复联: 离开页面(新标签)后重开, 据 my-info 恢复「已暂停」横幅(区别于同标签刷新的 maybeResume)。
 // 同标签刷新: sessionStorage 仍有 activeGen → 走 maybeResume 无缝续跑; 此处仅处理新标签场景。
 async function restoreFromMyInfo() {
   if (!auth.user.value) return
+  if (loadUserStatus()) return  // 已由 maybeResume(localStorage)处理, 避免重复续跑
   if (getActiveGen()) return  // 同标签刷新: 交由 maybeResume 处理, 避免重复续跑
   let info: MyInfoResp
   try {

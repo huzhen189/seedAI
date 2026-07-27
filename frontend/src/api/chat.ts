@@ -12,6 +12,8 @@ export interface ChatCallbacks {
   onDone?: () => void
   onAborted?: () => void
   onError?: (msg: string) => void
+  /** SSE 事件 id 回传(lastEventId), 供前端记录续接游标(after) */
+  onEventId?: (id: string) => void
   /** 主模型不可用时触发(data 含 failed/suggested/message),前端弹框待用户选替代模型后重发 */
   onRetry?: (data: RetryEvent) => void
   /** 用户断开连接, 已保存断点(data 含 stage/progress) */
@@ -182,6 +184,22 @@ export function startChat(opts: StartChatOptions): EventSource {
     }
     // 无 data: 网络抖动 → EventSource 会自动重连, 静默不干预(避免日志刷屏)
   })
+
+  // 统一追踪 lastEventId: 每个命名事件都携带后端发的 `id:` 帧,
+  // 浏览器自动维护 event.lastEventId; 此处转交上层用于 F5 续接游标(after)。
+  const TRACKED_TYPES = [
+    'node', 'think', 'plan', 'token', 'intent', 'options', 'alternatives',
+    'unsupported', 'block', 'confirm', 'orchestration', 'subtask_start',
+    'subtask_done', 'subtask_fail', 'merge', 'cancel_summary', 'plan_preview',
+    'paused', 'clarify', 'requirement_doc', 'preview', 'degraded', 'qc',
+    'refined', 'done', 'aborted', 'retry', 'error',
+  ]
+  for (const t of TRACKED_TYPES) {
+    es.addEventListener(t, (ev) => {
+      const id = (ev as MessageEvent).lastEventId
+      if (id) opts.cb.onEventId?.(id)
+    })
+  }
 
   return es
 }

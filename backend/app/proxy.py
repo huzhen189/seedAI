@@ -196,6 +196,20 @@ def _sse_auth_error() -> StreamingResponse:
     return _sse_error_frame("AUTH_REQUIRED", "Missing authentication")
 
 
+def _sse_done_event() -> StreamingResponse:
+    """v4 续接守卫: 带 after 但流已消失(过期/从未生成)时, 直接下发 done 事件干净收尾,
+    让前端 resumeStream 的 onDone 正常触发(复位 generating/清理 userStatus), 绝不空 q 重入队。
+    """
+    async def gen():
+        yield b"event: done\ndata: {}\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 def _map_upstream_error(status: int, body: bytes) -> tuple[str, str]:
     """把上游 HTTP 错误状态码/响应体映射成(错误码, 中文提示)。"""
     if status == 429:
@@ -812,32 +826,16 @@ async def chat(
             logger.warning("[chat] 连接登记异常 trace=%s: %s", tid, e)
 
         async def _on_disconnect() -> int:
-            """断连清理(v4 断点复联): 移除本连接; 若再无活跃客户端且本次未正常结束,
-            置 pause(offline_timeout) 让 Worker 跑完当前阶段后暂停, 而非立即 abort。
+            """断连清理(v4 续接): 仅移除本连接登记; 不主动暂停 Worker —— 让生成继续跑完,
+            前端 F5 后用本地记录的 after 游标重新订阅 /api/chat 即可续接回放(含已产生事件)。
 
-            返回剩余活跃连接数(异常时返回 1, 保守地视为仍有其他客户端 → 不暂停/不置 aborted,
-            避免误杀他人仍在消费的生成)。
+            返回剩余活跃连接数(异常时返回 1, 保守地视为仍有其他客户端)。
             """
             try:
                 rc = await get_redis()
                 await rc.srem(f"clients:{tid}", conn_id)
                 remaining = await rc.scard(f"clients:{tid}")
-                if after is None and not saw_terminal and remaining == 0:
-                    # v4: 断连即暂停(非取消) → Worker 在下一阶段边界暂停并落 checkpoint, 可续跑。
-                    # 立即把权威状态翻为 paused(不等 Worker 跑完阶段边界), 让刷新后的 my-info 能
-                    # 立刻看到「已暂停」并进入续传逻辑; Worker 达阶段边界会落 checkpoint 并发布
-                    # paused 事件, 与此处幂等。收口到此一处, 避免 finally/读循环/发送失败多路径
-                    # 重复写状态、且遗漏 finally 路径(导致状态停在 running 的竞态窗口)。
-                    q = get_queue()
-                    await q.set_pause(tid, "offline_timeout")
-                    await touch_user_state(
-                        user.id, status="paused",
-                        pause_reason="offline_timeout",
-                        pending_decision="continue_instruction")
-                    logger.info("[chat] 断连→离线暂停已触发(无活跃客户端) trace=%s", tid)
-                else:
-                    logger.info("[chat] 跳过暂停 after=%s saw_terminal=%s remaining=%d trace=%s",
-                                bool(after), saw_terminal, remaining, tid)
+                logger.info("[chat] 断连清理 trace=%s remaining=%d (不暂停, 允许续接)", tid, remaining)
                 return remaining
             except Exception as e:
                 logger.warning("[chat] 断连清理异常 trace=%s: %s", tid, e)
@@ -897,6 +895,8 @@ async def chat(
                     async def _sse_lines():
                         # 把同进程 Worker 产出的事件字典 -> 标准 SSE 文本行序列,
                         # 复用下方既有的 `if raw_line == ""` 解析分支(零逻辑改动)。
+                        # 注入 `id:` 帧(事件在队列中的序号 / Redis entry id), 使浏览器
+                        # EventSource 能拿到 lastEventId, 供前端 F5 后用 after 游标精确续接。
                         async for ev in q.subscribe(tid, after):
                             event = ev.get("event") or "message"
                             data = ev.get("data")
@@ -906,6 +906,9 @@ async def chat(
                                 data = ""
                             else:
                                 data = str(data)
+                            ev_id = ev.get("_id")
+                            if ev_id is not None:
+                                yield f"id: {ev_id}"
                             yield f"event: {event}"
                             yield f"data: {data}"
                             yield ""  # 空行: 触达 `if raw_line == ""` 处理分支
@@ -917,9 +920,10 @@ async def chat(
                             try:
                                 if await request.is_disconnected():
                                     logger.info("[chat] 客户端已断开, 提前终止读取上游 trace=%s", tid)
-                                    remaining = await _on_disconnect()
-                                    if remaining == 0:
-                                        terminal_status = "paused"
+                                    # v4 续接: 断连不暂停 —— 仅移除连接登记, 让 Worker 继续跑完;
+                                    # 前端 F5 后用本地 after 游标重新订阅 /api/chat 续接回放。不在此置
+                                    # paused(旧逻辑会把 Trace 误标暂停, 与 Worker 仍运行冲突, 导致续接失败)。
+                                    await _on_disconnect()
                                     break
                             except Exception:
                                 pass
@@ -1089,8 +1093,8 @@ async def chat(
                                         logger.info("[chat] 发送失败(客户端已断开) trace=%s: %s",
                                                     tid, type(_e).__name__)
                                         remaining = await _on_disconnect()
-                                        if remaining == 0:
-                                            terminal_status = "paused"
+                                        # v4 续接: 断连不暂停, 让 Worker 继续跑完;
+                                        # 前端 F5 后用 after 游标续接回放, 不在此置 paused。
                                         break
                                 event, data_parts = None, []
                                 continue
@@ -1101,6 +1105,7 @@ async def chat(
                 except Exception as e:  # noqa: BLE001
                     logger.warning("[chat] 订阅事件流异常: %s", e)
                     terminal_status = "error"
+                    saw_terminal = True
                     await record_error("upstream_error")
                     yield _error_frame("UPSTREAM_ERROR", "AI 服务暂时不可用，请稍后重试")
                     return
@@ -1124,27 +1129,41 @@ async def chat(
                 evt_detail = " ".join(f"{k}={v}" for k, v in sorted(event_counts.items()))
                 logger.info("[chat]   事件分布: %s", evt_detail)
             # 后台落库任务(独立 session + 重试, 不在 generator finally 中同步等待)
-            logger.info("[chat] [8/8] 启动后台落库 trace=%s user_text=%.50s", tid, user_text)
-            asyncio.create_task(_do_persist(
-                user_id=user.id,
-                conversation_id=conversation_id,
-                tid=tid,
-                model=model,
-                terminal_status=terminal_status,
-                user_text=user_text,
-                assistant_text=assistant_full_text,
-                preview_url=preview_url,
-                files_dict=files_dict,
-                refined_summary=refined_text,
-                qc_result=qc_result,
-                project_id=project_id,
-                requirement_doc=requirement_doc_captured,
-            ))
+            # v4 续接: 仅当本连接真正收到终止事件(saw_terminal)才由 publisher 落库; 纯断连
+            # (客户端 F5/导航离开) 时 Worker 仍在跑, 落库交给 Worker 的 _persist_worker_result,
+            # 避免抢占式把 Trace 标成 paused/提前写部分结果 —— 前端续接回放拿到的仍是完整终态。
+            if saw_terminal:
+                logger.info("[chat] [8/8] 启动后台落库 trace=%s user_text=%.50s status=%s",
+                            tid, user_text, terminal_status)
+                asyncio.create_task(_do_persist(
+                    user_id=user.id,
+                    conversation_id=conversation_id,
+                    tid=tid,
+                    model=model,
+                    terminal_status=terminal_status,
+                    user_text=user_text,
+                    assistant_text=assistant_full_text,
+                    preview_url=preview_url,
+                    files_dict=files_dict,
+                    refined_summary=refined_text,
+                    qc_result=qc_result,
+                    project_id=project_id,
+                    requirement_doc=requirement_doc_captured,
+                ))
+            else:
+                logger.info("[chat] [8/8] 纯断连(未达终止事件), 跳过 publisher 落库, 交由 Worker 兜底落库 trace=%s", tid)
             # v0.9.0: token 统计 + API 延迟记录
             if approx_tokens > 0:
                 asyncio.create_task(record_model_tokens(model, approx_tokens))
             _elapsed = (time.time() - t_start_chat) * 1000
             asyncio.create_task(record_api_latency("/api/chat", _elapsed))
+
+    # v4 续接守卫: 前端以 after 游标请求续接, 但该 trace 的流已不存在(过期 1h / 从未生成),
+    # 说明该轮早已结束 —— 直接返回一条 done 事件干净收尾, 绝不进入 publisher 空 q 重入队。
+    # (置于 chat() 普通作用域, 因 async 生成器 publisher 内不可 return 带值)
+    if after and not await get_queue().stream_exists(tid):
+        logger.info("[chat] after 模式但流已消失, 直接收尾 trace=%s", tid)
+        return _sse_done_event()
 
     resp = StreamingResponse(
         publisher(),

@@ -388,7 +388,11 @@ class MemoryBackend(QueueBackend):
                 start = int(after) + 1
             except ValueError:
                 start = 0
-        for ev in history[start:]:
+        for i, ev in enumerate(history):
+            if i < start:
+                continue
+            ev = dict(ev)
+            ev["_id"] = str(i)
             yield ev
             if ev.get("event") in TERMINAL_EVENTS:
                 return
@@ -397,8 +401,12 @@ class MemoryBackend(QueueBackend):
             return
         # 续接实时队列
         q = self._progress.setdefault(trace_id, asyncio.Queue())
+        idx = len(history)
         while True:
             ev = await q.get()
+            ev = dict(ev)
+            ev["_id"] = str(idx)
+            idx += 1
             yield ev
             if ev.get("event") in TERMINAL_EVENTS:
                 break
@@ -495,6 +503,7 @@ class RedisBackend(QueueBackend):
             hist = await self._r.xrange(key, f"({after}", "+")
         for entry_id, fields in hist:
             event = json.loads(fields.get("event", "{}"))
+            event["_id"] = entry_id
             yield event
             last_id = entry_id
             if event.get("event") in TERMINAL_EVENTS:
@@ -529,6 +538,7 @@ class RedisBackend(QueueBackend):
             for _k, entries in resp:
                 for entry_id, fields in entries:
                     event = json.loads(fields.get("event", "{}"))
+                    event["_id"] = entry_id
                     yield event
                     last_id = entry_id
                     if event.get("event") in TERMINAL_EVENTS:
