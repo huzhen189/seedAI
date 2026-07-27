@@ -17,6 +17,7 @@ from shared.models import (  # noqa: F401
     Feedback,
     QcScore,
     UsageLog,
+    UserState,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "Feedback",
     "QcScore",
     "UsageLog",
+    "UserState",
 ]

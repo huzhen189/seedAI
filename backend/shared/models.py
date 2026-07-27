@@ -233,3 +233,31 @@ class UsageLog(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost: Mapped[float] = mapped_column(default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
+class UserState(Base):
+    """用户级「我的状态」入口索引(断点复联三场景权威状态源)。
+
+    与 conversations.checkpoint_* / traces.status 互补: 本表是「用户级入口」
+    (上一次在哪个项目/会话、任务跑到哪、是否需要续跑), conversations/traces 是任务级明细。
+    详见 docs/my-info-state-design.md(v4)。
+    """
+
+    __tablename__ = "user_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    current_project_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    current_conversation_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    active_trace_id: Mapped[str | None] = mapped_column(String(64), index=True)  # 最近一次生成链路 id(字符串), 用于续跑
+    status: Mapped[str] = mapped_column(String(20), default="idle", nullable=False)  # idle/running/paused/aborted/done/error
+    current_stage: Mapped[str | None] = mapped_column(String(40))
+    progress_pct: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    pause_reason: Mapped[str | None] = mapped_column(String(20))  # user_interrupt / offline_timeout
+    pending_decision: Mapped[str | None] = mapped_column(String(30))  # continue_instruction / retry_model / ...
+    checkpoint_stage: Mapped[str | None] = mapped_column(String(40))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_user_states_user", "user_id", unique=True),
+    )
