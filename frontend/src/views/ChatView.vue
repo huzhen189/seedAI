@@ -1205,6 +1205,7 @@ async function doSend(text: string) {
 
 // 重连:以同一 traceId 重开 SSE 全量回放(后端命中 stream_exists 则续接,不重新生成)。
 async function resume(convId: number, tid: string) {
+  if (generating.value) return  // 防重复调用(初始挂载的双路径可能触发两次)
   resetGenState()
   // 已加载的 assistant 消息内容清空,交由回放重新累积(避免重复)。
   const idx = findAssistantIdx()
@@ -1300,13 +1301,12 @@ watch(
   () => projectStore.currentProjectId,
   async (id) => {
     if (id != null) {
-      // 清理旧项目的全部生成状态: 避免 trail-wrap / thoughtSteps / cancelSummary 等
-      // 在切换到空/新项目后残留旧项目数据
+      // 记录旧项目的 active gen(供跨项目判断, 不在本 watch 内 clear——留到 maybeResume 使用)
+      const prevAg = getActiveGen()
+
+      // 清理旧项目的生成 UI 状态(trail-wrap 等), 但不碰 sessionStorage 的 active gen
       resetGenState()
       generating.value = false
-      // 关闭旧项目可能还活着的 SSE 连接, 防止跨项目断点续跑
-      esRef.value?.close()
-      clearActiveGen()
 
       requirementDoc.value = null  // 切换项目, 先清空旧项目的需求文档
       await convStore.loadConversations(id)
@@ -1317,7 +1317,17 @@ watch(
       }
       await loadArtifacts()
       await nextTick(() => { setupScrollLoading(); scrollToBottom(false); handleSearchNav() })
-      await maybeResume()
+
+      // 跨项目恢复: 仅当 active gen 属于当前项目时才断点续传; 不属于则安全关闭旧 SSE 并清除
+      if (prevAg) {
+        const belongsToCurrent = convStore.conversations.some(c => c.id === prevAg.convId)
+        if (belongsToCurrent) {
+          await resume(prevAg.convId, prevAg.traceId)
+        } else {
+          esRef.value?.close()
+          clearActiveGen()
+        }
+      }
     }
   },
 )
