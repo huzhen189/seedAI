@@ -415,8 +415,10 @@ async def get_conversation_status(
     )).scalar_one_or_none()
 
     if active_trace:
+        # 返回 Trace 真实状态(而非硬编码 running): 配合启动孤儿对账, 被强杀后残留的
+        # 孤儿 Trace 已翻 aborted, 此处自然命中不到; 真实在途任务才是 running。
         return {
-            "status": "running",
+            "status": active_trace.status,
             "active_trace_id": active_trace.trace_id,
             "started_at": active_trace.started_at.isoformat() if active_trace.started_at else None,
         }

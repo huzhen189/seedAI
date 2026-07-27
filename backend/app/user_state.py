@@ -149,3 +149,55 @@ async def ensure_user_state(user_id: int) -> None:
                 await s.commit()
     except Exception as e:  # noqa: BLE001
         logger.warning("[user_state] MySQL 初始化失败 uid=%s: %s", user_id, e)
+
+
+# 进程重启对账需要「显式清空」的运行时字段(这些字段在活运行时可能是脏值,
+# 不能像 touch_user_state 那样跳过 None —— 必须主动置 None 以清除指向已死 Worker 的孤儿状态)。
+_RESET_FIELDS = [
+    "pause_reason",
+    "pending_decision",
+    "active_trace_id",
+    "current_stage",
+    "checkpoint_stage",
+    "progress_pct",
+]
+
+
+async def reset_user_state(user_id: int) -> None:
+    """把 user_states 重置为 idle 并清空运行时字段。
+
+    与 touch_user_state 的关键区别: 本函数会**显式把字段置 None**(而非跳过 None),
+    因为需要清除指向已死 Worker 的脏值(active_trace_id / current_stage / pause_reason 等)。
+
+    用于进程启动对账(reconcile_orphaned_runs): 孤儿 running/paused 状态指向进程被强杀前
+    在途的 Worker, 该 Worker 已死亡, 必须清掉否则前端会误 resume 一个再也不会产出的流。
+
+    保留 current_project_id / current_conversation_id, 让用户在刷新后仍停留在正确项目/会话,
+    仅任务层状态回到 idle(无在途任务)。
+    """
+    if not user_id:
+        return
+    try:
+        rc = await get_redis()
+        # 置 idle, 再删除其余运行时字段(若存在)
+        await rc.hset(_key(user_id), "status", "idle")
+        existing = await rc.hgetall(_key(user_id))
+        del_fields = [f for f in _RESET_FIELDS if f in existing]
+        if del_fields:
+            await rc.hdel(_key(user_id), *del_fields)
+        await rc.expire(_key(user_id), USER_STATE_TTL)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[user_state] reset Redis 失败 uid=%s: %s", user_id, e)
+    try:
+        async with SessionLocal() as s:
+            row = (await s.execute(
+                select(UserState).where(UserState.user_id == user_id)
+            )).scalar_one_or_none()
+            if row is not None:
+                row.status = "idle"
+                for f in _RESET_FIELDS:
+                    if hasattr(row, f):
+                        setattr(row, f, None)
+                await s.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[user_state] reset MySQL 失败 uid=%s: %s", user_id, e)

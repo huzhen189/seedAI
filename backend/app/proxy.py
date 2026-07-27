@@ -55,7 +55,7 @@ from .security import ACCESS_COOKIE, CurrentUser, _set_access_cookie, create_acc
 # 单进程合并:直接复用同进程的推理队列(取代 httpx 转发)
 from .agent.core.queue import get_queue
 from .tracing import append_trace_event, create_trace, finish_trace, log_usage
-from .user_state import touch_user_state, get_user_state
+from .user_state import touch_user_state, get_user_state, reset_user_state
 
 import html as _html
 import re
@@ -1210,6 +1210,80 @@ async def my_info(user: CurrentUser = Depends(get_current_user)):
         "active_trace_id": state.get("active_trace_id"),
         "needs_resume": needs_resume,
     }
+
+
+async def reconcile_orphaned_runs() -> None:
+    """进程启动对账: 进程被强杀(重启 / 杀端口)时, 在途 Worker 随之死亡,
+    留下「孤儿 Trace」—— `Trace.status` 永远停在 'running'(无 Worker 回填 finished_at),
+    且 `user_states` 停在 running/paused、Redis 残留 `pause:{tid}` 标志。
+
+    后果: GET /conversations/{id}/status 与 /my-info 谎报 running,
+    前端据此去 resume 一个已死、且无 checkpoint 可续的 Worker(本次用户踩到的 bug)。
+
+    对账逻辑:
+    - 遍历所有 status=='running' 的 Trace(重启后必然全是孤儿, 无活跃 Worker 能兑现)。
+    - 若其会话存在可恢复 checkpoint(Redis `ck:{conv}` status=='paused',
+      即 await_confirm 暂停 / 断连暂停) → 视为合法暂停, 不动 Trace,
+      仅把 user_states 统一翻为 paused(断连前可能未达阶段边界仍停在 running),
+      让前端经 my-info 进入续跑横幅(续跑走 checkpoint, 不依赖 Trace)。
+    - 若无 checkpoint → 真正的孤儿: Trace 翻 aborted(回填 finished_at),
+      user_states 重置为 idle(清 active_trace_id/current_stage 等脏值)。
+    - 兜底: 清全部 Redis `pause:*` 标志(重启后无活跃 Worker 能兑现暂停语义;
+      续跑时 resume 分支会自行 clear_pause 再 set_cancel, 不影响正常续跑)。
+    """
+    # 1) 孤儿 running Trace 对账
+    try:
+        from .db import SessionLocal as _S
+        from .repos.trace_repos import trace_repo
+        from .cache import ck_get
+
+        async with _S() as s:
+            rows = (await s.execute(
+                select(Trace).where(Trace.status == "running")
+            )).scalars().all()
+            if not rows:
+                logger.info("[reconcile] 无孤儿 running Trace, 跳过")
+            for t in rows:
+                conv_id = t.conversation_id
+                uid = t.user_id
+                # 判断是否存在可恢复 checkpoint
+                has_ck = False
+                try:
+                    ck = await ck_get(conv_id)
+                    has_ck = bool(ck and ck.get("status") == "paused")
+                except Exception:
+                    has_ck = False
+                if has_ck:
+                    # 合法暂停 → 不动 Trace; user_states 统一翻 paused 保证前端进续跑横幅
+                    await touch_user_state(
+                        uid,
+                        status="paused",
+                        pause_reason="offline_timeout",
+                        pending_decision="continue_instruction",
+                        active_trace_id=t.trace_id,
+                    )
+                    logger.info("[reconcile] 保留可恢复暂停 trace=%s conv=%s", t.trace_id, conv_id)
+                    continue
+                # 无 checkpoint → 孤儿, 翻 aborted(回填 finished_at)
+                try:
+                    await trace_repo.finish(s, t, status="aborted", total_tokens=t.total_tokens or 0)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[reconcile] finish 失败 trace=%s: %s", t.trace_id, e)
+                await reset_user_state(uid)
+                logger.info("[reconcile] 孤儿 Trace 翻 aborted trace=%s conv=%s user=%s",
+                            t.trace_id, conv_id, uid)
+    except Exception as e:  # noqa: BLE001
+        logger.error("[reconcile] 孤儿运行对账失败: %s", e)
+
+    # 2) 兜底: 清全部 Redis pause:* 标志
+    try:
+        rc = await get_redis()
+        keys = await rc.keys("pause:*")
+        if keys:
+            await rc.delete(*keys)
+            logger.info("[reconcile] 清除 %d 个 pause:* 标志", len(keys))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[reconcile] 清除 pause:* 失败: %s", e)
 
 
 def _normalize_assistant_text(text: str) -> str:

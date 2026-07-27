@@ -1352,23 +1352,8 @@ async function stop() {
   cancelling.value = false
 }
 
-// v4 生成中「放弃」—— 立即 abort(区别于「停止」= pause 可续跑)
-async function abortActive() {
-  if (!generating.value) return
-  cancelling.value = true
-  try { if (traceId.value) await cancelChat(traceId.value) } catch { /* 忽略 */ }
-  generating.value = false
-  sending.value = false
-  cancelling.value = false
-  esRef.value?.close()
-  esRef.value = null
-  v4Pause.value = null
-  if (convStore.currentConvId != null) {
-    try {
-      await patch(`/api/conversations/${convStore.currentConvId}`, { status: 'aborted', checkpoint_data: null })
-    } catch { /* 忽略 */ }
-  }
-}
+// v4 生成中「放弃」入口已移除: 与「停止」(pause 可续跑)语义重复, 仅保留「停止」。
+// 已暂停会话的「放弃」保留在 v4 横幅(abortV4Pause)。
 
 // 气泡内多维度评价提交(v0.8.5 M1): 按 trace_id 存储, 落库 + 前端即时反馈
 async function onRate(tid: string, p: { rating: number; comment: string; dimensions: RatingDims }) {
@@ -1744,7 +1729,6 @@ watch(pendingRetry, (r) => {
           :models="models"
           @send="send"
           @stop="stop"
-          @abandon="abortActive"
         />
         <div v-if="errorMsg" class="error">⚠ {{ errorMsg }}</div>
         <!-- 非阻塞候选提示: 系统已自决 top1 并继续, 列出可切换候选(可点击或输入"用 X"/"B") -->

@@ -13,7 +13,6 @@ const emit = defineEmits<{
   'update:model': [string]
   send: []
   stop: []
-  abandon: []
 }>()
 
 const value = defineModel<string>('value', { default: '' })
@@ -46,7 +45,6 @@ function submit() {
       <button v-else-if="cancelling" class="stop" disabled>暂停中…</button>
       <template v-else>
         <button class="stop" data-track="停止" @click="emit('stop')">停止</button>
-        <button class="abandon" @click="emit('abandon')">放弃</button>
       </template>
     </div>
   </div>
@@ -61,5 +59,4 @@ textarea { flex: 1; resize: none; border: 1px solid var(--border); border-radius
 .send { background: var(--brand); }
 .send:disabled { opacity: 0.5; cursor: not-allowed; }
 .stop { background: var(--err); }
-.abandon { background: var(--border); color: inherit; }
 </style>
