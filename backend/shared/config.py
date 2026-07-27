@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-v4-flash"
     qwen_api_key: str = ""
     qwen_base_url: str = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-    qwen_model: str = "qwen-plus"
+    qwen_model: str = "qwen3.7-plus"
     qwen_embedding_key: str = ""
     qwen_embedding_model: str = "text-embedding-v3"
     # 嵌入专用 base_url: 本机 Qwen 嵌入 key(sk-ws-)属 ws 私有 MaaS 工作区主机签发,

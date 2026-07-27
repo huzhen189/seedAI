@@ -43,7 +43,7 @@ PROVIDER_META: dict[str, dict] = {
         "desc": "腾讯混元3，综合能力强，建站和长文档首选",
     },
     "qwen": {
-        "version": "Qwen-Plus",
+        "version": "Qwen-3.7-Plus",
         "speed": "中 (~30t/s)",
         "desc": "通义千问增强版，准确率高，规划和评审出色",
     },
