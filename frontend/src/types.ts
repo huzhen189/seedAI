@@ -399,6 +399,9 @@ export type SubTaskStatus =
   | 'failed'
   | 'blocked'
   | 'skipped'
+  | 'cancelled'   // §6 A/B: 用户取消(进行中/已调度被中止)
+  | 'aborted'     // §6 A: 连接断开导致的硬中止
+  | 'paused'      // §6 A: 暂停(await_confirm 等断点), 可恢复
 
 /** 编排总览中的单个子任务元信息 */
 export interface SubTaskMeta {
@@ -458,6 +461,44 @@ export interface MergeEvent {
   failed_tasks: FailedSubTask[]
   /** 合并后的完整中文回复(亦会作为 sub_task_id="__merge__" 的 token 流发送) */
   text: string
+}
+
+/** §6 D: 取消结构化摘要(编排层级联取消后下发, 供前端渲染「取消摘要」卡)。 */
+export interface CancelSummaryEvent {
+  /** 被用户取消的子任务 id 列表(进行中/已调度被中止) */
+  cancelled: string[]
+  /** 已正常完成的子任务 id 列表 */
+  completed: string[]
+  /** 未开始被级联跳过的子任务 id 列表 */
+  skipped: string[]
+}
+
+/** §9: 执行前计划预览(意图识别后、执行前下发, 所有意图通用)。 */
+export interface PlanPreviewEvent {
+  /** 计划标题(如「执行计划」) */
+  title?: string
+  /** 补充说明文案 */
+  note?: string
+  /** SOP 角色链路(按顺序): product / design / dev / qa 的子集或全部 */
+  roles?: string[]
+}
+
+/** §9: SOP 四角色链路(产品分析师 → 设计顾问 → 开发工程师 → 质量评审)。 */
+export const SOP_ROLES: { key: string; label: string }[] = [
+  { key: 'product', label: '产品分析师' },
+  { key: 'design', label: '设计顾问' },
+  { key: 'dev', label: '开发工程师' },
+  { key: 'qa', label: '质量评审' },
+]
+
+/** skill → SOP 角色(与后端 handoff.ROLE_FOR_SKILL 对齐, 前端用于高亮当前阶段)。 */
+export const SKILL_TO_ROLE: Record<string, string> = {
+  agent_requirement: 'product',
+  agent_design: 'design',
+  agent_build: 'dev',
+  agent_generate_site: 'dev',
+  agent_doc: 'dev',
+  agent_review: 'qa',
 }
 
 /** 前端运行时子任务视图模型(由 orchestration 初始化, 经事件增量更新)。 */

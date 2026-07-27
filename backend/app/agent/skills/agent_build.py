@@ -627,15 +627,6 @@ async def generate_stream(
             cta_label="确认并生成",
         )
         return  # 暂停, 等待前端发起 resume/confirm 续接
-        # 检查取消(断点保存点 1: planner_done)
-        if await _cancelled_now(is_cancelled):
-            yield ev("checkpoint", stage="planner_done", data={
-                "plan": plan, "rag_ctx": rag_ctx,
-                "messages": messages[:10],  # 只保留最近 10 条
-            })
-            yield ev("paused", stage="planner_done", progress=25)
-            yield ev("done")
-            return
 
         # 2) Coder(流式,模型不可用时不自动降级,由前端确认后重发)
         yield ev("node", stage="enter_coder")

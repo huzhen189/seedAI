@@ -24,7 +24,8 @@ import { getConversation, listArtifacts, renameProject, patch, autoStart } from 
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { Artifact, Message, ModelInfo, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent, QcResult, RatingDims, SubTaskView, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, FailedSubTask } from '../types'
+import type { Artifact, Message, ModelInfo, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent, QcResult, RatingDims, SubTaskView, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, FailedSubTask, CancelSummaryEvent, PlanPreviewEvent } from '../types'
+import { SOP_ROLES, SKILL_TO_ROLE } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
   enter_router: '意图路由 — 识别你的需求类型，匹配最合适的处理流程',
@@ -49,6 +50,14 @@ const cancelling = ref(false) // 取消中状态(按钮反馈)
 // 思考时间线(每步一个 agent 节点)+ 计划特殊节点;替代旧版混成一坨的 thinks 字符串。
 const thoughtSteps = ref<ThoughtStep[]>([])
 const planNodes = ref<PlanEvent[]>([])
+// §9: 执行前计划预览(含 SOP 角色链路) + §6 D 取消结构化摘要 + 当前 SOP 阶段
+const planPreview = ref<PlanPreviewEvent | null>(null)
+const cancelSummary = ref<CancelSummaryEvent | null>(null)
+const sopCurrentRole = ref<string | undefined>(undefined)
+// §9: SOP 四角色链路(高亮当前阶段)
+const sopChain = computed(() =>
+  SOP_ROLES.map((r) => ({ ...r, active: r.key === sopCurrentRole.value })),
+)
 const currentStage = ref('')
 const degraded = ref(false)
 const generatedHtml = ref('')
@@ -730,6 +739,10 @@ function resetGenState() {
   isMultiIntent.value = false
   subTasks.value = []
   mergeResult.value = null
+  // §9 / §6 D: 执行前预览 + 取消摘要 + 当前 SOP 阶段(新请求时清空, 避免上轮残留)
+  planPreview.value = null
+  cancelSummary.value = null
+  sopCurrentRole.value = undefined
   // 非阻塞候选提示(新请求时清除)
   alternativesData.value = null
   // SIR 澄清卡(新请求时清除)
@@ -841,6 +854,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       thoughtSteps.value = []
       planNodes.value = []
+      planPreview.value = null
       clearActiveGen()
       clearDraft()
       loadArtifacts()
@@ -974,6 +988,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
         st.goal = d.goal
         st.skill = d.skill
         st.risk = d.risk
+        // §9: 高亮当前 SOP 阶段(按 skill 映射角色)
+        sopCurrentRole.value = SKILL_TO_ROLE[d.skill] || sopCurrentRole.value
       }
     },
     onSubtaskDone: (d: SubTaskDoneEvent) => {
@@ -1001,6 +1017,20 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
         success_count: d.success_count,
         fail_count: d.fail_count,
         failed_tasks: d.failed_tasks,
+      }
+    },
+    // §9: 执行前计划预览(含 SOP 角色链路 badge)
+    onPlanPreview: (d: PlanPreviewEvent) => {
+      planPreview.value = d
+      if (d.roles && d.roles.length) sopCurrentRole.value = d.roles[0]
+    },
+    // §6 D: 取消结构化摘要 → 修正子任务泳道状态 + 渲染摘要卡
+    onCancelSummary: (d: CancelSummaryEvent) => {
+      cancelSummary.value = d
+      for (const st of subTasks.value) {
+        if (d.cancelled.includes(st.id)) st.status = 'cancelled'
+        else if (d.skipped.includes(st.id)) st.status = 'skipped'
+        else if (d.completed.includes(st.id)) st.status = 'done'
       }
     },
     // ---- L2 对话精炼(v0.9.0, #235) ----
@@ -1419,9 +1449,44 @@ watch(pendingRetry, (r) => {
       </div>
 
       <div
-        v-if="(generating && !isMultiIntent && (thoughtSteps.length || planNodes.length)) || (isMultiIntent && subTasks.length)"
+        v-if="(generating && !isMultiIntent && (thoughtSteps.length || planNodes.length || planPreview)) || (isMultiIntent && subTasks.length) || cancelSummary"
         class="trail-wrap"
       >
+        <!-- §9: 执行前计划预览卡(含 SOP 角色链路 badge) -->
+        <div v-if="planPreview" class="plan-preview">
+          <div class="pp-head">
+            <span class="pp-icon">🧭</span>
+            <div>
+              <div class="pp-title">{{ planPreview.title || '执行计划' }}</div>
+              <div v-if="planPreview.note" class="pp-note">{{ planPreview.note }}</div>
+            </div>
+          </div>
+          <div class="sop-chain">
+            <template v-for="(r, i) in sopChain" :key="r.key">
+              <span class="sop-node" :class="{ active: r.active }">{{ r.label }}</span>
+              <span v-if="i < sopChain.length - 1" class="sop-arrow">→</span>
+            </template>
+          </div>
+        </div>
+
+        <!-- §6 D: 取消结构化摘要卡 -->
+        <div v-if="cancelSummary" class="cancel-summary">
+          <div class="cs-head">⏹ 已取消 · 执行摘要</div>
+          <div class="cs-body">
+            <span class="cs-chip done">✓ 已完成 {{ cancelSummary.completed.length }}</span>
+            <span class="cs-chip cancelled">⏹ 已取消 {{ cancelSummary.cancelled.length }}</span>
+            <span class="cs-chip skipped">⤼ 已跳过 {{ cancelSummary.skipped.length }}</span>
+          </div>
+          <ul v-if="cancelSummary.cancelled.length || cancelSummary.skipped.length" class="cs-list">
+            <li v-for="id in cancelSummary.cancelled" :key="'c-' + id" class="cs-item cancelled">
+              已取消: {{ id }}
+            </li>
+            <li v-for="id in cancelSummary.skipped" :key="'s-' + id" class="cs-item skipped">
+              未执行(已跳过): {{ id }}
+            </li>
+          </ul>
+        </div>
+
         <ThoughtTrail
           v-if="!isMultiIntent"
           :steps="thoughtSteps"
@@ -1429,6 +1494,7 @@ watch(pendingRetry, (r) => {
           :degraded="degraded"
           :current="currentStage"
           :intent="currentIntent"
+          :current-role="sopCurrentRole"
         />
         <template v-else>
           <SubTaskTrack
@@ -1780,6 +1846,60 @@ class="clarify-confirm"
   border-top: 1px solid var(--border);
   padding: 10px 14px;
 }
+
+/* §9: 执行前计划预览卡 + SOP 角色链路 */
+.plan-preview {
+  border: 1px solid var(--brand2, #c7d2fe);
+  background: linear-gradient(180deg, #eef2ff 0%, #fafaff 100%);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.pp-head { display: flex; gap: 10px; align-items: flex-start; }
+.pp-icon { font-size: 18px; line-height: 1.2; }
+.pp-title { font-weight: 700; font-size: 14px; color: var(--brand); }
+.pp-note { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+.sop-chain { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.sop-node {
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 12px;
+  background: #f1f5f9;
+  color: var(--muted);
+  border: 1px solid transparent;
+  transition: all 0.25s ease;
+}
+.sop-node.active {
+  background: var(--brand);
+  color: #fff;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+}
+.sop-arrow { color: var(--muted); font-size: 13px; }
+
+/* §6 D: 取消结构化摘要卡 */
+.cancel-summary {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.cs-head { font-weight: 700; font-size: 13.5px; color: #b91c1c; }
+.cs-body { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.cs-chip {
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+.cs-chip.done { background: #dcfce7; color: #15803d; }
+.cs-chip.cancelled { background: #fee2e2; color: #b91c1c; }
+.cs-chip.skipped { background: #fef3c7; color: var(--warn); }
+.cs-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.cs-item { font-size: 12px; line-height: 1.5; }
+.cs-item.cancelled { color: #b91c1c; }
+.cs-item.skipped { color: var(--warn); }
 .footer {
   padding: 12px 14px;
   background: var(--panel);

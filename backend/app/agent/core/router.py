@@ -20,9 +20,9 @@ from ..registry import SkillRegistry
 
 logger = logging.getLogger("ai_service.router")
 
-# 两级标签(v1.0: Chat/Build 两大方向)
+# 两级标签(v1.0: Chat/Build/Manage 三大方向)
 LEVEL1_LABELS = {
-    "chat": "智能对话", "build": "建站生成", "unsupported": "不支持",
+    "chat": "智能对话", "build": "建站生成", "manage": "管理操作", "unsupported": "不支持",
 }
 
 LEVEL2_LABELS: dict[str, str] = {

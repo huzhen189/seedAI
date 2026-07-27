@@ -13,11 +13,13 @@ ToolEntry 字段严格对齐设计文档 §5.9:
 
 from __future__ import annotations
 import functools
+import hashlib
+import json
 import logging
 
 import inspect
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 logger = logging.getLogger("ai_service.registry.tool_registry")
 
 
@@ -134,17 +136,83 @@ def register_tool(
     return entry
 
 
-async def invoke(name: str, *args, **kwargs) -> Any:
+_IDEK_TTL = 600  # §6 C: 幂等结果缓存 TTL(秒)
+
+
+def _idek_default(o: Any) -> str:
+    """幂等键/结果序列化兜底: 不可 JSON 化的对象退化为类型名, 不抛异常。"""
+    return f"<{type(o).__name__}>"
+
+
+def _build_idek(trace_id: Optional[str], name: str, args: tuple, kwargs: dict) -> Optional[str]:
+    """§6 C: 构造幂等键 {trace_id}:{name}:{hash(args+kwargs)}。无 trace_id 返回 None(不跨 trace 串味)。"""
+    if not trace_id:
+        return None
+    try:
+        payload = json.dumps([args, kwargs], default=_idek_default, sort_keys=True)
+    except Exception:
+        payload = repr((args, kwargs))
+    h = hashlib.md5(payload.encode("utf-8")).hexdigest()[:16]
+    return f"ai:tool:idek:{trace_id}:{name}:{h}"
+
+
+async def _idek_get(key: str) -> Any:
+    """读幂等缓存; 任意异常降级为未命中(不计副作用)。"""
+    try:
+        from ...cache import get_redis
+        r = await get_redis()
+        raw = await r.get(key)
+        if raw is None:
+            return None
+        return json.loads(raw)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[Tool] 幂等读失败(忽略) %s: %s", key, e)
+        return None
+
+
+async def _idek_set(key: str, result: Any) -> None:
+    """写幂等缓存; 不可序列化或 Redis 异常均忽略, 不阻断主链路。"""
+    try:
+        serialized = json.dumps(result, default=_idek_default)
+        from ...cache import get_redis
+        r = await get_redis()
+        await r.set(key, serialized, ex=_IDEK_TTL)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[Tool] 幂等写失败(忽略) %s: %s", key, e)
+
+
+async def invoke(
+    name: str,
+    *args,
+    idempotency_key: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    **kwargs,
+) -> Any:
     """统一执行入口(可选):经此调用 tool 自动带入参/出参日志。
+
+    §6 C 工具幂等: 提供 trace_id(或显式 idempotency_key)时, 先查 Redis 缓存
+    (key={trace_id}:{name}:{hash(args)})。命中且成功则直接返回, 跳过带副作用 tool 的重复执行
+    (典型场景: checkpoint resume 重跑整段 skill 时, 已执行的 RAG/写盘/COS/外部 API 不重放)。
+    无 trace_id 且未显式传 key 时不启用缓存(避免跨 trace 串味)。
 
     自动适配 sync/async func;返回执行结果。找不到工具时抛出 KeyError。
     """
     entry = ToolRegistry.get(name)
     if entry is None:
         raise KeyError(f"Tool '{name}' 未注册")
+    idek = idempotency_key or _build_idek(trace_id, name, args, kwargs)
+    if idek is not None:
+        cached = await _idek_get(idek)
+        if cached is not None:
+            logger.info("[Tool] 幂等命中 key=%s 直接返回(跳过副作用)", idek)
+            return cached
     if inspect.iscoroutinefunction(entry.func):
-        return await entry.func(*args, **kwargs)
-    return entry.func(*args, **kwargs)
+        result = await entry.func(*args, **kwargs)
+    else:
+        result = entry.func(*args, **kwargs)
+    if idek is not None:
+        await _idek_set(idek, result)
+    return result
 
 
 def _infer_schema(func: Callable, description: str) -> dict:

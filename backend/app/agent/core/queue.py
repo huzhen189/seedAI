@@ -318,6 +318,10 @@ class QueueBackend:
         """该 trace_id 的进度流是否已存在(用于 /generate 判断是否续接而非重新入队)。"""
         raise NotImplementedError
 
+    async def delete_channel(self, trace_id: str):
+        """删除进度流(用于 resume 时清掉 await_confirm 阶段残留的 paused 流, 强制重新入队执行)。"""
+        raise NotImplementedError
+
     async def subscribe(
         self, trace_id: str, after: Optional[str] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -357,6 +361,11 @@ class MemoryBackend(QueueBackend):
 
     async def stream_exists(self, trace_id: str) -> bool:
         return trace_id in self._history
+
+    async def delete_channel(self, trace_id: str):
+        # 内存兜底: 清掉历史 + 实时队列, 让 resume 能重新 open_channel + enqueue
+        self._history.pop(trace_id, None)
+        self._progress.pop(trace_id, None)
 
     async def subscribe(self, trace_id: str, after: Optional[str] = None):
         history = self._history.get(trace_id, [])
@@ -447,6 +456,12 @@ class RedisBackend(QueueBackend):
             return await self._r.exists(self._key(trace_id)) == 1
         except Exception:
             return False
+
+    async def delete_channel(self, trace_id: str):
+        try:
+            await self._r.delete(self._key(trace_id))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[RedisBackend] delete_channel 失败(忽略) %s: %s", trace_id, e)
 
     async def subscribe(self, trace_id: str, after: Optional[str] = None):
         key = self._key(trace_id)
@@ -759,6 +774,21 @@ async def worker_loop(concurrency: int = 1):
                         logger.info("[Worker] [4.5] 强制技能续跑: decision=%s → route (skill=%s, checkpoint=%s)",
                                     decision, skill_name, "有" if job.get("checkpoint") else "无")
                     decision = "route"
+
+                # §9: 执行前计划预览(所有意图通用) —— 下发 plan_preview 事件, 前端渲染
+                # 「执行计划」卡 + SOP 角色链路 badge(仅当 skill 归属 4 角色之一时)。
+                # 多意图走 SubTaskTrack 自有 SOP 进度条, 此处不重复发, 避免双卡。
+                if decision != "split":
+                    try:
+                        from ..roles.handoff import ROLE_FOR_SKILL
+                        _role = ROLE_FOR_SKILL.get(skill_name)
+                        if _role:
+                            await q.publish(trace_id, {
+                                "event": "plan_preview",
+                                "data": {"title": "执行计划", "roles": [_role]},
+                            })
+                    except Exception as _pp_e:  # noqa: BLE001
+                        logger.debug("[Worker] plan_preview 失败(忽略) trace=%s: %s", trace_id, _pp_e)
 
                 # ── [5/6] 决策分流(switch on decision) ──
                 # 1) 高危拦截: 死红线, 即便用户确认也不可绕过

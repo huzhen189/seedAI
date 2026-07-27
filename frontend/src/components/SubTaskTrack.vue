@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { RiskLevel, SubTaskStatus, SubTaskView } from '../types'
+import { SOP_ROLES, SKILL_TO_ROLE } from '../types'
 
-defineProps<{
+const props = defineProps<{
   /** 运行时子任务视图模型列表(顺序与编排总览一致) */
   subtasks: SubTaskView[]
   /** 执行策略: parallel = 全并行; mixed = 分层串行 + 层内并行 */
@@ -20,6 +22,9 @@ const STATUS_META: Record<SubTaskStatus, { icon: string; label: string; cls: str
   failed: { icon: '✕', label: '执行失败', cls: 'failed' },
   blocked: { icon: '⛔', label: '高风险拦截', cls: 'blocked' },
   skipped: { icon: '⤼', label: '待确认', cls: 'skipped' },
+  cancelled: { icon: '⏹', label: '已取消', cls: 'cancelled' },
+  aborted: { icon: '⛔', label: '连接中断', cls: 'aborted' },
+  paused: { icon: '⏸', label: '已暂停', cls: 'paused' },
 }
 
 const RISK_META: Record<RiskLevel, { label: string; cls: string }> = {
@@ -34,6 +39,20 @@ function statusOf(s: SubTaskView) {
 function riskOf(s: SubTaskView) {
   return RISK_META[s.risk] || RISK_META.low
 }
+
+// §9: 当前 SOP 阶段(按运行中/最近完成的子任务 skill 映射角色), 供进度条高亮
+const currentRole = computed(() => {
+  const src =
+    props.subtasks.find((s) => s.status === 'running') ||
+    props.subtasks.find((s) => s.status === 'done') ||
+    props.subtasks.find((s) => s.status === 'failed') ||
+    props.subtasks.find((s) => s.status === 'cancelled')
+  if (!src) return undefined
+  return SKILL_TO_ROLE[src.skill]
+})
+const sopChain = computed(() =>
+  SOP_ROLES.map((r) => ({ ...r, active: r.key === currentRole.value })),
+)
 </script>
 
 <template>
@@ -44,6 +63,14 @@ function riskOf(s: SubTaskView) {
         {{ strategy === 'mixed' ? '分层串行 · 层内并行' : '全部并行' }}
       </span>
       <span class="count">{{ subtasks.length }} 个子任务</span>
+    </div>
+
+    <!-- §9: SOP 四角色进度条(高亮当前阶段) -->
+    <div class="sop-bar">
+      <template v-for="(r, i) in sopChain" :key="r.key">
+        <span class="sop-node" :class="{ active: r.active }">{{ r.label }}</span>
+        <span v-if="i < sopChain.length - 1" class="sop-arrow">→</span>
+      </template>
     </div>
 
     <ul class="lanes">
@@ -143,6 +170,28 @@ function riskOf(s: SubTaskView) {
 .lane.failed { border-left-color: var(--err); }
 .lane.blocked { border-left-color: #7f1d1d; background: #fef2f2; }
 .lane.skipped { border-left-color: var(--warn); background: #fffbeb; }
+.lane.cancelled { border-left-color: #b91c1c; background: #fef2f2; }
+.lane.aborted { border-left-color: #7f1d1d; background: #fef2f2; }
+.lane.paused { border-left-color: #64748b; background: #f8fafc; }
+
+/* §9: SOP 四角色进度条 */
+.sop-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+.sop-node {
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 12px;
+  background: #f1f5f9;
+  color: var(--muted);
+  border: 1px solid transparent;
+  transition: all 0.25s ease;
+}
+.sop-node.active {
+  background: var(--brand);
+  color: #fff;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+}
+.sop-arrow { color: var(--muted); font-size: 13px; }
 
 .lane-top { display: flex; align-items: center; gap: 8px; }
 .status-icon { font-size: 15px; line-height: 1; flex: none; }
@@ -150,6 +199,8 @@ function riskOf(s: SubTaskView) {
 .status-icon.done { color: var(--ok); }
 .status-icon.failed, .status-icon.blocked { color: var(--err); }
 .status-icon.skipped { color: var(--warn); }
+.status-icon.cancelled, .status-icon.aborted { color: #b91c1c; }
+.status-icon.paused { color: var(--muted); }
 .goal {
   flex: 1;
   min-width: 0;

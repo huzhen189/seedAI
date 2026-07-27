@@ -8,8 +8,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+
+logger = logging.getLogger("ai_service.models")
 
 # --- v1.0 Agent 统一规范 ---
 
@@ -58,6 +61,22 @@ SUB_DONE = "done"
 SUB_FAILED = "failed"
 SUB_BLOCKED = "blocked"
 SUB_SKIPPED = "skipped"
+SUB_CANCELLED = "cancelled"   # §6 A: 用户取消(进行中/已调度被中止)
+SUB_ABORTED = "aborted"       # §6 A: 连接断开导致的硬中止
+SUB_PAUSED = "paused"         # §6 A: 暂停(await_confirm 等断点), 可恢复
+
+# §6 A: 子任务合法状态转移表(单一守卫, 杜绝散点字符串赋值)
+SUB_TRANSITIONS: dict[str, set[str]] = {
+    SUB_PENDING:   {SUB_RUNNING, SUB_SKIPPED, SUB_CANCELLED, SUB_PAUSED},
+    SUB_RUNNING:   {SUB_DONE, SUB_FAILED, SUB_CANCELLED, SUB_BLOCKED, SUB_PAUSED, SUB_ABORTED},
+    SUB_PAUSED:    {SUB_RUNNING, SUB_CANCELLED, SUB_SKIPPED},
+    SUB_BLOCKED:   {SUB_RUNNING, SUB_SKIPPED, SUB_CANCELLED},
+    SUB_DONE:      set(),   # 终态
+    SUB_FAILED:    set(),   # 终态
+    SUB_SKIPPED:   set(),   # 终态
+    SUB_CANCELLED: set(),   # 终态
+    SUB_ABORTED:   set(),   # 终态
+}
 
 
 @dataclass
@@ -81,7 +100,25 @@ class SubTask:
     risk_level: str = RISK_LOW                # high/medium/low
     dependencies: list[str] = field(default_factory=list)  # 依赖的 sub_task_id
     estimated_tokens: int = 0                # 粗估 token(用于排队/预算)
-    status: str = SUB_PENDING                 # pending/running/done/failed/blocked/skipped
+    status: str = SUB_PENDING                 # pending/running/done/failed/blocked/skipped/cancelled/aborted/paused
+
+    def transition(self, to: str) -> bool:
+        """§6 A: 按 SUB_TRANSITIONS 合法表迁移状态。
+
+        非法转移(如 done→running)记 warning 并拒绝(返回 False), 不抛异常,
+        避免中断编排主流程; 同态转移视为无操作(返回 True)。
+        """
+        if to == self.status:
+            return True
+        allowed = SUB_TRANSITIONS.get(self.status, set())
+        if to not in allowed:
+            logger.warning(
+                "[SubTask] 非法状态转移被拒绝 id=%s %s→%s (合法: %s)",
+                self.id, self.status, to, sorted(allowed),
+            )
+            return False
+        self.status = to
+        return True
 
 
 @dataclass

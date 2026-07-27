@@ -25,6 +25,7 @@ from ..core.models import (
     RISK_MEDIUM,
     RISK_LOW,
     SUB_BLOCKED,
+    SUB_CANCELLED,
     SUB_DONE,
     SUB_FAILED,
     SUB_PENDING,
@@ -117,14 +118,26 @@ class Orchestrator:
                 _s.dependencies, _s.status,
             )
         results: list[SubTaskResult] = []
+        was_cancelled = False
 
         for layer_idx, layer in enumerate(layers):
+            # §6 B 层级联取消: 进入新层前检测取消。已取消则把尚未开始的子任务标记为
+            # skipped(级联), 已 done 保留, 进行中会在 _run_one 收尾转 cancelled。随后发
+            # cancel_summary 并整体终止, 避免兄弟/下游子任务继续跑。
+            if await _cancelled_now(is_cancelled):
+                was_cancelled = True
+                for s in sub_tasks:
+                    if s.status == SUB_PENDING:
+                        s.transition(SUB_SKIPPED)
+                logger.info("[编排] 检测到取消, 级联终止: 剩余 %d 个子任务标记 skipped",
+                            sum(1 for s in sub_tasks if s.status == SUB_SKIPPED))
+                break
             # 层内并行; 记录本层范围便于排查卡层/慢子任务
             logger.info("[编排] 执行层 #%d/%d 并行=%d: %s",
                         layer_idx + 1, len(layers), len(layer), [s.id for s in layer])
             # 层中每个子任务发 start
             for st in layer:
-                st.status = SUB_RUNNING
+                st.transition(SUB_RUNNING)
                 yield ev(
                     "subtask_start",
                     sub_task_id=st.id,
@@ -197,6 +210,16 @@ class Orchestrator:
 
         # 多意图流程收口: 发 done 事件, worker 据此发布 SSE done 并终止流
         # (单 skill 路径由 skill 自身发 done; 编排器在此统一收口)
+        # §6 B: 取消时先发结构化 cancel_summary(已完成/已取消/已跳过清单), 供前端渲染摘要卡
+        if was_cancelled:
+            yield ev(
+                "cancel_summary",
+                data={
+                    "cancelled": [s.id for s in sub_tasks if s.status == SUB_CANCELLED],
+                    "completed": [s.id for s in sub_tasks if s.status == SUB_DONE],
+                    "skipped": [s.id for s in sub_tasks if s.status in (SUB_SKIPPED, SUB_PENDING)],
+                },
+            )
         yield ev("done", data={})
 
         orch_result = OrchestratorResult(
@@ -226,6 +249,7 @@ class Orchestrator:
         # ── 风险门控(兜底 5: 风险分级) ──
         # HIGH: 死红线, 系统直接拒绝, 即便用户后续确认也不可绕过(返回 SUB_BLOCKED)
         if st.risk_level == RISK_HIGH:
+            st.transition(SUB_BLOCKED)
             await sink(ev("subtask_fail", sub_task_id=st.id, reason="高风险操作不予执行(系统拒绝)", recoverable=False))
             return SubTaskResult(
                 id=st.id, status=SUB_BLOCKED, skill=st.selected_skill, goal=st.goal,
@@ -234,6 +258,7 @@ class Orchestrator:
         # MEDIUM: 需用户二次确认; 未确认则跳过(返回 SUB_SKIPPED)并等前端回传,
         #         confirmed_subtasks 携带已确认 id 重发时, 此处放行执行
         if st.risk_level == RISK_MEDIUM and st.id not in confirmed_subtasks:
+            st.transition(SUB_SKIPPED)
             await sink(ev("subtask_fail", sub_task_id=st.id,
                     reason="中风险操作需用户确认(回复确认后重发)",
                     recoverable=True))
@@ -282,13 +307,14 @@ class Orchestrator:
                     if url:
                         artifacts.append(url)
             if await _cancelled_now(is_cancelled):
+                st.transition(SUB_CANCELLED)
                 await sink(ev("subtask_fail", sub_task_id=st.id, reason="用户取消", recoverable=True))
                 return SubTaskResult(
-                    id=st.id, status=SUB_FAILED, skill=st.selected_skill, goal=st.goal,
+                    id=st.id, status=SUB_CANCELLED, skill=st.selected_skill, goal=st.goal,
                     error="用户取消", risk_level=st.risk_level, duration_ms=int((time.time() - t0) * 1000),
                 )
 
-            st.status = SUB_DONE
+            st.transition(SUB_DONE)
             await sink(ev("subtask_done", sub_task_id=st.id,
                     result_summary="".join(out_buf)[:200],
                     artifacts=artifacts))

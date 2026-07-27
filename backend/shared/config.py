@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     qwen_model: str = "qwen-plus"
     qwen_embedding_key: str = ""
     qwen_embedding_model: str = "text-embedding-v3"
+    # 嵌入专用 base_url: 本机 Qwen 嵌入 key(sk-ws-)属 ws 私有 MaaS 工作区主机签发,
+    # 与聊天 token-plan 主机(sk-sp-)不同; 复用 qwen_base_url 打错工作区端点会 401。
+    qwen_embedding_base_url: str = "https://ws-rao72of9tmiy6llq.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
     hy3_api_key: str = ""
     hy3_api_key_demo: str = ""
     hy3_base_url: str = "https://tokenhub.tencentmaas.com/v1"

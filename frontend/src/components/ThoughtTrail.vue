@@ -1,14 +1,23 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { PlanEvent, ThoughtStep } from '../types'
+import { SOP_ROLES } from '../types'
 
-defineProps<{
+const props = defineProps<{
   steps: ThoughtStep[]
   plans: PlanEvent[]
   degraded: boolean
   current: string
   /** 意图识别结果(两级) */
   intent: { level1: string; level2: string }
+  /** §9: 当前 SOP 阶段(由 ChatView 按运行中的子任务/计划预览传入) */
+  currentRole?: string
 }>()
+
+// §9: SOP 四角色进度条(高亮当前阶段)
+const sopChain = computed(() =>
+  SOP_ROLES.map((r) => ({ ...r, active: r.key === (props.currentRole as string | undefined) })),
+)
 
 const INTENT_COLORS: Record<string, string> = {
   learn: '#dbeafe',
@@ -47,6 +56,13 @@ function intentLabel(l: { level1: string; level2: string }): string {
 
 <template>
   <div class="trail">
+    <!-- §9: SOP 四角色进度条(高亮当前阶段) -->
+    <div v-if="sopChain.some((r) => r.active)" class="sop-bar">
+      <template v-for="(r, i) in sopChain" :key="r.key">
+        <span class="sop-node" :class="{ active: r.active }">{{ r.label }}</span>
+        <span v-if="i < sopChain.length - 1" class="sop-arrow">→</span>
+      </template>
+    </div>
     <div
       v-if="intent.level1"
       class="intent-badge"
@@ -95,6 +111,24 @@ function intentLabel(l: { level1: string; level2: string }): string {
   flex-direction: column;
   gap: 10px;
 }
+/* §9: SOP 四角色进度条 */
+.sop-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.sop-node {
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 12px;
+  background: #f1f5f9;
+  color: var(--muted);
+  border: 1px solid transparent;
+  transition: all 0.25s ease;
+}
+.sop-node.active {
+  background: var(--brand);
+  color: #fff;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+}
+.sop-arrow { color: var(--muted); font-size: 13px; }
 .intent-badge {
   padding: 8px 14px;
   border-radius: 10px;

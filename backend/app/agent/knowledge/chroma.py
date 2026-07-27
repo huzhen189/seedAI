@@ -47,12 +47,12 @@ def _ef():
     from chromadb.utils import embedding_functions
 
     # 优先 Qwen text-embedding(§7: 配 qwen_embedding_key)。
-    # 关键点: api_base 必须用 settings.qwen_base_url(本机 Qwen key 是私有 MaaS 主机签发,
-    # 打公共 dashscope 端点会 401)。无 embedding key 时本地 sentence-transformers 兜底。
+    # 关键点: api_base 必须用 settings.qwen_embedding_base_url(本机 Qwen 嵌入 key 是 ws 私有
+    # MaaS 工作区主机签发, 打聊天 token-plan 端点会 401)。无 embedding key 时本地 sentence-transformers 兜底。
     if settings.qwen_embedding_key:
         return embedding_functions.OpenAIEmbeddingFunction(
             api_key=settings.qwen_embedding_key,
-            api_base=settings.qwen_base_url,
+            api_base=settings.qwen_embedding_base_url,
             model_name=settings.qwen_embedding_model,
         )
     # 本地模型兜底(无需 API key, 首次使用自动下载 all-MiniLM-L6-v2 ~79MB)

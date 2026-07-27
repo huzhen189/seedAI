@@ -778,13 +778,25 @@ async def chat(
                     # 单进程合并: 不再经 httpx 转发, 直接把 job 投递给同进程 Worker 队列,
                     # 订阅同一 gen:stream:<tid> 频道, 把事件字典序列化为 SSE 帧透传(零逻辑改动)。
                     q = get_queue()
-                    resuming = await q.stream_exists(tid)
-                    if not resuming:
+                    if resume:
+                        # G5 修复: await_confirm 阶段已 open_channel 建流 → stream_exists(tid) 恒 True,
+                        # 若直接回放旧的 paused 流则永不重新执行 Coder。故先删旧流, 再强制新 trace 入队。
+                        try:
+                            await q.delete_channel(tid)
+                        except Exception as _dc_e:  # noqa: BLE001
+                            logger.warning("[chat] delete_channel 失败(忽略) trace=%s: %s", tid, _dc_e)
                         await q.open_channel(tid)
                         await q.enqueue(payload)
-                        logger.info("[chat] [2/3] 新任务入队 trace=%s queue=%s", tid, type(q).__name__)
+                        logger.info("[chat] [2/3] resume 删旧流并重新入队(执行断点续跑) trace=%s queue=%s",
+                                    tid, type(q).__name__)
                     else:
-                        logger.info("[chat] [2/3] 续接已有流 trace=%s after=%s 全量回放", tid, after or "无")
+                        resuming = await q.stream_exists(tid)
+                        if not resuming:
+                            await q.open_channel(tid)
+                            await q.enqueue(payload)
+                            logger.info("[chat] [2/3] 新任务入队 trace=%s queue=%s", tid, type(q).__name__)
+                        else:
+                            logger.info("[chat] [2/3] 续接已有流 trace=%s after=%s 全量回放", tid, after or "无")
                     logger.info("[chat] [6/8] 订阅同进程事件流, 开始接收事件")
 
                     async def _sse_lines():

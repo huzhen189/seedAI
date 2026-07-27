@@ -29,20 +29,42 @@ logger = logging.getLogger("ai_service.roles.handoff")
 # ── 稳健开关:默认开启角色编排层;设 ROLE_ORCHESTRATOR_ENABLED=0 即整体回退原生编排 ──
 ROLE_ORCHESTRATOR_ENABLED = os.getenv("ROLE_ORCHESTRATOR_ENABLED", "1") == "1"
 
-# ── 四角色与技能映射(单一来源) ──
-# ProductAgent ← agent_requirement(出 PRD)
-# DesignAgent  ← agent_design(出 DesignSpec)
-# DevAgent     ← agent_build / agent_generate_site / agent_doc(出 CodeArtifact)
-# QAAgent      ← agent_review + scoring(出 ReviewReport)
-# agent_search / agent_chat / agent_delete 不归属四角色(跨角色支撑 / 兜底 / 独立)。
-ROLE_FOR_SKILL: dict[str, str] = {
-    "agent_requirement": "product",
-    "agent_design": "design",
-    "agent_build": "dev",
-    "agent_generate_site": "dev",
-    "agent_doc": "dev",
-    "agent_review": "qa",
-}
+# ── 四角色与技能映射(单一来源, 由意图目录派生) ──
+# §5 消除「意图目录 / role 映射」双真源: 每个意图在 intent_catalog.json 已带 role 字段,
+# 此处扫描目录派生 skill→role, 改意图目录即自动同步, 不会静默错配角色。
+#   ProductAgent ← agent_requirement(出 PRD)
+#   DesignAgent  ← agent_design(出 DesignSpec)
+#   DevAgent     ← agent_build / agent_generate_site / agent_doc(出 CodeArtifact)
+#   QAAgent      ← agent_review + scoring(出 ReviewReport)
+#   agent_search / agent_chat / agent_delete 不归属四角色(跨角色支撑 / 兜底 / 独立, role=null)。
+def _load_role_for_skill() -> dict[str, str]:
+    """从 intent_catalog.json 派生子 skill→role 映射(单一真源);读取失败回退保守硬编码。"""
+    mapping: dict[str, str] = {}
+    try:
+        catalog_path = os.path.join(
+            os.path.dirname(__file__), "..", "intent", "intent_catalog.json"
+        )
+        with open(catalog_path, "r", encoding="utf-8") as _f:
+            data = json.load(_f)
+        for intent in data.get("intents", []):
+            role = intent.get("role")
+            skill = intent.get("skill")
+            if role and skill:
+                mapping[skill] = role
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[handoff] 意图目录读取失败, 回退硬编码映射: %s", e)
+        mapping = {
+            "agent_requirement": "product",
+            "agent_design": "design",
+            "agent_build": "dev",
+            "agent_generate_site": "dev",
+            "agent_doc": "dev",
+            "agent_review": "qa",
+        }
+    return mapping
+
+
+ROLE_FOR_SKILL: dict[str, str] = _load_role_for_skill()
 
 # 角色 → 交付物类型(强 Schema 标识)
 ROLE_ARTIFACT: dict[str, str] = {
