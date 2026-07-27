@@ -245,8 +245,8 @@ class UserState(Base):
 
     __tablename__ = "user_states"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    # user_states 是 users 的「一对一扩展表」: 直接以 user_id 作主键, 去掉冗余 id 列。
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, nullable=False)
     current_project_id: Mapped[int | None] = mapped_column(Integer, index=True)
     current_conversation_id: Mapped[int | None] = mapped_column(Integer, index=True)
     active_trace_id: Mapped[str | None] = mapped_column(String(64), index=True)  # 最近一次生成链路 id(字符串), 用于续跑
@@ -257,7 +257,3 @@ class UserState(Base):
     pending_decision: Mapped[str | None] = mapped_column(String(30))  # continue_instruction / retry_model / ...
     checkpoint_stage: Mapped[str | None] = mapped_column(String(40))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
-
-    __table_args__ = (
-        Index("ix_user_states_user", "user_id", unique=True),
-    )

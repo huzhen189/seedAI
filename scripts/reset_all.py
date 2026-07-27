@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from app.config import settings, ENV_FILE  # noqa: E402
 from app.db import SessionLocal, engine, init_db  # noqa: E402
+from app.user_state import ensure_user_state  # noqa: E402
 from sqlalchemy import text, select  # noqa: E402
 
 
@@ -225,6 +226,8 @@ async def _ensure_super_admin() -> None:
         )
         session.add(user)
         await session.commit()
+        # 超管即建 user_states 扩展行(MySQL)+ 写入 Redis 默认状态(幂等)。
+        await ensure_user_state(user.id)
         print(f"  >> 已创建默认超管: {username} / {password} (role=super_admin)")
 
 

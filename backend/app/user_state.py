@@ -118,3 +118,34 @@ async def get_user_state(user_id: int) -> Optional[dict]:
             logger.warning("[user_state] MySQL 读取失败 uid=%s: %s", user_id, e)
 
     return result or None
+
+
+async def ensure_user_state(user_id: int) -> None:
+    """用户注册 / 超管创建时调用: 确保 user_states 行存在(MySQL)+ 写入 Redis 默认状态并续期。
+
+    语义: user_states 是 users 的「一对一扩展表」, user_id 即主键, 注册即建。
+    幂等: 仅当 MySQL 无该行 / Redis 无该 key 时才初始化为默认状态(idle),
+    绝不覆盖已有运行时状态(例如注册后已在生成、Redis 已是 running 的场景)。
+    """
+    if not user_id:
+        return
+    # Redis: 仅当 key 不存在时初始化默认状态(idle), 再统一续期 TTL(滑动过期)。
+    try:
+        rc = await get_redis()
+        if not await rc.exists(_key(user_id)):
+            await rc.hset(_key(user_id), mapping={"status": "idle"})
+        await rc.expire(_key(user_id), USER_STATE_TTL)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[user_state] Redis 初始化失败 uid=%s: %s", user_id, e)
+
+    # MySQL: 仅当行不存在时建行(默认 status=idle)。
+    try:
+        async with SessionLocal() as s:
+            row = (await s.execute(
+                select(UserState).where(UserState.user_id == user_id)
+            )).scalar_one_or_none()
+            if row is None:
+                s.add(UserState(user_id=user_id, status="idle"))
+                await s.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[user_state] MySQL 初始化失败 uid=%s: %s", user_id, e)

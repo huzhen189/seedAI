@@ -16,6 +16,7 @@ from .config import settings
 from .db import get_db
 from .models import User
 from .repos.user_repo import user_repo
+from .user_state import ensure_user_state
 from .schemas import LoginReq, RefreshReq, RegisterReq, UpdateMeReq, UserResp
 from .security import (
     ACCESS_COOKIE,
@@ -135,6 +136,8 @@ async def register(req: RegisterReq, response: Response, request: Request, db=De
         role="user",
         plan="free",
     )
+    # 注册即建 user_states 扩展行(MySQL)+ 写入 Redis 默认状态(幂等, 不覆盖活跃态)。
+    await ensure_user_state(user.id)
     _set_cookies(response, create_access_token(user.id, user.role), create_refresh_token(user.id), request)
     return _to_resp(user)
 
