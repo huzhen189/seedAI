@@ -22,9 +22,21 @@ from .models import UserState
 
 logger = logging.getLogger("app.user_state")
 
+# Redis 状态缓存过期时间: 3 小时。任何读 / 写都会刷新该 TTL(滑动过期),
+# 保证活跃用户状态常驻, 长期不活跃(>3h)自动回收, 需要时回 MySQL 取权威落库。
+USER_STATE_TTL = 3 * 3600
+
 
 def _key(uid: int) -> str:
     return f"user_states:{uid}"
+
+
+async def _refresh_ttl(rc: Any, uid: int) -> None:
+    """读取命中 Redis 后刷新过期时间(滑动续期), 避免活跃期间被回收。"""
+    try:
+        await rc.expire(_key(uid), USER_STATE_TTL)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[user_state] Redis 续期失败 uid=%s: %s", uid, e)
 
 
 async def touch_user_state(user_id: int, **fields: Any) -> None:
@@ -32,7 +44,7 @@ async def touch_user_state(user_id: int, **fields: Any) -> None:
 
     fields 支持: current_project_id, current_conversation_id, active_trace_id,
     status, current_stage, progress_pct, pause_reason, pending_decision, checkpoint_stage。
-    - Redis: 仅写入提供的非空字段(hset mapping, 值转 str), 并续期 TTL=3600。
+    - Redis: 仅写入提供的非空字段(hset mapping, 值转 str), 并续期 TTL=USER_STATE_TTL(3h)。
     - MySQL: upsert 整行(按 user_id 唯一), 仅对模型已有属性赋值。
     """
     if not user_id:
@@ -47,7 +59,7 @@ async def touch_user_state(user_id: int, **fields: Any) -> None:
         rc = await get_redis()
         mapping = {k: str(v) for k, v in clean.items()}
         await rc.hset(_key(user_id), mapping=mapping)
-        await rc.expire(_key(user_id), 3600)
+        await rc.expire(_key(user_id), USER_STATE_TTL)
     except Exception as e:  # noqa: BLE001
         logger.warning("[user_state] Redis 写入失败 uid=%s: %s", user_id, e)
 
@@ -78,6 +90,8 @@ async def get_user_state(user_id: int) -> Optional[dict]:
         raw = await rc.hgetall(_key(user_id))
         if raw:
             result.update(raw)
+            # 读取命中 Redis -> 刷新滑动过期(USER_STATE_TTL), 保持活跃状态常驻。
+            await _refresh_ttl(rc, user_id)
     except Exception as e:  # noqa: BLE001
         logger.warning("[user_state] Redis 读取失败 uid=%s: %s", user_id, e)
 
