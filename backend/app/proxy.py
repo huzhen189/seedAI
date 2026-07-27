@@ -810,9 +810,17 @@ async def chat(
                 await rc.srem(f"clients:{tid}", conn_id)
                 remaining = await rc.scard(f"clients:{tid}")
                 if after is None and not saw_terminal and remaining == 0:
-                    # v4: 断连即暂停(非取消) → Worker 在下一阶段边界暂停并落 checkpoint, 可续跑
+                    # v4: 断连即暂停(非取消) → Worker 在下一阶段边界暂停并落 checkpoint, 可续跑。
+                    # 立即把权威状态翻为 paused(不等 Worker 跑完阶段边界), 让刷新后的 my-info 能
+                    # 立刻看到「已暂停」并进入续传逻辑; Worker 达阶段边界会落 checkpoint 并发布
+                    # paused 事件, 与此处幂等。收口到此一处, 避免 finally/读循环/发送失败多路径
+                    # 重复写状态、且遗漏 finally 路径(导致状态停在 running 的竞态窗口)。
                     q = get_queue()
                     await q.set_pause(tid, "offline_timeout")
+                    await touch_user_state(
+                        user.id, status="paused",
+                        pause_reason="offline_timeout",
+                        pending_decision="continue_instruction")
                     logger.info("[chat] 断连→离线暂停已触发(无活跃客户端) trace=%s", tid)
                 else:
                     logger.info("[chat] 跳过暂停 after=%s saw_terminal=%s remaining=%d trace=%s",
@@ -899,10 +907,6 @@ async def chat(
                                     remaining = await _on_disconnect()
                                     if remaining == 0:
                                         terminal_status = "paused"
-                                        await touch_user_state(
-                                            user.id, status="paused",
-                                            pause_reason="offline_timeout",
-                                            pending_decision="continue_instruction")
                                     break
                             except Exception:
                                 pass
@@ -1074,10 +1078,6 @@ async def chat(
                                         remaining = await _on_disconnect()
                                         if remaining == 0:
                                             terminal_status = "paused"
-                                            await touch_user_state(
-                                                user.id, status="paused",
-                                                pause_reason="offline_timeout",
-                                                pending_decision="continue_instruction")
                                         break
                                 event, data_parts = None, []
                                 continue

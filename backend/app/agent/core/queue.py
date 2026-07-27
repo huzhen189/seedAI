@@ -652,26 +652,29 @@ async def _worker_handle_pause(
             await _sync_checkpoint_to_mysql(conversation_id, _stage, _data, _pct)
         except Exception as e:  # noqa: BLE001
             logger.warning("[Worker] 暂停时 checkpoint 持久化失败(忽略) trace=%s: %s", trace_id, e)
-    # 2) 发 paused 事件
+    # 2) 发 paused 事件(若已被 resume 取消接管, 跳过 —— 旧 Worker 的 paused 事件无意义且会误导客户端)
     try:
         q = get_queue()
-        await q.publish(trace_id, {"event": "paused", "data": {"reason": reason, "stage": stage or "?"}})
+        if await q.is_cancelled(trace_id):
+            logger.info("[Worker] 暂停被取消(已被续跑接管),跳过 paused 事件与 status 回写 trace=%s", trace_id)
+        else:
+            await q.publish(trace_id, {"event": "paused", "data": {"reason": reason, "stage": stage or "?"}})
+            # 3) 写 user_states(权威状态源)
+            if user_id:
+                try:
+                    from ...user_state import touch_user_state
+                    await touch_user_state(
+                        user_id,
+                        status="paused",
+                        pause_reason=reason,
+                        current_stage=stage,
+                        pending_decision="continue_instruction",
+                        active_trace_id=trace_id,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[Worker] 暂停时 user_states 写入失败(忽略) trace=%s: %s", trace_id, e)
     except Exception:
         pass
-    # 3) 写 user_states(权威状态源)
-    if user_id:
-        try:
-            from ...user_state import touch_user_state
-            await touch_user_state(
-                user_id,
-                status="paused",
-                pause_reason=reason,
-                current_stage=stage,
-                pending_decision="continue_instruction",
-                active_trace_id=trace_id,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[Worker] 暂停时 user_states 写入失败(忽略) trace=%s: %s", trace_id, e)
     logger.info("[Worker] 阶段边界暂停 trace=%s reason=%s stage=%s", trace_id, reason, stage)
 
 
