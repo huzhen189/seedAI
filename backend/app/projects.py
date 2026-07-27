@@ -222,21 +222,28 @@ async def auto_start(
         "project": ProjectResp.model_validate(proj),
         "conversation": ConversationResp.model_validate(conv),
     }
+@router.get("/conversations/{conversation_id}")
 async def get_conversation(
     conversation_id: int,
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # 修复 GET /api/conversations/{id} 返回 405(原仅定义 PATCH/DELETE, 本路由装饰器在 v2.2.0 重构时丢失)。
+    # get_by(id, user_id) 同时做归属校验: 不存在或非本人 -> 404。
+    # 注意: 手动构造 dict 返回, 不走 ConversationResp.model_validate——其 messages 字段用了
+    # validation_alias="_messages_disabled", from_attributes 读取 ORM 的 messages 关系会触发
+    # pydantic "no field messages" 错误。消息列表由前端走专用 GET /api/conversations/{id}/messages 加载。
     conv = await conv_repo.get_by(db, id=conversation_id, user_id=user.id)
     if conv is None:
         raise HTTPException(status_code=404, detail="conversation not found")
-    msgs = await message_repo.list_by_conversation(db, conversation_id)
-    resp = ConversationResp.model_validate(conv)
-    # 解包 content 中的 JSON 碎片(兜底)
-    for m in msgs:
-        m.content = _fix_content(m.content)
-    resp.messages = [MessageResp.model_validate(m) for m in msgs]
-    return resp
+    return {
+        "id": conv.id,
+        "project_id": conv.project_id,
+        "user_id": conv.user_id,
+        "name": conv.name,
+        "created_at": conv.created_at.isoformat() if conv.created_at else None,
+        "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+    }
 
 
 @router.patch("/conversations/{conversation_id}", response_model=ConversationResp)

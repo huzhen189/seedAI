@@ -147,6 +147,34 @@ async def list_tools():
     ]
 
 
+# 兼容前端 /api 前缀约定(vite 仅代理 /api 与 /admin, 根路径不经代理无法被浏览器访问)。
+# 浏览器经代理必须走 /api 前缀, 故为推理层只读端点补 /api 别名, 避免 404。
+@app.get("/api/models")
+async def models_api():
+    return list_providers()
+
+
+@app.get("/api/skills")
+async def skills_api():
+    return [
+        {"name": e.name, "intent_tags": e.intent_tags, "is_graph": e.is_graph, "description": e.description}
+        for e in SkillRegistry.all()
+    ]
+
+
+@app.get("/api/tools")
+async def tools_api():
+    return [
+        {"name": e.name, "scope": e.scope, "risk": e.risk, "description": e.description}
+        for e in ToolRegistry.all()
+    ]
+
+
+@app.get("/api/agents")
+async def agents_api():
+    return SkillRegistry.list_agents()
+
+
 @app.get("/registry")
 async def registry_summary():
     return {"skills": SkillRegistry.names(), "tools": ToolRegistry.names()}
