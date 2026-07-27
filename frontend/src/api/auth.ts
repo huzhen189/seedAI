@@ -69,7 +69,10 @@ export async function updateMe(p: UpdateMePayload): Promise<AuthUser> {
 }
 
 export async function logout(): Promise<void> {
-  await fetch('/auth/logout', { method: 'POST' }).catch(() => {})
+  // credentials: 'include' 确保同源下也显式携带 Cookie(删除指令依赖它)
+  await fetch('/auth/logout', { method: 'POST', credentials: 'include' }).catch(
+    () => {},
+  )
 }
 
 /** 读取当前登录用户;未登录或出错返回 null(前端据此显示登录层)。 */

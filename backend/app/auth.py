@@ -85,9 +85,29 @@ def _set_cookies(resp: Response, access: str, refresh: str, request: Request | N
 
 
 def _clear_cookies(resp: Response, request: Request | None = None) -> None:
-    domain = _cookie_domain_for((request.headers.get('host') if request else None))
+    """登出时清除 access / refresh Cookie。
+
+    关键:删除指令必须与写入(_set_cookies)保持【完全一致】的属性
+    (path / domain / secure / httponly / samesite),否则浏览器会因属性不匹配
+    而拒绝删除,导致「点退出、刷新又变回登录态」(实测 bug)。
+
+    domain 双保险:登录时按请求 Host 计算 domain(本地 localhost/127.0.0.1
+    场景为 None,生产域名为 .huzhen.net.cn),这里两种都下发删除指令,
+    覆盖不同 Host 访问留下的 cookie 变体。
+    """
+    host = (request.headers.get('host') if request else None)
+    domain = _cookie_domain_for(host)
+    base = {
+        "path": "/",
+        "secure": settings.cookie_secure,
+        "httponly": True,
+        "samesite": "lax",
+    }
     for name in (ACCESS_COOKIE, REFRESH_COOKIE):
-        resp.delete_cookie(name, domain=domain or None)
+        if domain:
+            resp.delete_cookie(name, domain=domain, **base)
+        # 不带 domain 的变体(本地联调 / 不同 Host 残留)
+        resp.delete_cookie(name, domain=None, **base)
 
 
 def _to_resp(u: User) -> UserResp:

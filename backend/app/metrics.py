@@ -276,9 +276,14 @@ async def _db_status() -> dict:
         pool = engine.pool
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
+            # 取当前连接的数据库名作为绑定参数(修复 InvalidRequestError:
+            # A value is required for bind parameter 'db' —— 原 SQL 用了命名
+            # 参数 :db 却从未传值)。
+            db_name = getattr(engine.url, "database", None) or ""
             size_row = (await conn.execute(
                 text("SELECT SUM(data_length + index_length) AS bytes "
-                     "FROM information_schema.tables WHERE table_schema = :db")
+                     "FROM information_schema.tables WHERE table_schema = :db"),
+                {"db": db_name},
             )).fetchone()
             data_bytes = int(size_row[0] or 0) if size_row else 0
             max_conn_row = (await conn.execute(text("SHOW VARIABLES LIKE 'max_connections'"))).fetchone()
