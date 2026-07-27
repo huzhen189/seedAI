@@ -892,9 +892,9 @@ async def chat(
                                         # 主路径: Redis( <1ms, 不阻塞 SSE 流)
                                         await ck_set(conversation_id, stage, ck_data, progress_pct)
                                         logger.info("[chat] 断点→Redis conv=%s stage=%s", conversation_id, stage)
-                                        # 异步同步到 MySQL(后台, 不阻塞)
-                                        asyncio.create_task(_sync_checkpoint_to_mysql(
-                                            conversation_id, stage, ck_data, progress_pct))
+                                        # 同步到 MySQL(await: 确保服务重启后可恢复, 不再 fire-and-forget)
+                                        await _sync_checkpoint_to_mysql(
+                                            conversation_id, stage, ck_data, progress_pct)
                                     elif event == "paused":
                                         terminal_status = "paused"
                                         saw_terminal = True
@@ -905,6 +905,11 @@ async def chat(
                                                          "goal": payload_obj.get("plan_goal", ""),
                                                          "steps": payload_obj.get("plan_steps", [])},
                                                         30)
+                                        # ── 持久化修复: paused 状态将方案摘要写入 assistant_parts, 确保
+                                        #    _do_persist 有内容落库(即使客户端已断开, 刷新后也能看到"正在等待确认"的消息)
+                                        _plan_title = (payload_obj or {}).get("plan_title") or (payload_obj or {}).get("title") or "方案已生成"
+                                        _plan_goal = (payload_obj or {}).get("plan_goal") or (payload_obj or {}).get("goal") or ""
+                                        assistant_parts.append(f"📋 {_plan_title}\n{_plan_goal}")
                                     elif event == "intent" and isinstance(payload_obj, dict):
                                         # 两级意图记录(供管理后台系统分析)
                                         l1 = payload_obj.get("level1") or payload_obj.get("intent") or "unknown"
