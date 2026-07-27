@@ -473,9 +473,22 @@ async def _persist_worker_result(
                     conversation_id=conv.id, role="user",
                     content=user_text, model_id=model_id, trace_id=trace_id,
                 ))
-            # assistant 消息(幂等 upsert)
+            # assistant 消息(幂等 upsert); 失败/中断且无产出时仍补反馈消息
             if assistant_text.strip():
                 await message_repo.upsert_assistant(s, conv.id, trace_id, assistant_text, model_id)
+            elif terminal_status in ("error", "aborted", "unsupported", "paused"):
+                try:
+                    existing = await message_repo.get_by_trace(s, trace_id, "assistant")
+                    if existing is None:
+                        _fb = {
+                            "error": "⚠️ 生成失败，请稍后重试。",
+                            "aborted": "⚠️ 生成已取消。",
+                            "unsupported": "⚠️ 当前请求暂不支持。",
+                            "paused": "⚠️ 生成已中断（可继续）。",
+                        }.get(terminal_status, "⚠️ 生成未产生结果。")
+                        await message_repo.upsert_assistant(s, conv.id, trace_id, _fb, model_id)
+                except Exception:  # noqa: BLE001
+                    pass
             # 更新会话标题(首次)
             if not conv.name and user_text:
                 conv.name = user_text[:20]
@@ -503,7 +516,7 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
             logger.info("[chat] [8/8] 后台落库 trace=%s attempt=%d", tid, attempt + 1)
             async with _S() as s:
                 await finish_trace(s, tid, terminal_status, max(0, len(assistant_text) // 4))
-                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url, files_dict, refined_summary)
+                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url, files_dict, refined_summary, terminal_status)
                 # 后置 QC 三裁判结果落库(幂等 upsert by trace_id)
                 if qc_result is not None:
                     try:
@@ -1212,6 +1225,24 @@ async def my_info(user: CurrentUser = Depends(get_current_user)):
     }
 
 
+async def _reconcile_interruption_note(s, conv_id: int, trace_id: str, note: str) -> None:
+    """孤儿/重启对账补反馈消息: 仅当该 trace 尚无 assistant 消息(此前未落任何结果)
+    且确实存在对应用户消息(说明该轮已开始)时才写入, 保证幂等、不覆盖已落的部分结果。
+    目的: 服务强杀(重启/杀端口)时在途 Worker 随进程死亡, finally 永不执行 → 该轮既无
+    消息也无暂停落库; 此处补一条「中断」反馈, 让前端重载后总能看到结果(成功/失败/中断均落库)。"""
+    try:
+        existing = await message_repo.get_by_trace(s, trace_id, "assistant")
+        if existing is not None:
+            return
+        user_msg = await message_repo.get_by_trace(s, trace_id, "user")
+        if user_msg is None:
+            return
+        await message_repo.upsert_assistant(s, conv_id, trace_id, note, "system")
+        logger.info("[reconcile] 补中断反馈消息 conv=%s trace=%s", conv_id, trace_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[reconcile] 补中断反馈消息失败 conv=%s trace=%s: %s", conv_id, trace_id, e)
+
+
 async def reconcile_orphaned_runs() -> None:
     """进程启动对账: 进程被强杀(重启 / 杀端口)时, 在途 Worker 随之死亡,
     留下「孤儿 Trace」—— `Trace.status` 永远停在 'running'(无 Worker 回填 finished_at),
@@ -1262,6 +1293,10 @@ async def reconcile_orphaned_runs() -> None:
                         pending_decision="continue_instruction",
                         active_trace_id=t.trace_id,
                     )
+                    # 若断连前尚未落任何消息(硬重启杀死在途 Worker), 补一条「可续」反馈
+                    await _reconcile_interruption_note(
+                        s, conv_id, t.trace_id,
+                        "⚠️ 生成因服务重启中断，已保留断点，可点击「继续」从中断处恢复。")
                     logger.info("[reconcile] 保留可恢复暂停 trace=%s conv=%s", t.trace_id, conv_id)
                     continue
                 # 无 checkpoint → 孤儿, 翻 aborted(回填 finished_at)
@@ -1270,6 +1305,10 @@ async def reconcile_orphaned_runs() -> None:
                 except Exception as e:  # noqa: BLE001
                     logger.warning("[reconcile] finish 失败 trace=%s: %s", t.trace_id, e)
                 await reset_user_state(uid)
+                # 补一条「中断」反馈消息, 让前端重载后看到结果而非静默空白
+                await _reconcile_interruption_note(
+                    s, conv_id, t.trace_id,
+                    "⚠️ 本次生成因服务重启而中断，未能生成完整结果。你可以重新发起这条对话继续。")
                 logger.info("[reconcile] 孤儿 Trace 翻 aborted trace=%s conv=%s user=%s",
                             t.trace_id, conv_id, uid)
     except Exception as e:  # noqa: BLE001
@@ -1358,6 +1397,7 @@ async def _persist_conversation(
     preview_url: str | None = None,
     files_dict: dict[str, str] | None = None,
     refined_summary: str = "",
+    terminal_status: str = "done",
 ) -> None:
     """SSE 结束后落库。build 类消息走 Artifact+结构化 JSON, chat 类存纯文本。"""
     # 归一化: 拆解 {"data":"x"}{"data":"y"}... → "xy..." (兜底防 AI 服务旧格式)
@@ -1416,6 +1456,24 @@ async def _persist_conversation(
         # ---- 闲聊/文档: 纯文本 ----
         if assistant_text:
             await message_repo.upsert_assistant(db, conv.id, trace_id, assistant_text, model)
+
+    # 失败/中断/不支持 且整轮无任何产出时, 仍补一条反馈消息, 保证前端总能看到结果
+    # (成功/失败/中断均落库, 满足"无论如何后端都要返回一条 message 反馈用户")。
+    # 仅当该 trace 尚无 assistant 消息时写入, 幂等、不覆盖已落的部分结果。
+    if not assistant_text.strip() and terminal_status in ("error", "aborted", "unsupported", "paused"):
+        try:
+            existing = await message_repo.get_by_trace(db, trace_id, "assistant")
+            if existing is None:
+                _fb = {
+                    "error": "⚠️ 生成失败，请稍后重试。",
+                    "aborted": "⚠️ 生成已取消。",
+                    "unsupported": "⚠️ 当前请求暂不支持。",
+                    "paused": "⚠️ 生成已中断（可继续）。",
+                }.get(terminal_status, "⚠️ 生成未产生结果。")
+                await message_repo.upsert_assistant(db, conv.id, trace_id, _fb, model)
+                logger.info("[chat] 空产出补偿反馈消息 trace=%s status=%s", trace_id, terminal_status)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[chat] 空产出补偿失败 trace=%s: %s", trace_id, e)
 
     if not conv.name and user_text:
         conv.name = user_text[:20]
