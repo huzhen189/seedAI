@@ -347,6 +347,17 @@ class QueueBackend:
     async def set_cancel(self, trace_id: str) -> None:
         raise NotImplementedError
 
+    # ── 暂停原语(v4 断点复联): 与 cancel/abort 区分, 跑完当前阶段后再停 ──
+    async def is_paused(self, trace_id: str) -> "str | None":
+        """返回暂停原因(user_interrupt / offline_timeout), 未暂停返回 None。"""
+        raise NotImplementedError
+
+    async def set_pause(self, trace_id: str, reason: str) -> None:
+        raise NotImplementedError
+
+    async def clear_pause(self, trace_id: str) -> None:
+        raise NotImplementedError
+
 
 class MemoryBackend(QueueBackend):
     def __init__(self):
@@ -354,6 +365,7 @@ class MemoryBackend(QueueBackend):
         self._progress: Dict[str, asyncio.Queue] = {}  # 实时转发队列
         self._history: Dict[str, list] = {}  # trace_id -> [event, ...] 历史(可回放)
         self._cancel: set = set()
+        self._pause: Dict[str, str] = {}  # trace_id -> reason(暂停原语)
 
     async def open_channel(self, trace_id: str):
         self._history.setdefault(trace_id, [])
@@ -408,6 +420,15 @@ class MemoryBackend(QueueBackend):
 
     async def set_cancel(self, trace_id: str) -> None:
         self._cancel.add(trace_id)
+
+    async def is_paused(self, trace_id: str) -> "str | None":
+        return self._pause.get(trace_id)
+
+    async def set_pause(self, trace_id: str, reason: str) -> None:
+        self._pause[trace_id] = reason
+
+    async def clear_pause(self, trace_id: str) -> None:
+        self._pause.pop(trace_id, None)
 
 
 class RedisBackend(QueueBackend):
@@ -561,6 +582,21 @@ class RedisBackend(QueueBackend):
     async def set_cancel(self, trace_id: str) -> None:
         await self._r.set(f"cancel:{trace_id}", "1", ex=3600)
 
+    async def is_paused(self, trace_id: str) -> "str | None":
+        try:
+            return await self._r.get(f"pause:{trace_id}")
+        except Exception:
+            return None
+
+    async def set_pause(self, trace_id: str, reason: str) -> None:
+        await self._r.set(f"pause:{trace_id}", reason, ex=3600)
+
+    async def clear_pause(self, trace_id: str) -> None:
+        try:
+            await self._r.delete(f"pause:{trace_id}")
+        except Exception:
+            pass
+
 
 _backend: Optional[QueueBackend] = None
 
@@ -584,6 +620,59 @@ def get_queue() -> QueueBackend:
         logger.warning("Redis 不可用,回退内存队列: %s", e)
         _backend = MemoryBackend()
     return _backend
+
+
+# 阶段进度 → 百分比(与 proxy.py 断点回放保持一致)
+_PAUSE_STAGE_PROGRESS = {
+    "planner_done": 25, "coder_done": 65,
+    "reviewer_r0": 75, "reviewer_r1": 85, "reviewer_r2": 95,
+}
+
+
+async def _worker_handle_pause(
+    trace_id: str,
+    conversation_id: int | None,
+    user_id: int | None,
+    reason: str,
+    stage: str | None,
+    ck: tuple | None,
+) -> None:
+    """Worker 阶段边界暂停(v4 断点复联)。
+
+    - 重存 checkpoint 到 Redis + MySQL(即使 SSE 客户端已断开, 断点数据也持久化, 供 resume 续跑)
+    - 发 paused 事件(供仍连着的 SSE 客户端渲染「已暂停」)
+    - 写 user_states.status=paused(权威状态源, 即使无 SSE 客户端也能恢复)
+    """
+    # 1) 重存 checkpoint
+    if ck and conversation_id:
+        try:
+            from ..proxy import ck_set, _sync_checkpoint_to_mysql
+            _stage, _data, _pct = ck
+            await ck_set(conversation_id, _stage, _data, _pct)
+            await _sync_checkpoint_to_mysql(conversation_id, _stage, _data, _pct)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[Worker] 暂停时 checkpoint 持久化失败(忽略) trace=%s: %s", trace_id, e)
+    # 2) 发 paused 事件
+    try:
+        q = get_queue()
+        await q.publish(trace_id, {"event": "paused", "data": {"reason": reason, "stage": stage or "?"}})
+    except Exception:
+        pass
+    # 3) 写 user_states(权威状态源)
+    if user_id:
+        try:
+            from ...user_state import touch_user_state
+            await touch_user_state(
+                user_id,
+                status="paused",
+                pause_reason=reason,
+                current_stage=stage,
+                pending_decision="continue_instruction",
+                active_trace_id=trace_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[Worker] 暂停时 user_states 写入失败(忽略) trace=%s: %s", trace_id, e)
+    logger.info("[Worker] 阶段边界暂停 trace=%s reason=%s stage=%s", trace_id, reason, stage)
 
 
 async def worker_loop(concurrency: int = 1):
@@ -930,6 +1019,9 @@ async def worker_loop(concurrency: int = 1):
                         qc_assistant_buf = []
                         done_event = None
                         review_needs = False
+                        paused = False
+                        last_stage: str | None = None
+                        last_ck: tuple | None = None
                         async for event in orch.execute(
                             sub_tasks, model_id, messages,
                             trace_id=trace_id, is_cancelled=_cancelled,
@@ -976,6 +1068,23 @@ async def worker_loop(concurrency: int = 1):
                                 merge_data = event.get("data") or {}
                             await q.publish(trace_id, event)
                             event_cnt += 1
+                            # ── v4 阶段边界暂停检测(断连即暂停 / 手动停止) ──
+                            _ev = event.get("event")
+                            _d = event.get("data") or {}
+                            if _ev == "node" and isinstance(_d, dict):
+                                last_stage = _d.get("stage") or last_stage
+                            elif _ev == "checkpoint" and isinstance(_d, dict):
+                                _ck_stage = _d.get("stage", "?")
+                                last_ck = (_ck_stage, _d.get("data", {}),
+                                          _PAUSE_STAGE_PROGRESS.get(_ck_stage, 50))
+                            pr = await q.is_paused(trace_id)
+                            if pr:
+                                await _worker_handle_pause(
+                                    trace_id, conversation_id, user_id, pr, last_stage, last_ck)
+                                paused = True
+                                break
+                        if paused:
+                            continue
                         # 编排整体统计(成功率 + 总耗时 + 策略)
                         try:
                             sc = int(merge_data.get("success_count", 0))
@@ -1034,6 +1143,9 @@ async def worker_loop(concurrency: int = 1):
                 review_needs = False
                 # 生成阶段耗时统计: 记录进入各阶段的时间戳(供 record_gen_stage 算时长)
                 _stage_enter: dict[str, float] = {}
+                paused = False
+                last_stage: str | None = None
+                last_ck: tuple | None = None
                 async for event in run_skill(
                     skill_name, model_id, messages,
                     trace_id=trace_id, is_cancelled=_cancelled,
@@ -1071,6 +1183,23 @@ async def worker_loop(concurrency: int = 1):
                             _stage_enter[stg] = time.time()
                     await q.publish(trace_id, event)
                     event_cnt += 1
+                    # ── v4 阶段边界暂停检测(断连即暂停 / 手动停止) ──
+                    _ev = event.get("event")
+                    _d = event.get("data") or {}
+                    if _ev == "node" and isinstance(_d, dict):
+                        last_stage = _d.get("stage") or last_stage
+                    elif _ev == "checkpoint" and isinstance(_d, dict):
+                        _ck_stage = _d.get("stage", "?")
+                        last_ck = (_ck_stage, _d.get("data", {}),
+                                  _PAUSE_STAGE_PROGRESS.get(_ck_stage, 50))
+                    pr2 = await q.is_paused(trace_id)
+                    if pr2:
+                        await _worker_handle_pause(
+                            trace_id, conversation_id, user_id, pr2, last_stage, last_ck)
+                        paused = True
+                        break
+                if paused:
+                    continue
                 # ── [6/6] 后置 QC 三裁判(按需触发) ──
                 # 生成类技能: 仅当 reviewer 标记 needs_review 才跑三裁判(省 LLM 成本)。
                 # 闲聊(agent_chat) 无 reviewer, 始终 QC 兜底以保证对话质量 + 支撑低分重答(Phase D)。

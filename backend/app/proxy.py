@@ -55,6 +55,7 @@ from .security import ACCESS_COOKIE, CurrentUser, _set_access_cookie, create_acc
 # 单进程合并:直接复用同进程的推理队列(取代 httpx 转发)
 from .agent.core.queue import get_queue
 from .tracing import append_trace_event, create_trace, finish_trace, log_usage
+from .user_state import touch_user_state, get_user_state
 
 import html as _html
 import re
@@ -718,6 +719,18 @@ async def chat(
                 payload["project_constraints"] = _parse_project_forbid(proj.system_prompt)
     except Exception as e:
         logger.warning("[chat] 项目上下文获取失败 conv=%s: %s", conversation_id, e)
+    # v4: 记录「我的状态」入口(上一次在操作哪一个项目/会话 + 当前生成中)
+    # 断点复联三场景的权威状态源, 供 GET /api/my-info 恢复前端上下文。
+    await touch_user_state(
+        user.id,
+        current_project_id=project_id,
+        current_conversation_id=conversation_id,
+        active_trace_id=tid,
+        status="running",
+        current_stage="router",
+        pause_reason=None,
+        pending_decision=None,
+    )
     # 站已生成信号: 该对话历史中曾产出预览 → 迭代修改类消息应走建站(意图纠偏)
     try:
         payload["site_generated"] = bool(await cache_get(f"site_generated:{conversation_id}"))
@@ -786,9 +799,10 @@ async def chat(
             logger.warning("[chat] 连接登记异常 trace=%s: %s", tid, e)
 
         async def _on_disconnect() -> int:
-            """断连清理: 移除本连接; 若再无活跃客户端且本次未正常结束, 置 cancel 让 Worker 中断。
+            """断连清理(v4 断点复联): 移除本连接; 若再无活跃客户端且本次未正常结束,
+            置 pause(offline_timeout) 让 Worker 跑完当前阶段后暂停, 而非立即 abort。
 
-            返回剩余活跃连接数(异常时返回 1, 保守地视为仍有其他客户端 → 不取消/不置 aborted,
+            返回剩余活跃连接数(异常时返回 1, 保守地视为仍有其他客户端 → 不暂停/不置 aborted,
             避免误杀他人仍在消费的生成)。
             """
             try:
@@ -796,11 +810,12 @@ async def chat(
                 await rc.srem(f"clients:{tid}", conn_id)
                 remaining = await rc.scard(f"clients:{tid}")
                 if after is None and not saw_terminal and remaining == 0:
-                    # 与手动 /cancel 同标志、同语义(ex=3600): AI Worker 在下个 token/阶段前中断
-                    await rc.set(f"cancel:{tid}", "1", ex=3600)
-                    logger.info("[chat] 断连自动取消已触发(无活跃客户端) trace=%s", tid)
+                    # v4: 断连即暂停(非取消) → Worker 在下一阶段边界暂停并落 checkpoint, 可续跑
+                    q = get_queue()
+                    await q.set_pause(tid, "offline_timeout")
+                    logger.info("[chat] 断连→离线暂停已触发(无活跃客户端) trace=%s", tid)
                 else:
-                    logger.info("[chat] 跳过自动取消 after=%s saw_terminal=%s remaining=%d trace=%s",
+                    logger.info("[chat] 跳过暂停 after=%s saw_terminal=%s remaining=%d trace=%s",
                                 bool(after), saw_terminal, remaining, tid)
                 return remaining
             except Exception as e:
@@ -835,6 +850,15 @@ async def chat(
                             await q.delete_channel(tid)
                         except Exception as _dc_e:  # noqa: BLE001
                             logger.warning("[chat] delete_channel 失败(忽略) trace=%s: %s", tid, _dc_e)
+                        # v4: 续跑前清暂停 + 杀掉可能存活的老 Worker(避免双 Worker 并发), 再重新入队
+                        try:
+                            await q.clear_pause(tid)
+                            await q.set_cancel(tid)
+                        except Exception as _cp_e:  # noqa: BLE001
+                            logger.warning("[chat] clear_pause/set_cancel 失败(忽略) trace=%s: %s", tid, _cp_e)
+                        # v4: 状态翻回 running(从断点续跑)
+                        await touch_user_state(
+                            user.id, status="running", pause_reason=None, pending_decision=None)
                         await q.open_channel(tid)
                         await q.enqueue(payload)
                         logger.info("[chat] [2/3] resume 删旧流并重新入队(执行断点续跑) trace=%s queue=%s",
@@ -874,7 +898,11 @@ async def chat(
                                     logger.info("[chat] 客户端已断开, 提前终止读取上游 trace=%s", tid)
                                     remaining = await _on_disconnect()
                                     if remaining == 0:
-                                        terminal_status = "aborted"
+                                        terminal_status = "paused"
+                                        await touch_user_state(
+                                            user.id, status="paused",
+                                            pause_reason="offline_timeout",
+                                            pending_decision="continue_instruction")
                                     break
                             except Exception:
                                 pass
@@ -904,6 +932,9 @@ async def chat(
                                     elif event in ("node", "think", "plan", "error", "aborted", "degraded", "preview"):
                                         if isinstance(payload_obj, dict) and event in ("node", "think"):
                                             stage = payload_obj.get("stage")
+                                            if event == "node" and stage:
+                                                # v4: 阶段推进 → 实时记录当前 stage 到 user_states
+                                                await touch_user_state(user.id, status="running", current_stage=stage)
                                         if event == "node" and isinstance(payload_obj, dict):
                                             if payload_obj.get("stage") == "preview" and payload_obj.get("url"):
                                                 preview_url = payload_obj["url"]
@@ -919,12 +950,15 @@ async def chat(
                                         if event == "aborted":
                                             terminal_status = "aborted"
                                             saw_terminal = True
+                                            await touch_user_state(user.id, status="aborted")
                                         elif event == "error":
                                             terminal_status = "error"
                                             saw_terminal = True
+                                            await touch_user_state(user.id, status="error")
                                     elif event == "unsupported":
                                         terminal_status = "unsupported"
                                         saw_terminal = True
+                                        await touch_user_state(user.id, status="unsupported")
                                         await record_unsupported(user.id, user_text)
                                         await record_intent_decision("unsupported")
                                     elif event == "checkpoint" and isinstance(payload_obj, dict):
@@ -941,6 +975,10 @@ async def chat(
                                         # 同步到 MySQL(await: 确保服务重启后可恢复, 不再 fire-and-forget)
                                         await _sync_checkpoint_to_mysql(
                                             conversation_id, stage, ck_data, progress_pct)
+                                        # v4: 同步记录断点进度到 user_states
+                                        await touch_user_state(
+                                            user.id, status="running",
+                                            checkpoint_stage=stage, progress_pct=progress_pct)
                                     elif event == "paused":
                                         terminal_status = "paused"
                                         saw_terminal = True
@@ -956,6 +994,14 @@ async def chat(
                                         _plan_title = (payload_obj or {}).get("plan_title") or (payload_obj or {}).get("title") or "方案已生成"
                                         _plan_goal = (payload_obj or {}).get("plan_goal") or (payload_obj or {}).get("goal") or ""
                                         assistant_parts.append(f"📋 {_plan_title}\n{_plan_goal}")
+                                        # v4: 暂停状态落 user_states(权威状态源, 供 my-info 恢复)
+                                        await touch_user_state(
+                                            user.id,
+                                            status="paused",
+                                            pause_reason=(payload_obj or {}).get("reason") or "user_interrupt",
+                                            pending_decision="continue_instruction",
+                                            current_stage=(payload_obj or {}).get("stage"),
+                                        )
                                     elif event == "intent" and isinstance(payload_obj, dict):
                                         # 两级意图记录(供管理后台系统分析)
                                         l1 = payload_obj.get("level1") or payload_obj.get("intent") or "unknown"
@@ -1002,6 +1048,15 @@ async def chat(
                                         # 正常完成: 标记已见终止事件, finally 不再触发自动取消
                                         saw_terminal = True
                                         terminal_status = "done"
+                                        # v4: 正常完成 → user_states 翻 done, 清暂停标记
+                                        await touch_user_state(
+                                            user.id,
+                                            status="done",
+                                            current_stage="done",
+                                            progress_pct=100,
+                                            pause_reason=None,
+                                            pending_decision=None,
+                                        )
                                     logger.info(
                                             "[chat] ◇ SSE #%d type=%s stage=%s data=%.200s",
                                             event_seq, event, stage or "-", data,
@@ -1018,7 +1073,11 @@ async def chat(
                                                     tid, type(_e).__name__)
                                         remaining = await _on_disconnect()
                                         if remaining == 0:
-                                            terminal_status = "aborted"
+                                            terminal_status = "paused"
+                                            await touch_user_state(
+                                                user.id, status="paused",
+                                                pause_reason="offline_timeout",
+                                                pending_decision="continue_instruction")
                                         break
                                 event, data_parts = None, []
                                 continue
@@ -1087,6 +1146,70 @@ async def chat(
     # Set-Cookie: 浏览器同源客户端(SSE/页面)自动携带, 无需手动处理
     _set_access_cookie(resp, new_token)
     return resp
+
+
+@router.post("/pause")
+async def pause_chat(request: Request, user: CurrentUser = Depends(get_current_user)):
+    """v4 手动停止: 置 pause:{tid}=user_interrupt, Worker 跑完当前阶段后暂停并落 checkpoint。
+
+    区别于 /cancel(立即 abort, 不可续跑)。前端「停止」按钮走此接口;「放弃」仍走 /cancel。
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    trace_id = body.get("trace_id")
+    if not trace_id:
+        return {"ok": False, "error": "missing_trace_id"}
+    q = get_queue()
+    await q.set_pause(trace_id, "user_interrupt")
+    await touch_user_state(
+        user.id,
+        status="paused",
+        pause_reason="user_interrupt",
+        pending_decision="continue_instruction",
+        active_trace_id=trace_id,
+    )
+    logger.info("[pause] 标记暂停 trace=%s user=%s", trace_id, user.id)
+    return {"ok": True, "trace_id": trace_id}
+
+
+@router.get("/my-info")
+async def my_info(user: CurrentUser = Depends(get_current_user)):
+    """v4 我的状态入口: 返回上一次项目/会话 + 任务状态, 供前端刷新/重开恢复上下文。
+
+    读取优先级: Redis hash `user_states:{uid}` 优先, miss 回 MySQL `user_states` 表。
+    """
+    state = await get_user_state(user.id)
+    if not state:
+        return {
+            "current_project_id": None,
+            "current_conversation_id": None,
+            "status": "idle",
+            "current_stage": None,
+            "progress_pct": 0,
+            "pause_reason": None,
+            "pending_decision": None,
+            "active_trace_id": None,
+            "needs_resume": False,
+        }
+    status = state.get("status", "idle")
+    needs_resume = status in ("running", "paused")
+    try:
+        progress_pct = int(state.get("progress_pct") or 0)
+    except Exception:
+        progress_pct = 0
+    return {
+        "current_project_id": int(state["current_project_id"]) if state.get("current_project_id") else None,
+        "current_conversation_id": int(state["current_conversation_id"]) if state.get("current_conversation_id") else None,
+        "status": status,
+        "current_stage": state.get("current_stage"),
+        "progress_pct": progress_pct,
+        "pause_reason": state.get("pause_reason"),
+        "pending_decision": state.get("pending_decision"),
+        "active_trace_id": state.get("active_trace_id"),
+        "needs_resume": needs_resume,
+    }
 
 
 def _normalize_assistant_text(text: str) -> str:
