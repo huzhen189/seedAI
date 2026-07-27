@@ -757,6 +757,7 @@ function resetGenState() {
   // B7 修复: 任何新请求/重连/重发都先解除 sending 锁, 避免上一轮 error/abort/retry/
   // clarify/block/confirm/paused 等终态未解锁导致输入框永久卡死(此前仅 onDone 解锁)。
   sending.value = false
+  lastSentText.value = ''
 }
 
 function upsertStep(stage: string, status: ThoughtStep['status'], customLabel?: string) {
@@ -1093,10 +1094,10 @@ async function send() {
     pendingOptionsText.value = ''
   }
   if (!text) return
-  // 生成中: 加入队列(不消耗 sending 锁, 不受防双击拦截)
-  if (generating.value) { enqueue(text); return }
-  if (sending.value) return  // 防双击重复发送(仅在非生成态生效)
+  // 防双击重复发送: 仅当内容与上次完全相同 且 sending 锁未释放时才拦截
+  if (sending.value && text === lastSentText.value) return
   sending.value = true
+  lastSentText.value = text
   // 非阻塞候选提示激活时, 若输入是选择 token(如 "B"/"2"/"选B") → 直接切换 skill
   // 对齐后端 pending_options(完整候选列表: [已选top1, ...alts]); "A"=重新确认当前(忽略), "B"=alts[0]
   if (alternativesData.value && alternativesData.value.skills.length) {
