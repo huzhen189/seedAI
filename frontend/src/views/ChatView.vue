@@ -1086,7 +1086,6 @@ async function loadCurrentProject() {
 }
 
 async function send() {
-  if (sending.value) return  // 防双击重复发送
   let text = input.value.trim()
   // 如果有待发送的选项, 拼接到消息前面
   if (pendingOptionsText.value) {
@@ -1094,6 +1093,9 @@ async function send() {
     pendingOptionsText.value = ''
   }
   if (!text) return
+  // 生成中: 加入队列(不消耗 sending 锁, 不受防双击拦截)
+  if (generating.value) { enqueue(text); return }
+  if (sending.value) return  // 防双击重复发送(仅在非生成态生效)
   sending.value = true
   // 非阻塞候选提示激活时, 若输入是选择 token(如 "B"/"2"/"选B") → 直接切换 skill
   // 对齐后端 pending_options(完整候选列表: [已选top1, ...alts]); "A"=重新确认当前(忽略), "B"=alts[0]
