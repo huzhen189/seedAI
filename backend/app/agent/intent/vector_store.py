@@ -80,6 +80,21 @@ def ensure_intent_index() -> None:
         logger.warning("[向量] 意图索引构建失败(可忽略): %s", e)
 
 
+def check_intent_index() -> bool:
+    """启动期轻量检查(不 embedding): 判断 `intents` 集合是否已构建。
+
+    替代原『启动即重建』逻辑 —— 索引改由 scripts/reset_all.py 在重置阶段构建,
+    启动时只做一次计数检查; 缺失则告警(提示运行重置脚本), 不再每次重启重嵌 82 句。
+    """
+    if not _available():
+        return False
+    try:
+        col = _client().get_collection(name=_INTENT_COLLECTION)
+        return (col.count() or 0) > 0
+    except Exception:
+        return False
+
+
 def _offline_scores(query: str) -> list[tuple[str, float]]:
     """离线 bigram 打分: 对每个意图取其 examples 与 query 的最高重叠系数。"""
     out: list[tuple[str, float]] = []

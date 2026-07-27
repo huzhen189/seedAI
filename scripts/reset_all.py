@@ -117,7 +117,17 @@ async def reset() -> None:
     except Exception as e:
         print(f"  >> Chroma 清理失败(可忽略): {e}")
 
-    # 2.6) 清空项目内全部 *.log 日志文件(运行日志, 重置时不保留)
+    # 2.6) 构建意图向量索引(已移至重置阶段: 重置时一次性构建, 启动不再重复 embed)
+    #      上面保留了 intents 配置集合, 此处 upsert 覆盖写入(稳定 id 幂等, 不重复堆积)。
+    #      这样正常重启直接复用远程 Chroma 中持久化的意图索引, 既不耗时也不烧 embedding 额度。
+    try:
+        from app.agent.intent.vector_store import ensure_intent_index
+        ensure_intent_index()
+        print("  >> 意图向量索引已构建(集合=intents, 已移至重置阶段)")
+    except Exception as e:
+        print(f"  >> 意图向量索引构建失败(可忽略): {e}")
+
+    # 2.7) 清空项目内全部 *.log 日志文件(运行日志, 重置时不保留)
     #      含 logs/ 目录下的运行时观测 jsonl(如 intent_observations.jsonl); 排除 .git / node_modules。
     #      配置/源代码(JSON/YAML/py 等)一律不动。
     try:

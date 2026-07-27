@@ -49,7 +49,9 @@ setup_logging("app")
 async def lifespan(app: FastAPI):
     # 1) 业务层 schema 初始化 + 超管种子
     await init_db()
-    # 2) 推理层: 确保队列单例、重建 Chroma 集合、构建意图向量索引
+    # 2) 推理层: 确保队列单例、重建 Chroma 集合
+    #    注: 意图向量索引(ensure_intent_index) 已移至 scripts/reset_all.py 在重置阶段构建,
+    #        启动时不再每次重嵌 82 句, 仅做轻量检查, 缺失则告警提示运行重置脚本。
     get_queue()
     try:
         from .agent.knowledge.chroma import ensure_collections
@@ -57,10 +59,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("lifespan: ensure_collections 失败(可忽略): %s", e)
     try:
-        from .agent.intent.vector_store import ensure_intent_index
-        ensure_intent_index()
+        from .agent.intent.vector_store import check_intent_index
+        if not check_intent_index():
+            logger.warning(
+                "[startup] 意图向量索引(intents)缺失/为空, 语义召回将降级为离线 bigram。"
+                "请运行 scripts/reset_all.py 重建索引(已移至重置阶段, 不再每次重启重建)。"
+            )
+        else:
+            logger.info("[startup] 意图向量索引检测就绪(集合=intents, 跳过重建)")
     except Exception as e:
-        logger.warning("lifespan: ensure_intent_index 失败(可忽略): %s", e)
+        logger.warning("lifespan: 检查意图索引失败(可忽略): %s", e)
     # 3) 启动 Worker 池(消费 queue:generate, 发布进度)
     try:
         loop = asyncio.get_running_loop()
