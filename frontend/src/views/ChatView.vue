@@ -19,7 +19,7 @@ import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
 import SubTaskTrack from '../components/SubTaskTrack.vue'
 import MergedResult from '../components/MergedResult.vue'
-import { startChat, cancelChat, fetchModels, sendFeedback, type ChatCallbacks } from '../api/chat'
+import { startChat, cancelChat, pauseChat, myInfo, fetchModels, sendFeedback, type ChatCallbacks, type MyInfoResp } from '../api/chat'
 import { getConversation, listArtifacts, renameProject, patch, autoStart } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
@@ -46,6 +46,10 @@ const generating = ref(false)
 const finished = ref(false)
 const sending = ref(false)   // 防双击重复发送
 const cancelling = ref(false) // 取消中状态(按钮反馈)
+
+// v4 断点复联: 手动停止 / 断连 触发的「已暂停」态(区别于 await_confirm 方案确认)。
+// 置位后输入框保持可输入, 用户发送即带 checkpoint 续跑。
+const v4Pause = ref<{ tid: string; reason: string; stage: string } | null>(null)
 
 // 思考时间线(每步一个 agent 节点)+ 计划特殊节点;替代旧版混成一坨的 thinks 字符串。
 const thoughtSteps = ref<ThoughtStep[]>([])
@@ -885,6 +889,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planNodes.value = []
       planPreview.value = null
       clearActiveGen()
+      v4Pause.value = null
       clearDraft()
       loadArtifacts()
       // 从 DB 同步当前会话消息(替换乐观更新的 id:0)
@@ -900,6 +905,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planNodes.value = []
       errorMsg.value = '已取消'
       clearActiveGen()
+      v4Pause.value = null
       if (projectStore.currentProjectId) {
         convStore.loadConversations(projectStore.currentProjectId).then(() => scrollToBottom(false))
       }
@@ -975,6 +981,15 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       clearActiveGen()
     },
     onPaused: (d: any) => {
+      // v4 断点复联: 手动停止 / 断连 → 暂存, 等用户指令(可续跑)
+      if (d.reason === 'user_interrupt' || d.reason === 'offline_timeout') {
+        generating.value = false
+        finished.value = false
+        sending.value = false
+        // 保留 traceId 供 resume 续跑(后端 resume 复用同一 tid 重新入队)
+        v4Pause.value = { tid: traceId.value, reason: d.reason, stage: d.stage || currentStage.value || '?' }
+        return
+      }
       // 方案确认(await_confirm): 后端 Planner 产出后暂停, 前端统一走 pendingConfirm 弹窗
       if (d.stage === 'await_confirm') {
         generating.value = false
@@ -997,6 +1012,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planNodes.value = []
       errorMsg.value = m
       clearActiveGen()
+      v4Pause.value = null
     },
     onQc: (data: QcResult) => {
       // 后置 QC 三裁判结果:按当前 trace_id 存入 qcMap, 气泡徽标读取
@@ -1094,6 +1110,15 @@ async function send() {
     pendingOptionsText.value = ''
   }
   if (!text) return
+  // v4 断点复联: 处于「已暂停」态时, 当前输入即续跑指令(从 checkpoint 恢复并带新指令)
+  if (v4Pause.value && !generating.value) {
+    const tid = v4Pause.value.tid
+    v4Pause.value = null
+    if (convStore.currentConvId != null) {
+      await resume(convStore.currentConvId, tid, text)
+    }
+    return
+  }
   // 防双击重复发送: 仅当内容与上次完全相同 且 sending 锁未释放时才拦截
   if (sending.value && text === lastSentText.value) return
   sending.value = true
@@ -1204,7 +1229,8 @@ async function doSend(text: string) {
 }
 
 // 重连:以同一 traceId 重开 SSE 全量回放(后端命中 stream_exists 则续接,不重新生成)。
-async function resume(convId: number, tid: string) {
+// q 可选: 断点续跑时附带的新指令(手动停止后用户继续输入),后端从 checkpoint 恢复并衔接该指令。
+async function resume(convId: number, tid: string, q?: string) {
   if (generating.value) return  // 防重复调用(初始挂载的双路径可能触发两次)
   resetGenState()
   // 已加载的 assistant 消息内容清空,交由回放重新累积(避免重复)。
@@ -1213,12 +1239,35 @@ async function resume(convId: number, tid: string) {
   generating.value = true
   traceId.value = tid
   setActiveGen(convId, tid)
+  // 续跑带新指令: 乐观追加用户气泡 + 新的 assistant 占位(回放会重新累积)
+  let assistantIdx = idx
+  if (q) {
+    convStore.messages.push({
+      role: 'user',
+      content: q,
+      conversation_id: convId,
+      id: 0,
+      created_at: '',
+      model_id: model.value,
+    } as any)
+    convStore.messages.push({
+      role: 'assistant',
+      content: '',
+      conversation_id: convId,
+      id: 0,
+      created_at: '',
+      model_id: model.value,
+    } as any)
+    assistantIdx = convStore.messages.length - 1
+    input.value = ''
+  }
   openEs({
     model: model.value,
     traceId: tid,
     conversationId: convId,
+    ...(q ? { q } : {}),
     resume: true,
-    cb: makeCallbacks(idx),
+    cb: makeCallbacks(assistantIdx),
   })
 }
 
@@ -1232,16 +1281,93 @@ async function maybeResume() {
   resume(ag.convId, ag.traceId)
 }
 
+// v4 断点复联: 离开页面(新标签)后重开, 据 my-info 恢复「已暂停」横幅(区别于同标签刷新的 maybeResume)。
+// 同标签刷新: sessionStorage 仍有 activeGen → 走 maybeResume 无缝续跑; 此处仅处理新标签场景。
+async function restoreFromMyInfo() {
+  if (!auth.user.value) return
+  if (getActiveGen()) return  // 同标签刷新: 交由 maybeResume 处理, 避免重复续跑
+  let info: MyInfoResp
+  try {
+    info = await myInfo()
+  } catch {
+    return
+  }
+  if (!info.needs_resume) return
+  const { current_project_id: pid, current_conversation_id: cid, active_trace_id: tid, status } = info
+  if (pid == null || cid == null || !tid) return
+  // 定位到上次操作的项目/会话
+  if (projectStore.currentProjectId !== pid) {
+    projectStore.currentProjectId = pid
+    await convStore.loadConversations(pid)
+  } else if (convStore.currentConvId !== cid) {
+    await convStore.loadConversations(pid)
+  }
+  convStore.currentConvId = cid
+  // 加载该会话历史消息, 便于用户看到暂停前的上下文
+  try {
+    const c = await getConversation(cid)
+    if (c?.messages) convStore.messages = c.messages
+  } catch { /* 忽略 */ }
+  if (status === 'paused') {
+    // 展示「已暂停」横幅, 等用户输入指令续跑(不自动重连执行, 避免意外继续)
+    v4Pause.value = { tid, reason: info.pause_reason || 'offline_timeout', stage: info.current_stage || '?' }
+  } else if (status === 'running') {
+    // 极端竞态(断连尚未翻 paused): 直接续跑
+    await resume(cid, tid)
+  }
+}
+
+// v4 断点复联: 「已暂停」横幅「继续」按钮 —— 带当前输入(或仅续跑)从 checkpoint 恢复
+async function continueV4Pause() {
+  const p = v4Pause.value
+  if (!p) return
+  const text = input.value.trim()
+  v4Pause.value = null
+  if (convStore.currentConvId == null) return
+  if (text) await resume(convStore.currentConvId, p.tid, text)
+  else await resume(convStore.currentConvId, p.tid)
+}
+
+// v4 断点复联: 「已暂停」横幅「放弃」按钮 —— 级联取消 Worker + 标记会话已放弃
+async function abortV4Pause() {
+  const p = v4Pause.value
+  if (!p) return
+  try { if (p.tid) await cancelChat(p.tid) } catch { /* 忽略 */ }
+  v4Pause.value = null
+  generating.value = false
+  if (convStore.currentConvId != null) {
+    try {
+      await patch(`/api/conversations/${convStore.currentConvId}`, { status: 'aborted', checkpoint_data: null })
+    } catch { /* 忽略 */ }
+    if (projectStore.currentProjectId) await convStore.loadConversations(projectStore.currentProjectId)
+  }
+}
+
 async function stop() {
   if (!generating.value) return
+  // v4 手动停止: 标记为 pause(跑完当前阶段后暂停,可续跑), 而非立即 abort。
+  // 不在此置 generating=false; 待后端阶段边界发出 paused 事件(onPaused)后再停 UI 并显示横幅。
   cancelling.value = true
+  try { if (traceId.value) await pauseChat(traceId.value) } catch { /* 忽略暂停请求失败 */ }
+  cancelling.value = false
+}
+
+// v4 生成中「放弃」—— 立即 abort(区别于「停止」= pause 可续跑)
+async function abortActive() {
+  if (!generating.value) return
+  cancelling.value = true
+  try { if (traceId.value) await cancelChat(traceId.value) } catch { /* 忽略 */ }
   generating.value = false
   sending.value = false
-  // 级联取消(C1):通知业务 /api/cancel -> 业务转发 AI /cancel -> Worker 中断生成。
-  try { if (traceId.value) await cancelChat(traceId.value) } catch { /* 忽略取消错误 */ }
+  cancelling.value = false
   esRef.value?.close()
   esRef.value = null
-  cancelling.value = false
+  v4Pause.value = null
+  if (convStore.currentConvId != null) {
+    try {
+      await patch(`/api/conversations/${convStore.currentConvId}`, { status: 'aborted', checkpoint_data: null })
+    } catch { /* 忽略 */ }
+  }
 }
 
 // 气泡内多维度评价提交(v0.8.5 M1): 按 trace_id 存储, 落库 + 前端即时反馈
@@ -1293,6 +1419,8 @@ onMounted(async () => {
     // 恢复未完成的本地草稿(刷新/崩溃后)
     if (loadDraft()) scrollToBottom(false)
     await maybeResume()
+    // v4 断点复联: 离开页面后重开(新标签)时, 据 my-info 恢复「已暂停」横幅(不自动重连执行)
+    await restoreFromMyInfo()
   }
 })
 onUnmounted(() => { teardownScrollLoading() })
@@ -1442,11 +1570,18 @@ watch(pendingRetry, (r) => {
         <span class="proj-date">{{ currentProjectDate }}</span>
       </div>
 
-      <!-- 断点续跑横幅(§7) -->
+      <!-- 断点续跑横幅(§7, await_confirm 方案确认场景) -->
       <div v-if="pausedConv" class="paused-banner">
         <span>⚠ 未完成的生成 · {{ pausedConv.checkpoint_stage || '?' }} · 已完成 {{ pausedConv.progress_pct || 0 }}%</span>
         <button class="paused-resume" @click="resumeConversation">继续生成</button>
         <button class="paused-abort" @click="abortPaused">放弃</button>
+      </div>
+
+      <!-- v4 断点复联横幅: 手动停止 / 断连 后的「已暂停」态 -->
+      <div v-if="v4Pause" class="paused-banner v4-pause">
+        <span>⏸ 已暂停{{ v4Pause.reason === 'user_interrupt' ? '（手动停止）' : '（连接中断）' }} · 阶段 {{ v4Pause.stage }} · 在下方输入指令可继续</span>
+        <button class="paused-resume" @click="continueV4Pause">继续</button>
+        <button class="paused-abort" @click="abortV4Pause">放弃</button>
       </div>
 
       <div ref="convRef" class="conv" @scroll="onConvScroll">
@@ -1609,6 +1744,7 @@ watch(pendingRetry, (r) => {
           :models="models"
           @send="send"
           @stop="stop"
+          @abandon="abortActive"
         />
         <div v-if="errorMsg" class="error">⚠ {{ errorMsg }}</div>
         <!-- 非阻塞候选提示: 系统已自决 top1 并继续, 列出可切换候选(可点击或输入"用 X"/"B") -->

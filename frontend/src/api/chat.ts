@@ -1,6 +1,6 @@
 import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent, QcResult, RatingDims, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, ClarifyEvent, CancelSummaryEvent, PlanPreviewEvent } from '../types'
 import { notifyAuthRequired } from '../stores/auth'
-import { post, publicGet } from './client'
+import { post, publicGet, get } from './client'
 
 export interface ChatCallbacks {
   onNode?: (data: NodeEvent) => void
@@ -192,6 +192,47 @@ export async function cancelChat(traceId: string): Promise<void> {
     await post('/api/cancel', { trace_id: traceId })
   } catch {
     /* 忽略取消失败 */
+  }
+}
+
+/** v4 手动停止:通知业务 → AI 标记 pause(跑完当前阶段后暂停,可续跑)。区别于 cancelChat(立即 abort)。 */
+export async function pauseChat(traceId: string): Promise<void> {
+  try {
+    await post('/api/pause', { trace_id: traceId })
+  } catch {
+    /* 忽略暂停失败 */
+  }
+}
+
+/** v4 我的状态入口:返回上一次项目/会话 + 任务状态,供刷新/重开恢复上下文。 */
+export interface MyInfoResp {
+  current_project_id: number | null
+  current_conversation_id: number | null
+  status: 'idle' | 'running' | 'paused' | 'aborted' | 'done' | 'error' | string
+  current_stage: string | null
+  progress_pct: number
+  pause_reason: string | null
+  pending_decision: string | null
+  active_trace_id: string | null
+  needs_resume: boolean
+}
+
+export async function myInfo(): Promise<MyInfoResp> {
+  try {
+    const data = await get('/api/my-info')
+    return data as MyInfoResp
+  } catch {
+    return {
+      current_project_id: null,
+      current_conversation_id: null,
+      status: 'idle',
+      current_stage: null,
+      progress_pct: 0,
+      pause_reason: null,
+      pending_decision: null,
+      active_trace_id: null,
+      needs_resume: false,
+    }
   }
 }
 
