@@ -19,7 +19,7 @@ import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
 import SubTaskTrack from '../components/SubTaskTrack.vue'
 import MergedResult from '../components/MergedResult.vue'
-import { startChat, cancelChat, pauseChat, myInfo, fetchModels, sendFeedback, type ChatCallbacks, type MyInfoResp } from '../api/chat'
+import { startChat, cancelChat, myInfo, fetchModels, sendFeedback, type ChatCallbacks, type MyInfoResp } from '../api/chat'
 import { getConversation, listArtifacts, renameProject, patch, autoStart } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
@@ -1415,11 +1415,23 @@ async function abortV4Pause() {
 
 async function stop() {
   if (!generating.value) return
-  // v4 手动停止: 标记为 pause(跑完当前阶段后暂停,可续跑), 而非立即 abort。
-  // 不在此置 generating=false; 待后端阶段边界发出 paused 事件(onPaused)后再停 UI 并显示横幅。
+  // 立即停止生成: 通知后端 cancel(Worker 在 token/阶段前立即中断),
+  // 并立即收口前端 UI —— 不等待后端 aborted 事件, 保证「点击即停」的反馈。
   cancelling.value = true
-  try { if (traceId.value) await pauseChat(traceId.value) } catch { /* 忽略暂停请求失败 */ }
+  try { if (traceId.value) await cancelChat(traceId.value) } catch { /* 忽略取消请求失败 */ }
+  generating.value = false
+  sending.value = false
+  finished.value = true
+  esRef.value?.close()
+  esRef.value = null
+  clearActiveGen()
+  clearUserStatus()
+  v4Pause.value = null
   cancelling.value = false
+  if (projectStore.currentProjectId) {
+    convStore.loadConversations(projectStore.currentProjectId).then(() => scrollToBottom(false))
+  }
+  dequeueAndSend()
 }
 
 // v4 生成中「放弃」入口已移除: 与「停止」(pause 可续跑)语义重复, 仅保留「停止」。
