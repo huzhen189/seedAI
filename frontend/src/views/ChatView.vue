@@ -92,7 +92,6 @@ const sopChain = computed(() =>
 )
 const currentStage = ref('')
 const degraded = ref(false)
-const generatedHtml = ref('')
 const requirementDoc = ref<Record<string, any> | null>(null)
 const previewUrl = ref<string | null>(null)
 const errorMsg = ref('')
@@ -620,6 +619,10 @@ const cosUploadPct = ref(0)
 const cosUploadFile = ref('')
 const cosUploadingActive = ref(false)
 
+// 正在生成中的文件: 后端提前补发的文件名(跑马灯占位) + loading 骨架屏状态
+const genFileName = ref('')
+const genLoading = ref(false)
+
 async function retryCosUpload() {
   const pid = projectStore.currentProjectId
   if (pid == null) return
@@ -752,10 +755,6 @@ watch(
     if (autoScroll && generating.value) scrollToBottom(false, false)
   },
 )
-// 生成中 builder 的 HTML 预览增量也跟随
-watch(generatedHtml, () => {
-  if (autoScroll && generating.value) scrollToBottom(false, false)
-})
 
 // 所有会话统一消息流(微信风格: 最老的在上方, 最新的在最下方)
 // 数组顺序: [oldest_session, ..., current_session], 配合 flex-direction: column 渲染
@@ -1015,8 +1014,10 @@ function resetGenState() {
   planNodes.value = []
   currentStage.value = ''
   degraded.value = false
-  generatedHtml.value = ''
   previewUrl.value = null
+  // 重置「正在生成」文件占位状态
+  genFileName.value = ''
+  genLoading.value = false
   errorMsg.value = ''
   finished.value = false
   currentIntent.value = { level1: '', level2: '' }
@@ -1168,8 +1169,6 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
         }
       }
       // 单意图遗留路径(无 sub_task_id): 同原行为
-      // 仅 builder_agent 的 token 才是生成的 HTML 代码
-      if (currentIntent.value.level1 === 'build') generatedHtml.value += t
       const m = convStore.messages[assistantIdx]
       if (m) {
         m.content += t
@@ -1179,6 +1178,11 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     },
     onPreview: (d) => {
       if (d.url) previewUrl.value = d.url as string
+    },
+    onGenFile: (d) => {
+      // 后端提前告知正在生成的文件名: 展示跑马灯占位 + loading 骨架屏
+      genFileName.value = (d.name as string) || 'index.html'
+      genLoading.value = true
     },
     onProgress: (d) => {
       // B(#488): 实时上传进度 → exec-head 进度条
@@ -1212,6 +1216,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planPreview.value = null
       cosUploadingActive.value = false
       cosUploadPct.value = 0
+      genLoading.value = false
       clearActiveGen()
       clearUserStatus()
       clearTrailSnapshot(traceId.value)  // P5: 终止态清理快照, 避免陈旧轨迹复活
@@ -1229,6 +1234,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       finished.value = true
       thoughtSteps.value = []
       planNodes.value = []
+      genLoading.value = false
       errorMsg.value = '已取消'
       clearActiveGen()
       clearUserStatus()
@@ -2046,6 +2052,21 @@ watch(pendingRetry, (r) => {
                     <span class="cos-bar"><i :style="{ width: cosUploadPct + '%' }"></i></span>
                   </div>
                 </div>
+                <!-- 正在生成中的文件: 文件名跑马灯占位 + loading 骨架屏(不含文件内容) -->
+                <div v-if="genFileName" class="gen-file-card" :class="{ done: !genLoading }">
+                  <div class="gen-marquee">
+                    <span class="gen-ico">{{ genLoading ? '⚙️' : '✅' }}</span>
+                    <div class="gen-marquee-viewport">
+                      <span class="gen-fname">{{ genLoading ? '正在生成' : '已生成' }}：{{ genFileName }}</span>
+                      <span class="gen-fname gen-fname--dup" aria-hidden="true">{{ genLoading ? '正在生成' : '已生成' }}：{{ genFileName }}</span>
+                    </div>
+                  </div>
+                  <div v-if="genLoading" class="gen-skeleton">
+                    <span class="sk sk-1"></span>
+                    <span class="sk sk-2"></span>
+                    <span class="sk sk-3"></span>
+                  </div>
+                </div>
                 <!-- §9: 执行前计划预览卡(含 SOP 角色链路 badge) -->
                 <div v-if="planPreview" class="plan-preview">
                   <div class="pp-head">
@@ -2485,8 +2506,76 @@ class="clarify-confirm"
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 14px;
-  max-height: 360px;
-  overflow: auto;
+}
+/* 正在生成文件: 文件名跑马灯 + loading 骨架屏 */
+.gen-file-card {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #b8d8ff;
+  background: linear-gradient(90deg, #f0f7ff 0%, #e8f1ff 100%);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.gen-file-card.done {
+  border-color: #9fe0b0;
+  background: linear-gradient(90deg, #effaf2 0%, #e3f7ea 100%);
+}
+.gen-marquee {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gen-ico {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+.gen-marquee-viewport {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.gen-fname {
+  display: inline-block;
+  padding-left: 100%;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1f5fbf;
+  animation: gen-marquee-scroll 9s linear infinite;
+}
+.gen-file-card.done .gen-fname {
+  color: #1f9d57;
+  animation: none;
+  padding-left: 0;
+}
+.gen-fname--dup {
+  position: absolute;
+  left: 100%;
+  top: 0;
+}
+@keyframes gen-marquee-scroll {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}
+.gen-skeleton {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.gen-skeleton .sk {
+  height: 10px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #d8e6ff 25%, #eef4ff 37%, #d8e6ff 63%);
+  background-size: 400% 100%;
+  animation: gen-shimmer 1.4s ease infinite;
+}
+.gen-skeleton .sk-1 { width: 92%; }
+.gen-skeleton .sk-2 { width: 78%; }
+.gen-skeleton .sk-3 { width: 85%; }
+@keyframes gen-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
 }
 /* 合并执行面板: 阶段头 + 实时思考(原 live-think 块, 现与 ThoughtTrail 同卡片显示) */
 .exec-head {

@@ -55,6 +55,8 @@ export interface ChatCallbacks {
   onCosUpload?: (data: { filename: string; index?: number; total?: number; url?: string }) => void
   /** SIR 澄清(CLARIFY):意图模糊/缺规格时, 下发动态最少必要追问 + 结构化选项, 用户确认后带 clarified 重发 */
   onClarify?: (data: ClarifyEvent) => void
+  /** 提前告知正在生成的文件名(跑马灯占位 + loading 骨架屏), 不含文件内容 */
+  onGenFile?: (data: { name: string }) => void
 }
 
 export interface StartChatOptions {
@@ -134,6 +136,10 @@ export function startChat(opts: StartChatOptions): EventSource {
     opts.cb.onToken?.(text, subTaskId)
   })
   es.addEventListener('preview', (e) => opts.cb.onPreview?.(safeParse((e as MessageEvent).data)))
+  es.addEventListener('gen_file', (e) => {
+    const d = safeParse((e as MessageEvent).data)
+    opts.cb.onGenFile?.({ name: typeof d.name === 'string' ? d.name : 'index.html' })
+  })
   es.addEventListener('degraded', (e) => opts.cb.onDegraded?.(safeParse((e as MessageEvent).data)))
   es.addEventListener('qc', (e) => {
     const d = safeParse((e as MessageEvent).data) as QcResult

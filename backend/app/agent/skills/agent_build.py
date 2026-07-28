@@ -528,6 +528,7 @@ async def generate_stream(
         # 从断点恢复: 重新执行 Coder(planner_done) 或 跳过 Coder 进 Reviewer(coder_done+)
         if stage == "planner_done":
             yield ev("node", stage="enter_planner_done")
+            yield ev("gen_file", name="index.html")
             plan_msgs = [{"role": "user", "content": plan.get("goal", "")}]
             user_msgs = [{"role": "user", "content": f"需求规格:\n{json.dumps(plan, ensure_ascii=False)}"}]
             if req_text:
@@ -659,6 +660,8 @@ async def generate_stream(
         return  # 暂停, 等待前端发起 resume/confirm 续接
 
         # 2) Coder(流式,模型不可用时不自动降级,由前端确认后重发)
+        # 提前告知前端正在生成的文件名(供跑马灯占位 + loading 状态), 不含文件内容
+        yield ev("gen_file", name="index.html")
         yield ev("node", stage="enter_coder")
         GEN_LOG.info("[gen] Coder 开始 trace=%s model=%s", trace_id, model_id)
         user_msgs = [{"role": "user", "content": f"需求规格:\n{spec}"}]

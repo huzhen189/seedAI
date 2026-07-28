@@ -1017,10 +1017,8 @@ async def chat(
                                             # 多文件: 捕获 AI 产出的完整文件列表(v1.2.1+)
                                             if isinstance(payload_obj.get("files"), dict):
                                                 files_dict = payload_obj["files"]
-                                            # E(#488): COS 不可用时的本地 HTML 兜底内容(供 RightPanel iframe srcdoc)
-                                            _preview_content = payload_obj.get("content")
-                                            if _preview_content and not preview_url:
-                                                _deliver_fallback_content = _preview_content
+                                            # 注: 不再捕获 preview 的 HTML content 作为兜底推送(用户不关心生成中的文件内容, 也不下发)
+
                                         event_seq += 1
                                         # trace_event 暂存, 由 finally 批量写入
                                         if event == "aborted":
@@ -1156,9 +1154,10 @@ async def chat(
                                         else:
                                             logger.info(
                                                 "[chat] done 被 paused 锁抑制(多意图方案确认仍生效) trace=%s", tid)
+                                    # 仅记录事件元信息(类型/阶段/序号), 不再打印 data 内容, 避免日志量爆炸
                                     logger.info(
-                                            "[chat] ◇ SSE #%d type=%s stage=%s data=%.200s",
-                                            event_seq, event, stage or "-", data,
+                                            "[chat] ◇ SSE #%d type=%s stage=%s",
+                                            event_seq, event, stage or "-",
                                         )
                                     frame = ""
                                     if event:
@@ -1223,8 +1222,7 @@ async def chat(
                 tid, terminal_status, sum(event_counts.values()),
                 approx_tokens, bool(preview_url), len(assistant_full_text),
             )
-            if assistant_full_text:
-                logger.info("[chat]   响应预览(首500字): %.500s", assistant_full_text)
+            # 不再打印完整响应内容(量大), 仅记录字符数已在上方流结束日志中体现
             # 事件分布
             if event_counts:
                 evt_detail = " ".join(f"{k}={v}" for k, v in sorted(event_counts.items()))
