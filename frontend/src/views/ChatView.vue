@@ -980,7 +980,8 @@ const activeTrailKey = computed<string | null>(() => {
   const show =
     generating.value || planPreview.value || cancelSummary.value ||
     subTasks.value.length || mergeResult.value ||
-    cosUploading.value || cosFailed.value || pendingConfirm.value
+    cosUploading.value || cosFailed.value || pendingConfirm.value ||
+    (showOptionsModal.value && !!optionsData.value)
   if (!show) return null
   const sessions = allSessions.value
   for (let si = sessions.length - 1; si >= 0; si--) {
@@ -1130,6 +1131,12 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       if (lbl) upsertStep('intent_recognized', 'done', lbl)
     },
     onOptions: (d: OptionEvent) => {
+      // 保底: 确保存在宿主 assistant 气泡, 选项卡内嵌其中(任意时刻气泡可见)
+      const msgs = convStore.messages
+      const last = msgs[msgs.length - 1]
+      if (!last || last.role !== 'assistant') {
+        msgs.push({ role: 'assistant', content: '', conversation_id: convStore.currentConvId, id: 0, created_at: '', model_id: model.value } as any)
+      }
       optionsData.value = d
       selectedOption.value = ''
       showOptionsModal.value = true
@@ -1979,6 +1986,24 @@ watch(pendingRetry, (r) => {
                     </div>
                   </template>
                 </div>
+                <!-- 选项选择内嵌气泡(P2 同构, 仿 confirm-card-in-bubble): 选项进气泡, 弹窗仅留标题 -->
+                <div v-if="showOptionsModal && optionsData" class="options-card-in-bubble">
+                  <div class="oc-title">{{ optionsData.question || '请选择方案' }}</div>
+                  <label
+                    v-for="c in optionsData.choices"
+                    :key="c.id"
+                    class="oc-choice"
+                    :class="{ on: selectedOption === c.id }"
+                  >
+                    <input v-model="selectedOption" type="radio" :value="c.id" class="oc-radio" />
+                    <div class="oc-info">
+                      <div class="oc-name">{{ c.id }}. {{ c.title }}</div>
+                      <div v-if="c.desc" class="oc-desc">{{ c.desc }}</div>
+                      <div v-if="c.pros" class="oc-pros">✅ {{ c.pros }}</div>
+                      <div v-if="c.cons" class="oc-cons">⚠️ {{ c.cons }}</div>
+                    </div>
+                  </label>
+                </div>
               </div>
             </template>
           </MessageBubble>
@@ -2107,27 +2132,7 @@ class="clarify-confirm"
         <div v-if="showOptionsModal && optionsData" class="options-modal-backdrop" @click.self="cancelOptions" @keydown.escape="cancelOptions">
           <div class="options-modal">
             <div class="om-title">{{ optionsData.question || '请选择方案' }}</div>
-            <div class="om-choices">
-              <label
-                v-for="c in optionsData.choices"
-                :key="c.id"
-                class="om-choice"
-                :class="{ on: selectedOption === c.id }"
-              >
-                <input
-                  v-model="selectedOption"
-                  type="radio"
-                  :value="c.id"
-                  class="om-radio"
-                />
-                <div class="om-info">
-                  <div class="om-name">{{ c.id }}. {{ c.title }}</div>
-                  <div v-if="c.desc" class="om-desc">{{ c.desc }}</div>
-                  <div v-if="c.pros" class="om-pros">✅ {{ c.pros }}</div>
-                  <div v-if="c.cons" class="om-cons">⚠️ {{ c.cons }}</div>
-                </div>
-              </label>
-            </div>
+            <div class="om-hint">选项已在上方的 AI 回复中展示，请选择后确认。</div>
             <div class="om-actions">
               <button class="om-btn om-confirm" :disabled="!selectedOption" @click="onOptionsConfirm">确认选择</button>
               <button class="om-btn om-cancel" @click="cancelOptions">取消</button>
@@ -2594,7 +2599,7 @@ class="clarify-confirm"
 .alc-dl, .asc-dl { margin-left: auto; font-size: 13px; color: #6366f1; cursor: pointer; opacity: 0.7; padding: 0 2px; }
 .alc-dl:hover, .asc-dl:hover { opacity: 1; }
 
-/* ── 方案选择弹窗 ── */
+/* ── 方案选择弹窗(选项已内嵌进 assistant 气泡, 此处仅轻提示) ── */
 .options-modal-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,.45);
   display: flex; align-items: center; justify-content: center;
@@ -2605,23 +2610,38 @@ class="clarify-confirm"
   padding: 24px; max-width: 440px; width: 90vw;
   box-shadow: 0 8px 32px rgba(0,0,0,.18);
 }
-.om-title { font-size: 16px; font-weight: 700; margin-bottom: 16px; color: var(--text); }
-.om-choices { display: flex; flex-direction: column; gap: 10px; }
-.om-choice {
-  display: flex; align-items: flex-start; gap: 10px;
-  padding: 12px; border-radius: 8px; border: 1px solid var(--border);
-  cursor: pointer; transition: border-color .2s, background .2s;
-}
-.om-choice.on { border-color: #3b82f6; background: rgba(59,130,246,.08); }
-.om-choice:hover { border-color: #93c5fd; background: rgba(59,130,246,.04); }
-.om-radio { margin-top: 3px; accent-color: #3b82f6; }
-.om-info { flex: 1; min-width: 0; }
-.om-name { font-weight: 600; font-size: 14px; color: var(--text); }
-.om-desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
-.om-pros { font-size: 12px; color: #16a34a; margin-top: 4px; }
-.om-cons { font-size: 12px; color: #dc2626; margin-top: 2px; }
+.om-title { font-size: 16px; font-weight: 700; margin-bottom: 10px; color: var(--text); }
+.om-hint { font-size: 13px; color: var(--muted); line-height: 1.6; }
 .om-actions { display: flex; gap: 8px; margin-top: 18px; justify-content: flex-end; }
 .om-btn { border: none; border-radius: 6px; padding: 8px 18px; cursor: pointer; font-size: 13px; font-weight: 600; }
+.om-btn:disabled { opacity: .5; cursor: not-allowed; }
+.om-confirm { background: #3b82f6; color: #fff; }
+.om-confirm:hover:not(:disabled) { background: #2563eb; }
+.om-cancel { background: #e2e8f0; color: #475569; }
+.om-cancel:hover { background: #cbd5e1; }
+
+/* ── 气泡内选项卡(P2 同构, 仿 .confirm-card-in-bubble): 保证气泡任意时刻可见 ── */
+.options-card-in-bubble {
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px; margin: 8px 0; background: rgba(59,130,246,.04);
+}
+.oc-title { font-weight: 600; font-size: 14px; color: #2563eb; margin-bottom: 10px; }
+.oc-choice {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+  cursor: pointer; transition: border-color .2s, background .2s; margin-bottom: 8px;
+}
+.oc-choice:last-child { margin-bottom: 0; }
+.oc-choice.on { border-color: #3b82f6; background: rgba(59,130,246,.08); }
+.oc-choice:hover { border-color: #93c5fd; background: rgba(59,130,246,.04); }
+.oc-radio { margin-top: 3px; accent-color: #3b82f6; }
+.oc-info { flex: 1; min-width: 0; }
+.oc-name { font-weight: 600; font-size: 14px; color: var(--text); }
+.oc-desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.oc-pros { font-size: 12px; color: #16a34a; margin-top: 4px; }
+.oc-cons { font-size: 12px; color: #dc2626; margin-top: 2px; }
+:global([data-theme="dark"]) .options-card-in-bubble { background: rgba(59,130,246,.10); }
+:global([data-theme="dark"]) .oc-title { color: #93c5fd; }
 .om-confirm { background: #3b82f6; color: #fff; }
 .om-confirm:disabled { opacity: .5; cursor: not-allowed; }
 .om-confirm:not(:disabled):hover { background: #2563eb; }
