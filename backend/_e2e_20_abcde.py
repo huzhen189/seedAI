@@ -22,8 +22,13 @@ RESULT_FILE = os.path.join(os.path.dirname(__file__), "_e2e_20_results.jsonl")
 PROGRESS_FILE = os.path.join(os.path.dirname(__file__), "_e2e_20_progress.json")
 
 MODEL = "qwen"          # 生产默认模型; 真实演练用户流程
-TMP_PW = "testpass123"
-USERNAME = f"e2e20_{uuid.uuid4().hex[:8]}"
+# ⚠️ 固定测试账号(约定: 测试文档必须记录账号密码供登录复查)。
+# 用户名固定, 多轮回归不会撞号; 若已注册则直接登录。
+TEST_USER = os.environ.get("E2E_USER", "e2e20_seedai_test")
+TEST_PW = os.environ.get("E2E_PW", "testpass123")
+USERNAME = TEST_USER
+TMP_PW = TEST_PW
+CREDS_FILE = os.path.join(os.path.dirname(__file__), "_e2e_20_creds.json")
 
 # ---- 20 条语句: 由简到难, 含 D 闸门会话分组(follows 复用建站会话) ----
 # follows: 复用指定语句所在的会话(用于「建站→追问修改」同会话触发 build_modify 闸门)。
@@ -276,18 +281,32 @@ def main():
         r = s.post(f"{BASE}/auth/login", json={"username": USERNAME, "password": TMP_PW})
         return r.status_code in (200, 201)
 
-    log("注册用户", USERNAME)
-    r = s.post(f"{BASE}/auth/register", json={
-        "username": USERNAME, "password": TMP_PW,
-        "nickname": "e2e20", "email": f"{USERNAME}@test.com",
-    })
-    if r.status_code not in (200, 201):
-        log("!! 注册失败", r.status_code, r.text[:300])
-        return
-    log("  注册 OK")
+    # 固定账号: 先尝试登录; 失败(账号不存在)再注册, 避免重复注册撞号。
+    log("确保测试账号存在:", USERNAME)
     if not do_login():
-        log("!! 登录失败(刷新 cookie)")
-        return
+        log("  登录失败, 尝试注册")
+        r = s.post(f"{BASE}/auth/register", json={
+            "username": USERNAME, "password": TMP_PW,
+            "nickname": "e2e20", "email": f"{USERNAME}@test.com",
+        })
+        if r.status_code not in (200, 201):
+            log("!! 注册失败", r.status_code, r.text[:300])
+            return
+        log("  注册 OK")
+        if not do_login():
+            log("!! 登录失败(刷新 cookie)")
+            return
+    else:
+        log("  账号已存在, 直接登录 OK")
+
+    # 落盘凭证(供 _gen_ae_report.py 读取写入测试文档)
+    try:
+        with open(CREDS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"username": USERNAME, "password": TMP_PW,
+                       "note": "E2E 回归固定账号, 供登录复查",
+                       "base": BASE}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log("  (creds 落盘失败, 非阻断)", str(e))
 
     r = s.post(f"{BASE}/api/projects", json={"name": f"e2e20_{USERNAME}"})
     if r.status_code not in (200, 201):

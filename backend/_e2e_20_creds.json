@@ -1,0 +1,6 @@
+{
+  "username": "e2e20_seedai_test",
+  "password": "testpass123",
+  "base": "http://127.0.0.1:7101",
+  "note": "E2E 回归固定账号, 供登录复查 (harness 实际运行后以运行时值为准)"
+}

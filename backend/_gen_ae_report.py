@@ -11,6 +11,20 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 RESULT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "_e2e_20_results.jsonl")
 OUT = os.path.join(HERE, "..", "reports", "TEST_AE_REPORT.md")
+CREDS = os.path.join(HERE, "_e2e_20_creds.json")
+
+def _load_creds():
+    """读取 harness 落盘的测试账号凭证(供登录复查)。"""
+    default = {"username": "e2e20_seedai_test", "password": "testpass123",
+               "base": "http://127.0.0.1:7101",
+               "note": "E2E 回归固定账号, 供登录复查 (harness 未运行则取默认)"}
+    try:
+        with open(CREDS, encoding="utf-8") as f:
+            d = json.load(f)
+        default.update(d)
+    except Exception:
+        pass
+    return default
 
 # 每条语句的预期判定规则(routed/intent/终态/B+E/C 等)
 # passed 判定函数签名: (row) -> (bool, reason)
@@ -153,10 +167,19 @@ def main():
 
     total = len(rows)
     ts = rows[-1].get("ts") if rows else "?"
+    creds = _load_creds()
     md = []
     md.append("# A~E 专项修改 + 20 条 E2E 模拟测试报告")
     md.append("")
     md.append(f"> 生成时间: {ts}  |  测试语句: {total} 条  |  通过: **{passed}/{total}**")
+    md.append("")
+    md.append("## 〇、测试账号（供登录复查）")
+    md.append("")
+    md.append(f"- **账号**：`{creds.get('username')}`")
+    md.append(f"- **密码**：`{creds.get('password')}`")
+    md.append(f"- **后端地址**：`{creds.get('base')}`")
+    md.append(f"- **说明**：{creds.get('note', 'E2E 回归固定账号')}。同一套账号跨多次回归复用，"
+              f"登录后即可在『项目列表』看到本批测试生成的项目与对话，用于人工复查生成效果/产物。")
     md.append("")
     md.append("## 一、A~E 五大改动专项结论")
     md.append("")
