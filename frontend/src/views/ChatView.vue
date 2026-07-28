@@ -2153,7 +2153,16 @@ watch(pendingRetry, (r) => {
                         <li v-for="(s, i) in pendingConfirm.planSteps" :key="i">{{ s }}</li>
                       </ol>
                     </div>
-                    <div class="cp-hint">请在下方对话框回复「确认」或「开始建站」即可继续；如需调整，直接补充要求并重新发送。</div>
+                    <!-- 行动召唤 CTA: 整条可点击 + 两个明确按钮, 避免被小灰字忽略 -->
+                    <div class="cp-cta" @click="doSend('确认')">
+                      <span class="cta-ico">👉</span>
+                      <span class="cta-text">方案已就绪 — <b>点击「确认」或「开始建站」</b>即可启动建站</span>
+                    </div>
+                    <div class="cp-actions">
+                      <button class="cp-btn cp-confirm" @click.stop="doSend('确认')">✅ 确认</button>
+                      <button class="cp-btn cp-start" @click.stop="doSend('开始建站')">🚀 开始建站</button>
+                    </div>
+                    <p class="cp-hint">或在下方对话框直接回复「确认」/「开始建站」；如需调整，补充要求并重新发送即可。</p>
                   </template>
                   <template v-else>
                     <div class="cp-title">
@@ -2758,7 +2767,44 @@ class="clarify-confirm"
 .cp-plan-title { font-size: 14px; font-weight: 700; color: #0f172a; margin-bottom: 6px; }
 .cp-reqsrc { font-size: 12px; color: #0369a1; margin-bottom: 8px; background: #e0f2fe; border-radius: 6px; padding: 4px 8px; display: inline-block; }
 .cp-reqprev { color: #475569; font-weight: 400; }
-.cp-hint { font-size: 11px; color: #94a3b8; margin-top: 8px; }
+.cp-hint { font-size: 11px; color: #94a3b8; margin-top: 8px; line-height: 1.6; }
+
+/* 🚀 行动召唤 CTA: 把"下一步操作"做成整条可点的渐变横幅, 一眼可见, 避免被小灰字忽略 */
+.cp-cta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  cursor: pointer;
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  background: linear-gradient(100deg, #6366f1 0%, #8b5cf6 50%, #ec4899 100%);
+  box-shadow: 0 6px 18px rgba(99, 102, 241, 0.28);
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.18s ease;
+  animation: cta-pulse 2.4s ease-in-out infinite;
+}
+.cp-cta:hover { transform: translateY(-1px) scale(1.01); box-shadow: 0 10px 26px rgba(99, 102, 241, 0.38); }
+.cp-cta:active { transform: translateY(0) scale(0.99); }
+.cta-ico { font-size: 18px; flex: 0 0 auto; animation: cta-bounce 1.6s ease-in-out infinite; }
+.cta-text b { font-weight: 800; text-decoration: underline; text-underline-offset: 2px; }
+@keyframes cta-pulse {
+  0%, 100% { box-shadow: 0 6px 18px rgba(99, 102, 241, 0.28); }
+  50% { box-shadow: 0 6px 26px rgba(236, 72, 153, 0.45); }
+}
+@keyframes cta-bounce {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(4px); }
+}
+.cp-actions { display: flex; gap: 10px; margin-top: 12px; }
+.cp-btn { border: none; border-radius: 10px; padding: 9px 18px; cursor: pointer; font-size: 13.5px; font-weight: 700; transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1); }
+.cp-confirm { background: #6366f1; color: #fff; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
+.cp-confirm:hover { background: #4f46e5; transform: translateY(-1px); box-shadow: 0 6px 16px rgba(99, 102, 241, 0.42); }
+.cp-start { background: linear-gradient(100deg, #f59e0b 0%, #ef4444 100%); color: #fff; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3); }
+.cp-start:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(239, 68, 68, 0.42); }
 
 :global([data-theme="dark"]) .confirm-plan { background: rgba(30, 41, 59, 0.7); border-color: #334155; }
 :global([data-theme="dark"]) .cp-title { color: #7dd3fc; }
@@ -2768,6 +2814,9 @@ class="clarify-confirm"
 :global([data-theme="dark"]) .cp-reqsrc { background: rgba(14, 165, 233, 0.15); color: #7dd3fc; }
 :global([data-theme="dark"]) .cp-reqprev { color: #cbd5e1; }
 :global([data-theme="dark"]) .cp-hint { color: #64748b; }
+:global([data-theme="dark"]) .cp-cta { box-shadow: 0 6px 18px rgba(99, 102, 241, 0.45); }
+:global([data-theme="dark"]) .cp-confirm { background: #818cf8; box-shadow: 0 4px 12px rgba(129, 140, 248, 0.4); }
+:global([data-theme="dark"]) .cp-confirm:hover { background: #6366f1; }
 :global([data-theme="dark"]) .cp-cancel { background: #334155; color: #cbd5e1; }
 :global([data-theme="dark"]) .cp-cancel:hover { background: #475569; }
 
