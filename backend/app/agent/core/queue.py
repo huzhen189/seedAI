@@ -870,6 +870,33 @@ async def worker_loop(concurrency: int = 1):
                 logger.info("[Worker] [3/6] 上下文结果 ctx=%.60s (+%.0fms, 含意图分类)", ctx_result,
                            (time.time() - t_job) * 1000)
 
+                # ── [3.6] 3.3 多轮上下文连贯:语义召回本会话相关历史消息,注入为 system 上下文 ──
+                #    即使前端只下发近期窗口,模型也能看到语义相关的历史片段,实现跨轮连贯。
+                #    role=system 以免污染下游 qc_user_text(其按 role=='user' 取首个用户消息)。
+                rel_ctx_msg = None
+                if conversation_id:
+                    try:
+                        from ..knowledge.chroma import find_relevant_message_contents
+                        _hist_q = ""
+                        for _m in reversed(messages):
+                            if _m.get("role") == "user":
+                                _hist_q = (_m.get("content") or "")[:300]
+                                break
+                        if not _hist_q:
+                            _hist_q = user_text
+                        _hist = await asyncio.to_thread(
+                            find_relevant_message_contents, _hist_q, conversation_id, 6)
+                        if _hist:
+                            _snip = "\n\n".join(f"- {h['content']}" for h in _hist)
+                            rel_ctx_msg = {
+                                "role": "system",
+                                "content": f"【相关历史对话片段(来自本会话语义相似消息,供上下文连贯)】\n{_snip}",
+                            }
+                            logger.info("[Worker] [3.6] 注入历史上下文 conv=%s 条=%d 最高相似度=%.3f",
+                                        conversation_id, len(_hist), max(h["score"] for h in _hist))
+                    except Exception as _he:  # noqa: BLE001
+                        logger.debug("[Worker] [3.6] 历史上下文召回失败(忽略): %s", _he)
+
                 # ── [4/6] 意图分类(汇总器已算好最终 skill, 单一来源) ──
                 decision = intent.get("decision", "route")
                 confirmed = bool(job.get("confirmed", False))
@@ -1018,11 +1045,15 @@ async def worker_loop(concurrency: int = 1):
 
                         sub_tasks = [_dict_to_subtask(d) for d in sub_tasks_raw]
                         confirmed_subtasks = set(job.get("confirmed_subtasks") or [])
+                        # 3.3: 多意图路径同样注入历史上下文(避免污染原 messages,复制后前置)
+                        orch_messages = list(messages)
+                        if rel_ctx_msg is not None:
+                            orch_messages.insert(0, rel_ctx_msg)
                         shared_ctx = SharedContext(
                             requirement_doc=doc,
                             project_status={"status": proj_status},
                             conversation_summary=summary,
-                            conversation_history=messages,
+                            conversation_history=orch_messages,
                         )
                         # §4 角色编排层:默认开启(ROLE_ORCHESTRATOR_ENABLED),关闭则回退原生 Orchestrator
                         if ROLE_ORCHESTRATOR_ENABLED:
@@ -1048,7 +1079,7 @@ async def worker_loop(concurrency: int = 1):
                         last_stage: str | None = None
                         last_ck: tuple | None = None
                         async for event in orch.execute(
-                            sub_tasks, model_id, messages,
+                            sub_tasks, model_id, orch_messages,
                             trace_id=trace_id, is_cancelled=_cancelled,
                             confirmed_subtasks=confirmed_subtasks,
                             shared_ctx=shared_ctx,
@@ -1167,7 +1198,10 @@ async def worker_loop(concurrency: int = 1):
                     from ..roles.orchestrator import get_role_agent as _get_agent
                     _role = _m2r(skill_name) if _ROE else None
                     _agent = _get_agent(_role) if _role else None
-                    _enriched_messages = _agent.inject_context(messages, None) if _agent else messages
+                    _enriched_messages = _agent.inject_context(messages, None) if _agent else list(messages)
+                    # 3.3: 注入历史上下文(role=system, 前置), 多轮对话连贯真正生效
+                    if rel_ctx_msg is not None:
+                        _enriched_messages.insert(0, rel_ctx_msg)
                     if _agent is not None:
                         logger.info("[Worker] [5/6] 单意图启用角色上下文 role=%s skill=%s", _agent.label, skill_name)
                 except Exception as _re_e:  # noqa: BLE001

@@ -581,7 +581,7 @@ async def generate_stream(
     rag_ctx = ""
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future: Future[str] = pool.submit(build_rag_context, first_user_msg)
+            future: Future[str] = pool.submit(build_rag_context, first_user_msg, project_id, user_id)
             rag_ctx = future.result(timeout=5.0)
     except FutureTimeout:
         GEN_LOG.warning("[gen] RAG 检索超时(>5s), 跳过增强 trace=%s", trace_id)

@@ -121,6 +121,10 @@ def retrieve_intents(query: str, top_k: int = 5) -> list[dict]:
     # ── 离线兜底 ──
     if not _available():
         ranked = _offline_scores(query)[:top_k]
+        logger.warning(
+            "[向量-意图召回] ⚠️ Chroma 不可用 → 离线 bigram 降级 query=%.60s top1=%s score=%.3f",
+            query, ranked[0][0] if ranked else "", ranked[0][1] if ranked else 0.0,
+        )
         return [
             {"intent_id": iid, "score": score, "intent": get_intent(iid)}
             for iid, score in ranked if get_intent(iid) is not None
@@ -140,13 +144,22 @@ def retrieve_intents(query: str, top_k: int = 5) -> list[dict]:
             if iid not in best or sc > best[iid]:
                 best[iid] = sc
         ranked = sorted(best.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        _top = ranked[0] if ranked else ("", 0.0)
+        logger.info(
+            "[向量-意图召回] ✅ Chroma 语义召回 query=%.60s top1=%s score=%.3f 候选数=%d 全部=%s",
+            query, _top[0], _top[1], len(ranked), [(i, round(s, 3)) for i, s in ranked],
+        )
         return [
             {"intent_id": iid, "score": score, "intent": get_intent(iid)}
             for iid, score in ranked if get_intent(iid) is not None
         ]
     except Exception as e:
-        logger.warning("[向量] Chroma 召回失败, 退回离线打分: %s", e)
+        logger.warning("[向量-意图召回] ⚠️ Chroma 召回异常 → 离线降级: %s", e)
         ranked = _offline_scores(query)[:top_k]
+        logger.warning(
+            "[向量-意图召回] 离线降级 top1=%s score=%.3f",
+            ranked[0][0] if ranked else "", ranked[0][1] if ranked else 0.0,
+        )
         return [
             {"intent_id": iid, "score": score, "intent": get_intent(iid)}
             for iid, score in ranked if get_intent(iid) is not None
