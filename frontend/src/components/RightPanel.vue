@@ -275,7 +275,6 @@ defineExpose({ selectFile, reset })
           <span class="spinner-sm"></span> COS 上传中…
           <button class="retry-btn" @click="startRetry(); checkPendingUploads()">重试</button>
         </div>
-        <div v-if="generating && !allFiles.length" class="tree-empty">AI 正在生成…</div>
         <template v-for="f in allFiles" :key="f.artifactId + ':' + f.name">
           <div
             class="tree-item"
@@ -389,14 +388,6 @@ defineExpose({ selectFile, reset })
         </div>
       </template>
 
-      <!-- 空状态: 仅在"正在生成且无产物"时给出明确反馈(spinner);
-           非生成态不显示任何占位文案, 避免用户误以为项目为空/未运行(2026-07-29 用户要求)。 -->
-      <template v-else>
-        <div v-if="generating && !allFiles.length" class="pv-placeholder">
-          <div class="spinner"></div>
-          <span>AI 正在生成…</span>
-        </div>
-      </template>
     </div>
   </div>
 </template>
