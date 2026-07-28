@@ -143,8 +143,10 @@ async def generate_doc_skill(
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """流式生成文档, 支持取消 + 模型回退。"""
     GEN_LOG.info("[doc] 开始 trace=%s model=%s", trace_id, model_id)
-    yield ev("node", stage="writing")
+    # 分层轨迹: 规划结构 → 撰写正文 → 校对格式(由各阶段节点驱动, 给前端 trail 更细的层次感)
+    yield ev("node", stage="doc_plan")
     parts: list[str] = []
+    _emit_write = False
     try:
         async for chunk, _ in astream_with_fallback(
             model_id, messages, system=SYS_DOC
@@ -154,6 +156,9 @@ async def generate_doc_skill(
                 return
             text = getattr(chunk, "content", chunk)
             if text:
+                if not _emit_write:
+                    yield ev("node", stage="doc_write")
+                    _emit_write = True
                 parts.append(text)
                 yield ev("token", data=text)
     except ModelUnavailableError as e:
@@ -169,6 +174,8 @@ async def generate_doc_skill(
 
     full_md = "".join(parts)
     GEN_LOG.info("[doc] 完成 trace=%s chars=%s", trace_id, len(full_md))
+    # 校对格式阶段: 统一 Markdown 规范与排版(在投递产物前; COS 上传期间此步保持进行中)
+    yield ev("node", stage="doc_proofread")
     # Fix B (#482): 把完整 Markdown 作为产物文件下发, 供 proxy 落库为 artifact(右侧面板预览/下载)
     # 产物名按对话主题动态命名(首个 H1 / 用户请求), 而非固定 "开发文档.md"
     if full_md.strip():
