@@ -1220,6 +1220,7 @@ async def worker_loop(concurrency: int = 1):
                 qc_assistant_buf: list[str] = []
                 artifacts: list[str] = []
                 done_event: dict | None = None
+                terminal_seen = False  # 技能是否显式产出了终止事件(done/paused/aborted/error/unsupported)
                 review_needs = False
                 # 生成阶段耗时统计: 记录进入各阶段的时间戳(供 record_gen_stage 算时长)
                 _stage_enter: dict[str, float] = {}
@@ -1242,7 +1243,10 @@ async def worker_loop(concurrency: int = 1):
                     site_generated=job.get("site_generated", False),
                 ):
                     # 拦截 done: 先发 QC 再发 done(QC 在 done 前, 不阻塞前端 done 渲染)
-                    if event.get("event") == "done":
+                    _ev_name = event.get("event")
+                    if _ev_name in ("done", "paused", "aborted", "error", "unsupported"):
+                        terminal_seen = True
+                    if _ev_name == "done":
                         done_event = event
                         continue
                     if event.get("event") == "review":
@@ -1388,6 +1392,13 @@ async def worker_loop(concurrency: int = 1):
                         logger.debug("[Worker] L2 精炼失败: %s", _le)
                 if done_event is not None:
                     await q.publish(trace_id, done_event)
+                elif not terminal_seen:
+                    # 兜底收尾契约: 技能未显式产出任何终止事件(如 requirement_agent 在
+                    # 'options' 分支直接 return, 等待用户选择方案)→ 必须补发 done, 否则前端
+                    # generating 永远为 true、停止按钮常驻、用户无法继续输入。属后端收尾契约缺口修复。
+                    logger.info("[Worker] [6/6] 兜底补发 done(技能未显式终止) trace=%s skill=%s",
+                                trace_id, skill_name)
+                    await q.publish(trace_id, {"event": "done", "data": {}})
                 if req_id:
                     try:
                         from ..intent.observation import mark_outcome

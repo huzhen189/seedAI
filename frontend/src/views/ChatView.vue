@@ -1140,6 +1140,11 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       optionsData.value = d
       selectedOption.value = ''
       showOptionsModal.value = true
+      // 本轮(产出方案选项)已结束、进入「等待用户选择」态: 显式关闭生成中态,
+      // 否则 generating 持续为 true → 停止按钮常驻、输入框被锁、确认选项会被误入队且永不发送。
+      // 后端 requirement_agent 在 options 后直接 return 不 yield done, 故此处主动收尾(兜底 done 到达前也已正确)。
+      generating.value = false
+      finished.value = true
     },
     onAlternatives: (d: AlternativesEvent) => {
       // 非阻塞: 系统已自决 top-1 并继续生成; 仅记录候选供用户随时切换
