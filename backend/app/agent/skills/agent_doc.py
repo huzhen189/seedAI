@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import AsyncGenerator
 from typing import Any, Dict, Optional
 
@@ -33,6 +34,57 @@ SYS_DOC = (
 )
 
 GEN_LOG = logging.getLogger("ai_service.generate")
+
+
+def _sanitize_filename(name: str, max_len: int = 40) -> str:
+    """把任意标题清洗成安全的文件名(保留中文), 失败回退 '开发文档'。"""
+    if not name:
+        return "开发文档"
+    # 去掉 markdown 标题符号
+    name = re.sub(r"^#+\s*", "", name.strip(), flags=re.MULTILINE)
+    # 去掉跨平台非法字符(Windows/Linux/macOS 通用)
+    name = re.sub(r'[\\/:*?"<>|\r\n\t\x00-\x1f]', "", name)
+    name = name.strip().strip(".").strip()
+    name = re.sub(r"\s+", " ", name)  # 折叠多余空白
+    return name[:max_len] if name else "开发文档"
+
+
+def _derive_doc_name(full_md: str, messages: list) -> str:
+    """从生成文档的首个 H1 或用户请求推导产物文件名(不含扩展名)。
+
+    优先级: 生成文档的第一个有意义 H1 > 最近一条用户消息首行 > '开发文档'。
+    """
+    # 太泛的标题词直接跳过, 退回用用户请求命名, 更有辨识度
+    _GENERIC = {
+        "文档", "说明", "笔记", "文档说明",
+        "开发文档", "开发说明", "需求文档", "设计文档", "技术文档", "项目文档", "开发文档说明",
+        "readme", "doc", "docs",
+    }
+    # 1) 优先用生成文档的第一个 H1
+    for line in full_md.splitlines():
+        s = line.strip()
+        if s.startswith("# ") and len(s) > 2:
+            cand = _sanitize_filename(s[2:])
+            if cand and len(cand) >= 2 and cand not in _GENERIC:
+                return cand
+    # 2) 退而求其次: 最近一条用户消息首行
+    user_text = ""
+    for m in reversed(messages):
+        if isinstance(m, dict) and m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, str):
+                user_text = c
+            elif isinstance(c, list):  # 多模态 content 数组
+                user_text = " ".join(
+                    p.get("text", "") for p in c if isinstance(p, dict)
+                )
+            if user_text.strip():
+                break
+    if user_text.strip():
+        cand = _sanitize_filename(user_text.strip().split("\n")[0])
+        if cand and len(cand) >= 2:
+            return cand
+    return "开发文档"
 
 
 async def _cancelled_now(fn) -> bool:
@@ -81,8 +133,11 @@ async def generate_doc_skill(
     full_md = "".join(parts)
     GEN_LOG.info("[doc] 完成 trace=%s chars=%s", trace_id, len(full_md))
     # Fix B (#482): 把完整 Markdown 作为产物文件下发, 供 proxy 落库为 artifact(右侧面板预览/下载)
+    # 产物名按对话主题动态命名(首个 H1 / 用户请求), 而非固定 "开发文档.md"
     if full_md.strip():
-        yield ev("node", stage="doc_file", data={"name": "开发文档.md", "content": full_md})
+        doc_name = _derive_doc_name(full_md, messages) + ".md"
+        GEN_LOG.info("[doc] 产物名 trace=%s name=%s", trace_id, doc_name)
+        yield ev("node", stage="doc_file", data={"name": doc_name, "content": full_md})
     yield ev("node", stage="done")
 
 
