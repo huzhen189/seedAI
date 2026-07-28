@@ -73,7 +73,7 @@ async def register(client: httpx.AsyncClient):
     UNAME = f"e2e_{int(time.time())}"
     r = await client.post(
         f"{BASE}/auth/register",
-        json={"username": UNAME, "password": "Test123456", "nickname": "E2E测试"},
+        json={"account": UNAME, "password": "Test123456", "nickname": "E2E测试"},
     )
     sc = r.headers.get("set-cookie", "")
     m = re.search(r"access_token=([^;]+)", sc)

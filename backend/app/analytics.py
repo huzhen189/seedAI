@@ -36,7 +36,6 @@ P_ERROR = "an:error"
 P_USER = "an:user:dau"
 P_MODEL = "an:model"
 P_INTENT_DECISION = "an:intent:decision"  # 意图管道决策结果分布(block/confirm/options/route/fallback/unsupported)
-P_QC = "an:qc"                # 后置三裁判质检(v0.8.5): 触发/均分/需复核/每维/风险
 P_FEEDBACK = "an:feedback"    # 用户评价(v0.8.5): 提交/均分/含六维子星占比
 P_API_CALLS = "an:api:calls"  # 业务接口调用(STAT-2): 总次数/成功/失败/状态码分段
 P_ORCH = "an:orch"            # AI 核心编排统计(STAT-1, 由 ai_service 写入同 Redis)
@@ -261,21 +260,45 @@ async def _read_ai_core(r) -> dict:
     except Exception as e:  # noqa: BLE001
         logger.warning("analytics _read_ai_core intent failed: %s", e)
 
-    # 5) 后置 QC 三裁判
+    # 5) 后置 QC(单裁判, v2.3.0) —— 数据来自 MySQL qc_scores 表(不再走 Redis)
     try:
-        qc_total = int((await r.hget("ai:qc:total", "count")) or 0)
-        if qc_total:
-            needs = int((await r.hget("ai:qc:needs_review", "count")) or 0)
-            partial = int((await r.hget("ai:qc:partial", "count")) or 0)
-            dims = {d: await _zset_percentiles(r, f"ai:qc:dim:{d}") for d in AI_SCORING_DIMS}
+        from sqlalchemy import select as _select
+        from .db import SessionLocal as _S
+        from .models import QcScore as _QcScore
+
+        async with _S() as _s:
+            rows = (await _s.execute(_select(_QcScore))).scalars().all()
+        total = len(rows)
+        if total:
+            needs = sum(1 for r0 in rows if r0.needs_review)
+            partial = sum(1 for r0 in rows if r0.partial)
+            # 整体均分: 取各记录 overall 平均(单裁判下 overall 即整体评分)
+            overalls = [r0.overall for r0 in rows if r0.overall]
+            overall_avg = round(sum(overalls) / len(overalls), 2) if overalls else 0.0
+            # 每维均值: 从 result JSON 的 dimensions[dim].mean 聚合
+            dims_acc: dict = {}
+            for r0 in rows:
+                res = r0.result or {}
+                for d, payload in (res.get("dimensions") or {}).items():
+                    v = (payload or {}).get("mean")
+                    if isinstance(v, (int, float)):
+                        dims_acc.setdefault(d, []).append(float(v))
+            dims = {d: {
+                "p50": 0, "p90": 0, "p99": 0,
+                "avg": round(sum(vs) / len(vs), 2),
+                "samples": len(vs),
+            } for d, vs in dims_acc.items()}
+            safety_dist: dict = {}
+            for r0 in rows:
+                safety_dist[r0.safety_risk] = safety_dist.get(r0.safety_risk, 0) + 1
             out["qc"] = {
-                "total": qc_total,
-                "overall": await _zset_percentiles(r, "ai:qc:overall"),
+                "total": total,
+                "overall": {"p50": 0, "p90": 0, "p99": 0, "avg": overall_avg, "samples": total},
                 "needs_review": needs,
-                "needs_review_rate": round(needs / qc_total, 3),
+                "needs_review_rate": round(needs / total, 3),
                 "partial": partial,
-                "partial_rate": round(partial / qc_total, 3),
-                "safety_dist": {k: int(v) for k, v in (await r.hgetall("ai:qc:safety") or {}).items()},
+                "partial_rate": round(partial / total, 3),
+                "safety_dist": safety_dist,
                 "dimensions": dims,
             }
     except Exception as e:  # noqa: BLE001
@@ -561,21 +584,8 @@ async def analytics_snapshot() -> dict:
         decision_risk_stats = {k.decode() if isinstance(k, bytes) else k: int(v)
                                for k, v in (decision_risk_raw or {}).items()}
 
-        # 后置三裁判 QC(v0.8.5)
-        qc_count = int((await r.hget(P_QC, "count")) or 0)
-        qc_overall_sum = float((await r.hget(f"{P_QC}:overall", "sum")) or 0)
-        qc_overall_cnt = int((await r.hget(f"{P_QC}:overall", "count")) or 0)
-        qc_overall_avg = round(qc_overall_sum / qc_overall_cnt, 2) if qc_overall_cnt else None
-        qc_review = int((await r.hget(P_QC, "review")) or 0)
-        qc_review_rate = round(qc_review / max(qc_count, 1), 3) if qc_count else 0.0
-        qc_safety_raw = await r.hgetall(f"{P_QC}:safety")
-        qc_safety = {k.decode() if isinstance(k, bytes) else k: int(v)
-                     for k, v in (qc_safety_raw or {}).items()}
-        qc_per_dim: dict = {}
-        for d in QC_DIMS:
-            s = float((await r.hget(f"{P_QC}:dim:{d}", "sum")) or 0)
-            c = int((await r.hget(f"{P_QC}:dim:{d}", "count")) or 0)
-            qc_per_dim[d] = round(s / c, 2) if c else 0.0
+        # 注: 后置 QC 已不再写入 Redis(无性能考量), 由 ai_core.qc 改读 MySQL qc_scores(见 _read_ai_core)。
+        # 此处旧的 an:qc 聚合块已移除(前端从未消费顶层 qc 字段, 仅消费 ai_core.qc)。
 
         # 用户评价(v0.8.5, 含六维子星)
         fb_count = int((await r.hget(P_FEEDBACK, "count")) or 0)
@@ -615,14 +625,7 @@ async def analytics_snapshot() -> dict:
                 "total_generations": total_gens,
                 "avg_per_user": avg_gens,
             },
-            # v0.8.5 新增: 后置三裁判 QC + 用户评价
-            "qc": {
-                "count": qc_count,
-                "overall_avg": qc_overall_avg,
-                "review_rate": qc_review_rate,
-                "per_dim_avg": qc_per_dim,
-                "safety_dist": qc_safety,
-            },
+            # v0.8.5 新增: 用户评价(后置 QC 已迁移至 ai_core.qc, 读 MySQL qc_scores)
             "feedback": {
                 "count": fb_count,
                 "avg_rating": fb_avg,
@@ -670,36 +673,10 @@ async def record_context_detection(source: str) -> None:
         logger.warning("analytics record_context_detection failed: %s", e)
 
 
-# ---- v0.8.5 新增统计维度: 后置三裁判 QC + 用户评价 ----
-QC_DIMS = ("correctness", "completeness", "compliance", "efficiency", "readability", "safety")
-
-
-async def record_qc(result: dict) -> None:
-    """后置三裁判 QC 统计: 触发次数 / 整体均分 / 需复核率 / 每维均分 / 安全风险分布。
-
-    result 即 ai_service qc.py 的聚合输出(dict), 字段:
-      overall(float) / needs_review(bool) / safety_risk(str) / dimensions(dict[d][mean])。
-    供管理后台「系统分析」标签页量化 QC 覆盖与质量趋势(满足"新增功能必接统计"约定)。"""
-    try:
-        r = await get_redis()
-        await r.hincrby(P_QC, "count", 1)
-        overall = result.get("overall")
-        if overall is not None:
-            await r.hincrbyfloat(f"{P_QC}:overall", "sum", float(overall))
-            await r.hincrby(f"{P_QC}:overall", "count", 1)
-        if result.get("needs_review"):
-            await r.hincrby(P_QC, "review", 1)
-        risk = result.get("safety_risk") or "low"
-        await r.hincrby(f"{P_QC}:safety", risk, 1)
-        dims = result.get("dimensions") or {}
-        for d in QC_DIMS:
-            dv = dims.get(d) or {}
-            mean = dv.get("mean")
-            if mean is not None and mean > 0:
-                await r.hincrbyfloat(f"{P_QC}:dim:{d}", "sum", float(mean))
-                await r.hincrby(f"{P_QC}:dim:{d}", "count", 1)
-    except Exception as e:
-        logger.warning("analytics record_qc failed: %s", e)
+# ---- 注: 后置 QC 统计已整体下线(无性能考量) ----
+# 原 an:qc / ai:qc 的 Redis 写入(record_qc / qc_stats)均已移除;
+# QC 评分数据现由 MySQL qc_scores 表承载, 后台「系统分析」QC 面板经
+# analytics._read_ai_core 直接读取该表(见 ai_core.qc 分支)。
 
 
 async def record_feedback(rating: int, has_dimensions: bool = False) -> None:

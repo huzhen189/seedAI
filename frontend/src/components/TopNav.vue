@@ -90,9 +90,9 @@ function goSettings() {
       </div>
       <template v-if="user">
         <span class="avatar" title="点击进入设置" @click="goSettings">{{
-          (user.nickname || user.username).slice(0, 1)
+          (user.nickname || user.account).slice(0, 1)
         }}</span>
-        <span class="uname">{{ user.nickname || user.username }}</span>
+        <span class="uname">{{ user.nickname || user.account }}</span>
         <button class="btn" @click="logout">退出</button>
       </template>
       <button v-else class="login" @click="auth.openLogin()">登录 / 注册</button>

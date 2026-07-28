@@ -38,7 +38,7 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    account: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)  # 账号(登录名)
     email: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
     nickname: Mapped[str | None] = mapped_column(String(64))
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)

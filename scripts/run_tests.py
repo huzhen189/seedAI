@@ -238,7 +238,7 @@ TEST_CASES = [
 async def login(client: httpx.AsyncClient) -> str | None:
     """登录并返回 access_token。"""
     r = await client.post(f"{BASE}/auth/login",
-                          json={"username": USER, "password": PASS})
+                          json={"account": USER, "password": PASS})
     if r.status_code != 200:
         return None
     m = re.search(r"access_token=([^;]+)", r.headers.get("set-cookie", ""))

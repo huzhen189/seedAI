@@ -278,7 +278,7 @@ def main():
 
     def do_login():
         # 长链路(20 条 + 多建站)可能 > 1h, JWT 滑动过期 → 定时用同凭证刷新 cookie。
-        r = s.post(f"{BASE}/auth/login", json={"username": USERNAME, "password": TMP_PW})
+        r = s.post(f"{BASE}/auth/login", json={"account": USERNAME, "password": TMP_PW})
         return r.status_code in (200, 201)
 
     # 固定账号: 先尝试登录; 失败(账号不存在)再注册, 避免重复注册撞号。
@@ -286,7 +286,7 @@ def main():
     if not do_login():
         log("  登录失败, 尝试注册")
         r = s.post(f"{BASE}/auth/register", json={
-            "username": USERNAME, "password": TMP_PW,
+            "account": USERNAME, "password": TMP_PW,
             "nickname": "e2e20", "email": f"{USERNAME}@test.com",
         })
         if r.status_code not in (200, 201):
@@ -302,7 +302,7 @@ def main():
     # 落盘凭证(供 _gen_ae_report.py 读取写入测试文档)
     try:
         with open(CREDS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"username": USERNAME, "password": TMP_PW,
+            json.dump({"account": USERNAME, "password": TMP_PW,
                        "note": "E2E 回归固定账号, 供登录复查",
                        "base": BASE}, f, ensure_ascii=False, indent=2)
     except Exception as e:

@@ -20,9 +20,9 @@ class UserRepo(BaseRepo[User]):
     cache_ttl = 9000  # 150 分钟（×5）
     cache_enabled = True
 
-    async def get_by_username(self, db: AsyncSession, username: str) -> Optional[User]:
-        """按用户名查(走 MySQL 唯一索引, 不缓存)。"""
-        return await self.get_by(db, username=username)
+    async def get_by_account(self, db: AsyncSession, account: str) -> Optional[User]:
+        """按账号查(走 MySQL 唯一索引, 不缓存)。"""
+        return await self.get_by(db, account=account)
 
     async def get_by_email(self, db: AsyncSession, email: str) -> Optional[User]:
         """按邮箱查(走 MySQL 唯一索引, 不缓存)。"""

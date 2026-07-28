@@ -10,12 +10,11 @@
 2. 编排            an:orch             —— 总次数 / 策略分布 / 子任务数 / 成功率 / 耗时 〔与业务端共享〕
 3. 子任务          an:subtask          —— per-skill 成功·失败·拦截·跳过 + per-risk + 耗时 p50/p90/p99 〔与业务端共享〕
 4. 意图识别        ai:intent           —— 分类总次数 / 决策分布 / 来源分布 / 置信度分布 / 成功率 / 耗时
-5. 后置 QC 三裁判  ai:qc    (v1.2.3)   —— 整体评分 / 7 维均值 / 人工复核率 / 评委掉线率 / 安全风险分布
-6. 生成内 Reviewer ai:rev   (v1.2.3)   —— per-skill 通过·失败 / 待复核率 / 失败原因分布 / 7 维均值
-7. 安全网关        ai:safe  (v1.2.3)   —— 入口风险等级分布 / 拦截·放行 / 拦截原因分布
-8. LLM Provider    ai:llm   (v1.2.3)   —— 每模型次数·成功·失败·错误类型·耗时 p50/p90/p99·Token 累计
-9. v0.9.0 功能     an:v090             —— repair/distill/code_index/refine/chat_retry 功能使用量 〔与业务端共享〕
-10. 多意图路由      ai:mi   (v1.2.5) —— A+B 路径分布(hybrid=方案B / llm=方案A 升级) / 升级率 / 子任务数 / 耗时
+5. 生成内 Reviewer ai:rev   (v1.2.3)   —— per-skill 通过·失败 / 待复核率 / 失败原因分布 / 7 维均值
+6. 安全网关        ai:safe  (v1.2.3)   —— 入口风险等级分布 / 拦截·放行 / 拦截原因分布
+7. LLM Provider    ai:llm   (v1.2.3)   —— 每模型次数·成功·失败·错误类型·耗时 p50/p90/p99·Token 累计
+8. v0.9.0 功能     an:v090             —— repair/distill/code_index/refine/chat_retry 功能使用量 〔与业务端共享〕
+9. 多意图路由      ai:mi   (v1.2.5) —— A+B 路径分布(hybrid=方案B / llm=方案A 升级) / 升级率 / 子任务数 / 耗时
 
 ⚠️ 命名空间约定(避免与业务端 an:* 统计键冲突):
   - 标「与业务端共享」的 3 项(an:orch/an:subtask/an:generate/an:v090)由 AI 核心写入、业务端
@@ -54,7 +53,6 @@ P_SUB = "an:subtask"
 P_GEN = "an:generate"   # 后端核心总生成请求数〔与业务端共享〕
 P_V090 = "an:v090"      # v0.9.0 新增功能统计〔与业务端共享〕
 P_INTENT = "ai:intent"  # v1.2.0 混合级联意图识别分类统计(ai: 命名空间, 避免与业务端 an:intent:* 冲突)
-P_QC = "ai:qc"          # v1.2.3 后置三裁判 QC 评分统计
 P_REV = "ai:rev"        # v1.2.3 生成内 Reviewer 自审统计
 P_SAFE = "ai:safe"      # v1.2.3 入口安全网关统计
 P_LLM = "ai:llm"        # v1.2.3 LLM Provider 调用统计
@@ -473,73 +471,6 @@ async def role_stats() -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 5. 后置 QC 统计 (v1.2.3; v2.3.0 起单裁判)
-# ──────────────────────────────────────────────────────────────────────
-
-async def record_qc(result: dict, duration_ms: float = 0.0) -> None:
-    """后置 QC(单裁判 v2.3.0)每次运行的统计。
-
-    result: run_qc() 返回的聚合 dict(见 qc.py)。提取:
-      - overall 整体评分(zset → p50/p90/p99/avg, 看整体质量趋势)
-      - 7 维每维 mean(zset → 看各维质量分布, 定位短板维度)
-      - needs_review 计数(人工复核率 = needs_review / total)
-      - partial 计数(评委掉线/失败占比, 反映模型可用性)
-      - safety_risk 分布(low/medium/high/critical)
-    失败仅告警跳过, 不阻塞主流程。
-    """
-    try:
-        r = _get_redis()
-        if r is None:
-            return
-        await r.hincrby(f"{P_QC}:total", "count", 1)
-        overall = float(result.get("overall", 0) or 0)
-        await r.zadd(f"{P_QC}:overall", {uuid.uuid4().hex: overall})
-        await r.zremrangebyrank(f"{P_QC}:overall", 0, -(LATENCY_MAX + 1))
-        if result.get("needs_review"):
-            await r.hincrby(f"{P_QC}:needs_review", "count", 1)
-        if result.get("partial"):
-            await r.hincrby(f"{P_QC}:partial", "count", 1)
-        risk = result.get("safety_risk", "low") or "low"
-        await r.hincrby(f"{P_QC}:safety", risk, 1)
-        for dim, payload in (result.get("dimensions") or {}).items():
-            mean = float((payload or {}).get("mean", 0) or 0)
-            await r.zadd(f"{P_QC}:dim:{dim}", {uuid.uuid4().hex: mean})
-            await r.zremrangebyrank(f"{P_QC}:dim:{dim}", 0, -(LATENCY_MAX + 1))
-        if duration_ms:
-            await r.zadd(f"{P_QC}:duration", {uuid.uuid4().hex: duration_ms})
-            await r.zremrangebyrank(f"{P_QC}:duration", 0, -(LATENCY_MAX + 1))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("AI analytics record_qc failed: %s", e)
-
-
-async def qc_stats() -> dict:
-    """读取 QC(单裁判)统计(整体评分 / 7 维均值 / 复核率 / 掉线率 / 安全风险)。"""
-    try:
-        r = _get_redis()
-        if r is None:
-            return {"total": 0, "available": False}
-        total = int((await r.hget(f"{P_QC}:total", "count")) or 0)
-        if total == 0:
-            return {"total": 0, "available": True}
-        overall = await _pct_zset(r, f"{P_QC}:overall")
-        needs = int((await r.hget(f"{P_QC}:needs_review", "count")) or 0)
-        partial = int((await r.hget(f"{P_QC}:partial", "count")) or 0)
-        safety = {k: int(v) for k, v in (await r.hgetall(f"{P_QC}:safety") or {}).items()}
-        dur = await _pct_zset(r, f"{P_QC}:duration")
-        dims = {d: await _pct_zset(r, f"{P_QC}:dim:{d}") for d in SCORING_DIMENSIONS}
-        return {
-            "total": total, "available": True, "overall": overall,
-            "needs_review": needs,
-            "needs_review_rate": round(needs / max(total, 1), 3),
-            "partial": partial, "partial_rate": round(partial / max(total, 1), 3),
-            "safety_dist": safety, "duration_ms": dur, "dimensions": dims,
-        }
-    except Exception as e:  # noqa: BLE001
-        logger.warning("AI analytics qc_stats failed: %s", e)
-        return {"total": 0, "available": True, "error": str(e)}
-
-
-# ──────────────────────────────────────────────────────────────────────
 # 6. 生成内 Reviewer 自审统计 (v1.2.3)
 # ──────────────────────────────────────────────────────────────────────
 
@@ -871,8 +802,11 @@ async def _gen_total() -> dict:
 async def ai_stats_summary() -> dict:
     """汇总 AI 核心全部统计维度, 供管理后台「系统分析」一次性拉取。
 
-    包含: 生成负载 / 编排 / 子任务 / 意图识别 / 后置 QC / Reviewer / 安全网关 /
-    LLM Provider / v0.9.0 功能。任意子模块异常均被兜底, 不影响整体返回。
+    包含: 生成负载 / 编排 / 子任务 / 意图识别 / Reviewer / 安全网关 /
+    LLM Provider / v0.9.0 功能 / 角色编排。任意子模块异常均被兜底, 不影响整体返回。
+
+    注: 后置 QC 已不再写入 Redis(无性能考量), 其数据由 MySQL qc_scores 表承载,
+    经业务端 analytics._read_ai_core 读取, 故此处不再聚合 qc。
     """
     try:
         return {
@@ -881,7 +815,6 @@ async def ai_stats_summary() -> dict:
             "orchestration": await orchestration_stats(),
             "intent": await intent_stats(),
             "multi_intent": await multi_intent_stats(),
-            "qc": await qc_stats(),
             "reviewer": await reviewer_stats(),
             "safety": await safety_stats(),
             "llm": await llm_stats(),

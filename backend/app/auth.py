@@ -112,16 +112,16 @@ def _clear_cookies(resp: Response, request: Request | None = None) -> None:
 
 
 def _to_resp(u: User) -> UserResp:
-    return UserResp(id=u.id, username=u.username, nickname=u.nickname,
+    return UserResp(id=u.id, account=u.account, nickname=u.nickname,
                     email=u.email, role=u.role, plan=u.plan)
 
 
 @router.post("/register", response_model=UserResp)
 async def register(req: RegisterReq, response: Response, request: Request, db=Depends(get_db)):
     # 唯一性校验
-    existing = await user_repo.get_by_username(db, req.username)
+    existing = await user_repo.get_by_account(db, req.account)
     if existing:
-        raise HTTPException(status_code=409, detail="username already exists")
+        raise HTTPException(status_code=409, detail="account already exists")
     if req.email:
         existing_email = await user_repo.get_by_email(db, req.email)
         if existing_email:
@@ -129,8 +129,8 @@ async def register(req: RegisterReq, response: Response, request: Request, db=De
     # 通过 Repo 创建(内部走 Redis+MySQL 双写)
     user = await user_repo.create(
         db,
-        username=req.username,
-        nickname=req.nickname or req.username,
+        account=req.account,
+        nickname=req.nickname or req.account,
         email=req.email or None,
         password_hash=hash_password(req.password),
         role="user",
@@ -144,7 +144,7 @@ async def register(req: RegisterReq, response: Response, request: Request, db=De
 
 @router.post("/login", response_model=UserResp)
 async def login(req: LoginReq, response: Response, request: Request, db=Depends(get_db)):
-    user = await user_repo.get_by_username(db, req.username)
+    user = await user_repo.get_by_account(db, req.account)
     if not user or not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid credentials")
     _set_cookies(response, create_access_token(user.id, user.role), create_refresh_token(user.id), request)

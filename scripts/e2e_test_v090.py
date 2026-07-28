@@ -168,7 +168,7 @@ async def run():
         print("\n[2/5] 注册/登录...")
         # 先尝试注册
         reg = await client.post(f"{BASE}/auth/register", json={
-            "username": TEST_USER, "password": TEST_PASS, "nickname": TEST_NICK,
+            "account": TEST_USER, "password": TEST_PASS, "nickname": TEST_NICK,
         })
         if reg.status_code in (200, 409):
             print(f"  注册: {reg.status_code} {'(可能已存在)' if reg.status_code == 409 else ''}")
@@ -177,7 +177,7 @@ async def run():
 
         # 登录 (token 在 Set-Cookie, 不在 JSON body)
         login = await client.post(f"{BASE}/auth/login", json={
-            "username": TEST_USER, "password": TEST_PASS,
+            "account": TEST_USER, "password": TEST_PASS,
         })
         token = None
         if login.status_code == 200:

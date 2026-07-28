@@ -130,28 +130,28 @@ async def init_db():
 
 async def _seed_super_admin() -> None:
     """把 settings.seed_super_admin 指定的用户提升为 super_admin(若不存在则跳过)。"""
-    username = (settings.seed_super_admin or "").strip()
-    if not username:
+    account = (settings.seed_super_admin or "").strip()
+    if not account:
         return
     from .models import User
 
     try:
         async with SessionLocal() as session:
             user = (
-                await session.execute(select(User).where(User.username == username))
+                await session.execute(select(User).where(User.account == account))
             ).scalar_one_or_none()
             if user is None:
                 logger.warning(
                     "SEED_SUPER_ADMIN=%s 对应的用户不存在,跳过注入(请先注册该账号)",
-                    username,
+                    account,
                 )
                 return
             if user.role != "super_admin":
                 user.role = "super_admin"
                 await session.commit()
-                logger.info("已将用户 '%s' 注入为 super_admin", username)
+                logger.info("已将账号 '%s' 注入为 super_admin", account)
             else:
-                logger.debug("用户 '%s' 已是 super_admin,无需变更", username)
+                logger.debug("账号 '%s' 已是 super_admin,无需变更", account)
     except Exception as e:  # 种子失败不应阻断启动
         logger.warning("super_admin 种子注入失败(已跳过): %s", e)
 

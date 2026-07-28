@@ -227,7 +227,7 @@ export interface SearchItem {
 
 export interface AuthUser {
   id: number
-  username: string
+  account: string
   nickname: string
   email: string | null
   role: string
@@ -327,7 +327,7 @@ export interface Artifact {
 /** 管理后台用户列表项(/admin/users)。 */
 export interface AdminUser {
   id: number
-  username: string
+  account: string
   nickname: string
   email: string | null
   role: string

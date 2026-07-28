@@ -207,17 +207,17 @@ async def _ensure_super_admin() -> None:
     from app.models import User
     from app.security import hash_password
 
-    username, password = "huzhen", "huzhen189"
+    account, password = "huzhen", "huzhen189"
     email, nickname = "huzhen@huzhen.net.cn", "超级管理员"
     async with SessionLocal() as session:
         existing = (
-            await session.execute(select(User).where(User.username == username))
+            await session.execute(select(User).where(User.account == account))
         ).scalar_one_or_none()
         if existing is not None:
-            print(f"  >> 默认超管 '{username}' 已存在,跳过")
+            print(f"  >> 默认超管 '{account}' 已存在,跳过")
             return
         user = User(
-            username=username,
+            account=account,
             nickname=nickname,
             email=email,
             password_hash=hash_password(password),
@@ -228,7 +228,7 @@ async def _ensure_super_admin() -> None:
         await session.commit()
         # 超管即建 user_states 扩展行(MySQL)+ 写入 Redis 默认状态(幂等)。
         await ensure_user_state(user.id)
-        print(f"  >> 已创建默认超管: {username} / {password} (role=super_admin)")
+        print(f"  >> 已创建默认超管: {account} / {password} (role=super_admin)")
 
 
 if __name__ == "__main__":

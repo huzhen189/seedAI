@@ -6,14 +6,14 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class RegisterReq(BaseModel):
-    username: str = Field(min_length=3, max_length=64)
+    account: str = Field(min_length=3, max_length=64)
     password: str = Field(min_length=8, max_length=128)
     nickname: str | None = Field(None, max_length=64)
     email: EmailStr | None = None
 
 
 class LoginReq(BaseModel):
-    username: str
+    account: str
     password: str
 
 
@@ -26,7 +26,7 @@ class TokenResp(BaseModel):
 class UserResp(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
-    username: str
+    account: str
     nickname: str = ""
     email: str | None = None
     role: str
@@ -118,7 +118,7 @@ class AdminUserResp(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
     id: int
-    username: str
+    account: str
     nickname: str = ""
     email: str | None = None
     role: str

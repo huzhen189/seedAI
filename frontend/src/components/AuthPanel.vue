@@ -5,7 +5,7 @@ import { useAuthStore } from '../stores/auth'
 const store = useAuthStore()
 
 const mode = ref<'login' | 'register'>('login')
-const username = ref('')
+const account = ref('')
 const nickname = ref('')
 const password = ref('')
 const email = ref('')
@@ -15,17 +15,17 @@ const busy = ref(false)
 
 async function submit() {
   err.value = ''
-  if (!username.value.trim() || !password.value) {
-    err.value = '请输入用户名和密码'
+  if (!account.value.trim() || !password.value) {
+    err.value = '请输入账号和密码'
     return
   }
   busy.value = true
   try {
     if (mode.value === 'login') {
-      await store.login(username.value.trim(), password.value)
+      await store.login(account.value.trim(), password.value)
     } else {
       await store.register(
-        username.value.trim(),
+        account.value.trim(),
         password.value,
         email.value.trim() || undefined,
         nickname.value.trim() || undefined,
@@ -47,12 +47,12 @@ async function submit() {
       <div class="title">SeedAI · {{ mode === 'login' ? '登录' : '注册' }}</div>
       <div class="sub">登录后才能开始对话</div>
 
-      <input v-model="username" placeholder="用户名" autocomplete="username" />
+      <input v-model="account" placeholder="账号" autocomplete="username" />
 
       <input
         v-if="mode === 'register'"
         v-model="nickname"
-        placeholder="昵称(可选,默认同用户名)"
+        placeholder="昵称(可选,默认同账号)"
         autocomplete="nickname"
       />
 

@@ -15,7 +15,7 @@ async def register(c):
     global TOKEN, UNAME
     UNAME = f"qb_{int(time.time())}"
     r = await c.post(f"{BASE}/auth/register",
-                     json={"username": UNAME, "password": "Test123456", "nickname": "QB"})
+                     json={"account": UNAME, "password": "Test123456", "nickname": "QB"})
     m = re.search(r"access_token=([^;]+)", r.headers.get("set-cookie", ""))
     TOKEN = m.group(1) if m else None
     return r.status_code, bool(TOKEN)

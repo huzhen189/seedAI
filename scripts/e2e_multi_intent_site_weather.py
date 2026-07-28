@@ -28,7 +28,7 @@ MULTI_QUERY = "帮我做一个个人摄影作品集网站，包含首页和关�
 async def register(client: httpx.AsyncClient):
     uname = f"e2e_mi_{int(time.time())}"
     r = await client.post(f"{BASE}/auth/register",
-                          json={"username": uname, "password": "Test123456", "nickname": "多意图E2E"})
+                          json={"account": uname, "password": "Test123456", "nickname": "多意图E2E"})
     sc = r.headers.get("set-cookie", "")
     m = re.search(r"access_token=([^;]+)", sc)
     tok = m.group(1) if m else None

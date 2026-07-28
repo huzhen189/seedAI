@@ -43,7 +43,7 @@ from .analytics import (  # 业务端统计接入(§「新增功能必接统计�
     record_intent_decision,
 )
 from .analytics import record_context_detection, record_requirement_doc
-from .analytics import record_qc, record_feedback
+from .analytics import record_feedback
 from .cache import cache_get, cache_set, ck_delete, ck_get, ck_set, enqueue_write_error, get_redis
 from .config import settings
 from .db import get_db
@@ -548,15 +548,14 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
             async with _S() as s:
                 await finish_trace(s, tid, terminal_status, max(0, len(assistant_text) // 4))
                 await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url, files_dict, refined_summary, terminal_status, doc_files, deliver_fallback_content)
-                # 后置 QC 三裁判结果落库(幂等 upsert by trace_id)
+                # 后置 QC 结果落库 MySQL qc_scores(幂等 upsert by trace_id);
+                # 不再写入 Redis 统计(无性能考量), 后台「系统分析」QC 面板改读该表。
                 if qc_result is not None:
                     try:
                         await qc_score_repo.upsert(
                             s, tid, model, conversation_id, qc_result)
                         logger.info("[chat] QC 已落库 trace=%s overall=%s",
                                     tid, qc_result.get("overall"))
-                        # 同步写入统计系统(满足"新增功能必接统计"约定): 计数/均分/复核率/每维
-                        await record_qc(qc_result)
                     except Exception as qc_e:  # noqa: BLE001
                         logger.warning("[chat] QC 落库失败(跳过) trace=%s: %s", tid, qc_e)
                 # 需求文档落库(幂等覆盖, 供前端重启后还原"📋 需求文档"条目)

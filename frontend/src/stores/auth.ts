@@ -12,19 +12,19 @@ export const useAuthStore = defineStore('auth', () => {
   async function init() {
     user.value = await authApi.fetchMe()
   }
-  async function login(username: string, password: string): Promise<AuthUser> {
-    const u = await authApi.login(username, password)
+  async function login(account: string, password: string): Promise<AuthUser> {
+    const u = await authApi.login(account, password)
     user.value = u
     loginOpen.value = false // 登录成功自动关闭弹窗
     return u
   }
   async function register(
-    username: string,
+    account: string,
     password: string,
     email?: string,
     nickname?: string,
   ): Promise<AuthUser> {
-    const u = await authApi.register(username, password, email, nickname)
+    const u = await authApi.register(account, password, email, nickname)
     user.value = u
     loginOpen.value = false
     return u

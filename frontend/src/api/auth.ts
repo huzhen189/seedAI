@@ -3,7 +3,7 @@
 
 export interface AuthUser {
   id: number
-  username: string
+  account: string
   nickname: string
   email: string | null
   role: string
@@ -25,17 +25,17 @@ async function _json(res: Response) {
   return res.json()
 }
 
-export async function login(username: string, password: string): Promise<AuthUser> {
+export async function login(account: string, password: string): Promise<AuthUser> {
   const r = await fetch('/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ account, password }),
   })
   return _json(r)
 }
 
 export async function register(
-  username: string,
+  account: string,
   password: string,
   email?: string,
   nickname?: string,
@@ -44,7 +44,7 @@ export async function register(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      username,
+      account,
       password,
       email: email || undefined,
       nickname: nickname || undefined,

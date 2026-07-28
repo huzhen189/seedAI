@@ -34,7 +34,7 @@ from .config import settings
 from .scoring import (
     SCORING_DIMENSIONS, LLM_SCORING_DIMS, parse_scores,
 )
-from .analytics import record_qc, record_llm_call
+from .analytics import record_llm_call
 
 logger = logging.getLogger("ai_service.qc")
 
@@ -205,9 +205,6 @@ async def run_qc(
     logger.info("[QC] 评分完成 耗时=%.2fs overall=%.2f needs_review=%s partial=%s model=%s",
                 dur, result.get("overall", 0), result.get("needs_review"),
                 result.get("partial"), model_id)
-    # 写入后置 QC 统计(整体/7维/复核率/掉线率/安全风险), 失败仅告警
-    try:
-        await record_qc(result, dur * 1000)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[QC] 统计写入失败(忽略): %s", e)
+    # 注: QC 评分结果不再写入 Redis 统计(无性能考量), 仅由 proxy.py
+    # 落库 MySQL qc_scores 表, 后台「系统分析」QC 面板改读该表。
     return result

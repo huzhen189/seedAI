@@ -14,7 +14,7 @@ import * as authApi from '../api/auth'
 
 const fakeUser = {
   id: 1,
-  username: 'u',
+  account: 'u',
   nickname: 'u',
   email: null,
   role: 'user',
@@ -46,7 +46,7 @@ describe('auth store', () => {
     const s = useAuthStore()
     s.openLogin()
     const u = await s.login('u', 'p')
-    expect(u.username).toBe('u')
+    expect(u.account).toBe('u')
     expect(s.user).not.toBeNull()
     expect(s.loginOpen).toBe(false)
   })

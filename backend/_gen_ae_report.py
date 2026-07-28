@@ -15,7 +15,7 @@ CREDS = os.path.join(HERE, "_e2e_20_creds.json")
 
 def _load_creds():
     """读取 harness 落盘的测试账号凭证(供登录复查)。"""
-    default = {"username": "e2e20_seedai_test", "password": "testpass123",
+    default = {"account": "e2e20_seedai_test", "password": "testpass123",
                "base": "http://127.0.0.1:7101",
                "note": "E2E 回归固定账号, 供登录复查 (harness 未运行则取默认)"}
     try:
@@ -175,7 +175,7 @@ def main():
     md.append("")
     md.append("## 〇、测试账号（供登录复查）")
     md.append("")
-    md.append(f"- **账号**：`{creds.get('username')}`")
+    md.append(f"- **账号**：`{creds.get('account')}`")
     md.append(f"- **密码**：`{creds.get('password')}`")
     md.append(f"- **后端地址**：`{creds.get('base')}`")
     md.append(f"- **说明**：{creds.get('note', 'E2E 回归固定账号')}。同一套账号跨多次回归复用，"

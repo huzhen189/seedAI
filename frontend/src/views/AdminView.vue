@@ -1160,7 +1160,7 @@ onUnmounted(() => {
         <tbody>
           <tr v-for="u in users" :key="u.id">
             <td>{{ u.id }}</td>
-            <td>{{ u.username }}</td>
+            <td>{{ u.account }}</td>
             <td>{{ u.nickname || '-' }}</td>
             <td>{{ u.email || '-' }}</td>
             <td>

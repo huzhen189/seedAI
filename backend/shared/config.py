@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_ttl: int = 3600
     refresh_token_ttl: int = 7 * 24 * 3600
-    seed_super_admin: str = ""  # username to promote to super_admin on startup
+    seed_super_admin: str = ""  # 账号(account)在启动时提升为 super_admin
 
     # ---- model gateways ----
     deepseek_api_key: str = ""
