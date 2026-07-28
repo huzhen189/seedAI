@@ -13,6 +13,7 @@ from ..events import ev
 from ..providers import (
     ModelUnavailableError,
     astream_with_fallback,
+    get_chat_model,
     resolve_fallback_order,
 )
 from ..registry import register_skill
@@ -134,6 +135,37 @@ async def _cancelled_now(fn) -> bool:
     return bool(res)
 
 
+async def _gen_outline(model_id: str, messages: list) -> str:
+    """非流式生成文档大纲(章节标题树), 供轨迹 '规划结构' 步骤实时展示。
+
+    失败返回 '' (优雅降级, 不阻断主流程): 无 key / 模型不可用 / 异常都只告警跳过。
+    """
+    try:
+        sys_outline = (
+            "你是一名技术文档架构师。仅根据用户需求输出文档的章节大纲, "
+            "使用纯 Markdown 标题(最多三级, 不超过 12 行), 不要正文、不要解释、不要代码块。"
+            "直接以 # 主标题开头, 例如:\n"
+            "# 文档主标题\n## 1. 背景与目标\n## 2. 方案概述\n### 2.1 技术选型\n"
+        )
+        for mid in resolve_fallback_order(model_id):
+            try:
+                chat = get_chat_model(mid, streaming=False)
+                resp = await chat.ainvoke(
+                    [{"role": "system", "content": sys_outline}] + messages
+                )
+                text = getattr(resp, "content", None) or ""
+                text = text.strip()
+                if text:
+                    GEN_LOG.info("[doc] 大纲生成成功 model=%s lines=%s", mid, text.count("\n") + 1)
+                    return text
+            except Exception as e:
+                GEN_LOG.warning("[doc] 大纲生成失败 model=%s: %s", mid, e)
+        return ""
+    except Exception as e:
+        GEN_LOG.warning("[doc] 大纲生成异常(跳过): %s", e)
+        return ""
+
+
 async def generate_doc_skill(
     model_id: str,
     messages: list,
@@ -145,11 +177,23 @@ async def generate_doc_skill(
     GEN_LOG.info("[doc] 开始 trace=%s model=%s", trace_id, model_id)
     # 分层轨迹: 规划结构 → 撰写正文 → 校对格式(由各阶段节点驱动, 给前端 trail 更细的层次感)
     yield ev("node", stage="doc_plan")
+    if await _cancelled_now(is_cancelled):
+        yield ev("aborted")
+        return
+    # 规划结构阶段: 非流式先生成大纲, 作为轨迹 think 实时展示(撰写正文时再逐节展开)
+    # 失败优雅降级: 仅跳过大纲, 直接进入正文撰写, 不影响主流程。
+    outline = await _gen_outline(model_id, messages)
+    if outline:
+        yield ev("think", stage="doc_plan", content=outline)
     parts: list[str] = []
     _emit_write = False
+    # 主生成: 若有大纲则作为参考骨架, 让正文章节结构与之对齐
+    sys_doc = SYS_DOC
+    if outline:
+        sys_doc = SYS_DOC + "\n\n参考大纲(请严格遵循其章节结构逐节展开, 不要偏离主题):\n" + outline
     try:
         async for chunk, _ in astream_with_fallback(
-            model_id, messages, system=SYS_DOC
+            model_id, messages, system=sys_doc
         ):
             if await _cancelled_now(is_cancelled):
                 yield ev("aborted")
