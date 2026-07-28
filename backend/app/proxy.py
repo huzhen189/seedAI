@@ -532,6 +532,7 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
                       terminal_status: str, user_text: str, assistant_text: str,
                       preview_url: str | None = None,
                       files_dict: dict[str, str] | None = None,
+                      doc_files: dict[str, dict] | None = None,
                       refined_summary: str = "",
                       qc_result: dict | None = None,
                       project_id: int | None = None,
@@ -544,7 +545,7 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
             logger.info("[chat] [8/8] 后台落库 trace=%s attempt=%d", tid, attempt + 1)
             async with _S() as s:
                 await finish_trace(s, tid, terminal_status, max(0, len(assistant_text) // 4))
-                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url, files_dict, refined_summary, terminal_status)
+                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url, files_dict, refined_summary, terminal_status, doc_files)
                 # 后置 QC 三裁判结果落库(幂等 upsert by trace_id)
                 if qc_result is not None:
                     try:
@@ -864,6 +865,7 @@ async def chat(
         assistant_parts: list[str] = []
         preview_url: str | None = None  # 捕获预览直链(供分享「复制预览链接」使用)
         files_dict: dict[str, str] = {}  # 多文件产物: {文件名: COS URL} (v1.2.1+)
+        doc_files: dict[str, dict] = {}  # 文档产物: {文件名: {name,size,content}} (Fix B #483, doc 技能)
         refined_text: str = ""  # 文字总结: agent 生成完毕后的自然语言反馈(v1.2.2)
         qc_result: dict | None = None  # 捕获后置 QC 三裁判聚合结果(供落库 + 前端展示)
         requirement_doc_captured: dict | None = None  # 捕获需求文档(供落库 + 前端重启还原)
@@ -988,6 +990,17 @@ async def chat(
                                             if payload_obj.get("stage") == "preview" and payload_obj.get("url"):
                                                 preview_url = payload_obj["url"]
                                                 await cache_set(f"site_generated:{conversation_id}", "1", ttl=86400)
+                                            # Fix B (#483): doc 技能下发的 Markdown 文件产物 → 供右侧面板预览/下载
+                                            if payload_obj.get("stage") == "doc_file":
+                                                _doc = payload_obj.get("data") or {}
+                                                if isinstance(_doc, dict) and _doc.get("content"):
+                                                    _dname = _doc.get("name") or "开发文档.md"
+                                                    doc_files[_dname] = {
+                                                        "name": _dname,
+                                                        "size": len(_doc["content"].encode("utf-8")),
+                                                        "content": _doc["content"],
+                                                    }
+                                                    logger.info("[chat] 捕获 doc 产物 trace=%s name=%s", tid, _dname)
                                         if event == "preview" and isinstance(payload_obj, dict) and payload_obj.get("url"):
                                             preview_url = payload_obj["url"]
                                             await cache_set(f"site_generated:{conversation_id}", "1", ttl=86400)
@@ -1208,6 +1221,7 @@ async def chat(
                     assistant_text=assistant_full_text,
                     preview_url=preview_url,
                     files_dict=files_dict,
+                    doc_files=doc_files,
                     refined_summary=refined_text,
                     qc_result=qc_result,
                     project_id=project_id,
@@ -1501,6 +1515,7 @@ async def _persist_conversation(
     files_dict: dict[str, str] | None = None,
     refined_summary: str = "",
     terminal_status: str = "done",
+    doc_files: dict[str, dict] | None = None,
 ) -> None:
     """SSE 结束后落库。build 类消息走 Artifact+结构化 JSON, chat 类存纯文本。"""
     # 归一化: 拆解 {"data":"x"}{"data":"y"}... → "xy..." (兜底防 AI 服务旧格式)
@@ -1559,6 +1574,24 @@ async def _persist_conversation(
         # ---- 闲聊/文档: 纯文本 ----
         if assistant_text:
             await message_repo.upsert_assistant(db, conv.id, trace_id, assistant_text, model)
+
+    # Fix B (#483): doc 技能下发的 Markdown 产物 → 额外落 Artifact(repo="doc"),
+    # 右侧面板可预览/下载; 气泡仍保留 Markdown 原文(上方 else 分支已存纯文本)。
+    if doc_files:
+        art_files = {
+            fname: {"name": fname, "size": v.get("size", 0), "content": v.get("content", "")}
+            for fname, v in doc_files.items()
+        }
+        art = await artifact_repo.upsert_by_trace(
+            db, trace_id,
+            project_id=conv.project_id or 0,
+            conversation_id=conv.id,
+            title=(conv.name or user_text[:20] or "开发文档") + " · 文档",
+            repo="doc",
+            files=art_files,
+            preview_url="",
+        )
+        logger.info("[chat] Doc Artifact 幂等落库 id=%s trace=%s files=%s", art.id, trace_id, list(art_files.keys()))
 
     # 失败/中断/不支持 且整轮无任何产出时, 仍补一条反馈消息, 保证前端总能看到结果
     # (成功/失败/中断均落库, 满足"无论如何后端都要返回一条 message 反馈用户")。

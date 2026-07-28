@@ -18,7 +18,18 @@ logger = logging.getLogger("ai_service.skills.agent_doc")
 
 SYS_DOC = (
     "你是一名技术文档工程师。根据用户需求产出清晰、结构化的文档, 使用 Markdown 格式。"
-    "如果用户没有指定输出格式, 默认输出 .md。"
+    "如果用户没有指定输出格式, 默认输出 .md。\n\n"
+    "⚠️ 平台约束（重要）：本平台是一个「仅生成纯静态前端网页」的 AI 助手, "
+    "所有产出都是纯前端技术(HTML + CSS + JavaScript), 不支持、也不允许接入任何后端服务、数据库、"
+    "服务端运行时或第三方服务端 API。\n"
+    "• 仅涉及纯前端技术：HTML、CSS、JavaScript（含内联或独立的 .css/.js 文件）\n"
+    "• 严禁在文档中推荐或要求用户使用以下技术来实现平台功能："
+    "Next.js / Nuxt / SSR / Node.js 服务端 / PHP / Python(Django·Flask 等)后端 / Java 后端 / Go 后端 / "
+    "数据库 / 用户登录注册后端 / 支付后端 / 服务端 API 代理\n"
+    "• 若文档涉及「网站 / 页面 / 功能」的实现方案, 必须明确其为纯静态前端实现; "
+    "若用户需求确实包含后端能力(如数据存储、登录), 请在文档中友好提示："
+    "「该功能需后端支持, 本平台当前仅提供静态前端方案 / 演示界面」, 不要给出后端框架的具体搭建步骤。\n"
+    "请始终以「纯静态前端」为前提撰写技术文档。"
 )
 
 GEN_LOG = logging.getLogger("ai_service.generate")
@@ -67,7 +78,11 @@ async def generate_doc_skill(
         yield ev("aborted")
         return
 
-    GEN_LOG.info("[doc] 完成 trace=%s chars=%s", trace_id, len("".join(parts)))
+    full_md = "".join(parts)
+    GEN_LOG.info("[doc] 完成 trace=%s chars=%s", trace_id, len(full_md))
+    # Fix B (#482): 把完整 Markdown 作为产物文件下发, 供 proxy 落库为 artifact(右侧面板预览/下载)
+    if full_md.strip():
+        yield ev("node", stage="doc_file", data={"name": "开发文档.md", "content": full_md})
     yield ev("node", stage="done")
 
 
