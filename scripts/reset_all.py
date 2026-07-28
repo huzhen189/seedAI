@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -232,8 +233,14 @@ async def _ensure_super_admin() -> None:
 
 
 if __name__ == "__main__":
-    confirm = input("⚠ 将清空全部数据并重建,确认? [y/N] ")
-    if confirm.lower() != "y":
-        print("已取消")
-        sys.exit(0)
-    asyncio.run(reset())
+    # 非交互重置: 设置环境变量 FORCE=1 跳过交互确认(便于脚本/自动化触发),
+    # 例如:  FORCE=1 python scripts/reset_all.py
+    if os.environ.get("FORCE", "").strip() == "1":
+        print("⚠ FORCE=1:跳过交互确认, 直接重置")
+        asyncio.run(reset())
+    else:
+        confirm = input("⚠ 将清空全部数据并重建,确认? [y/N] ")
+        if confirm.lower() != "y":
+            print("已取消")
+            sys.exit(0)
+        asyncio.run(reset())
