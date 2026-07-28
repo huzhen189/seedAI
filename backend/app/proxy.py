@@ -57,6 +57,10 @@ from .agent.core.queue import get_queue
 from .tracing import append_trace_event, create_trace, finish_trace, log_usage
 from .user_state import touch_user_state, get_user_state, reset_user_state
 
+# 续接守卫: 刷新/重连(无新输入)且流尚未建立时, 轮询等待 in-flight Worker 建流的最长秒数。
+# 通常 Worker 在数秒内产出首事件(XADD 建流), 仅当 Worker 真已结束/死亡才超时干净收尾。
+STREAM_WAIT_SECONDS = 30
+
 import html as _html
 import re
 
@@ -1217,12 +1221,33 @@ async def chat(
             _elapsed = (time.time() - t_start_chat) * 1000
             asyncio.create_task(record_api_latency("/api/chat", _elapsed))
 
-    # v4 续接守卫: 前端以 after 游标请求续接, 但该 trace 的流已不存在(过期 1h / 从未生成),
-    # 说明该轮早已结束 —— 直接返回一条 done 事件干净收尾, 绝不进入 publisher 空 q 重入队。
-    # (置于 chat() 普通作用域, 因 async 生成器 publisher 内不可 return 带值)
+    # 续接守卫(增强): 刷新/重连(after 为空 且无新输入 q)但流尚未建立 —— 通常是 Worker 预热中
+    # (首事件 XADD 前 Redis Stream 不存在, stream_exists 恒 False)。若此时盲目入队, 会触发
+    # 「从头做一遍」(重复生成)。故轮询等待 in-flight Worker 建流; 超时(Worker 真已结束/死亡)
+    # 才干净收尾(发 done), 绝不空 q 重入队。
+    if (not resume) and (not request.query_params.get("q")) and (not await get_queue().stream_exists(tid)):
+        _appeared = False
+        for _ in range(STREAM_WAIT_SECONDS // 2):
+            await asyncio.sleep(2)
+            if await get_queue().stream_exists(tid):
+                _appeared = True
+                break
+        if not _appeared:
+            logger.info("[chat] 续接无流且 Worker 未建流, 直接收尾(不重入队) trace=%s", tid)
+            return _sse_done_event()
+
+    # v4 续接守卫: 前端以 after 游标请求续接, 但流暂不存在。可能是 Worker 预热中(新 run 尚未
+    # XADD)或确已结束/过期。先轮询等待建流; 仍无则直接发 done 干净收尾(不重入队)。
     if after and not await get_queue().stream_exists(tid):
-        logger.info("[chat] after 模式但流已消失, 直接收尾 trace=%s", tid)
-        return _sse_done_event()
+        _appeared = False
+        for _ in range(STREAM_WAIT_SECONDS // 2):
+            await asyncio.sleep(2)
+            if await get_queue().stream_exists(tid):
+                _appeared = True
+                break
+        if not _appeared:
+            logger.info("[chat] after 模式但流已消失, 直接收尾 trace=%s", tid)
+            return _sse_done_event()
 
     resp = StreamingResponse(
         publisher(),
