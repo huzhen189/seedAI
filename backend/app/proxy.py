@@ -23,6 +23,7 @@ import json
 import logging
 import time
 import uuid
+from typing import Any
 from datetime import datetime, timezone
 
 import asyncio
@@ -995,12 +996,16 @@ async def chat(
                                                 _doc = payload_obj.get("data") or {}
                                                 if isinstance(_doc, dict) and _doc.get("content"):
                                                     _dname = _doc.get("name") or "开发文档.md"
-                                                    doc_files[_dname] = {
+                                                    _dentry = {
                                                         "name": _dname,
-                                                        "size": len(_doc["content"].encode("utf-8")),
+                                                        "size": _doc.get("size") or len(_doc["content"].encode("utf-8")),
                                                         "content": _doc["content"],
                                                     }
-                                                    logger.info("[chat] 捕获 doc 产物 trace=%s name=%s", tid, _dname)
+                                                    _durl = _doc.get("url")
+                                                    if _durl:
+                                                        _dentry["url"] = _durl
+                                                    doc_files[_dname] = _dentry
+                                                    logger.info("[chat] 捕获 doc 产物 trace=%s name=%s cos=%s", tid, _dname, bool(_durl))
                                         if event == "preview" and isinstance(payload_obj, dict) and payload_obj.get("url"):
                                             preview_url = payload_obj["url"]
                                             await cache_set(f"site_generated:{conversation_id}", "1", ttl=86400)
@@ -1578,10 +1583,14 @@ async def _persist_conversation(
     # Fix B (#483): doc 技能下发的 Markdown 产物 → 额外落 Artifact(repo="doc"),
     # 右侧面板可预览/下载; 气泡仍保留 Markdown 原文(上方 else 分支已存纯文本)。
     if doc_files:
-        art_files = {
-            fname: {"name": fname, "size": v.get("size", 0), "content": v.get("content", "")}
-            for fname, v in doc_files.items()
-        }
+        art_files = {}
+        for fname, v in doc_files.items():
+            entry: dict[str, Any] = {"name": fname, "size": v.get("size", 0)}
+            if v.get("content"):
+                entry["content"] = v["content"]  # 内联内容: 离线可预览
+            if v.get("url"):
+                entry["url"] = v["url"]          # COS 直链: 右侧下载走此
+            art_files[fname] = entry
         art = await artifact_repo.upsert_by_trace(
             db, trace_id,
             project_id=conv.project_id or 0,

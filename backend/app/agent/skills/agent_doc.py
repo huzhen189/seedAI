@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import tempfile
 from collections.abc import AsyncGenerator
 from typing import Any, Dict, Optional
 
@@ -87,6 +89,41 @@ def _derive_doc_name(full_md: str, messages: list) -> str:
     return "开发文档"
 
 
+def _upload_doc_to_cos(
+    full_md: str, doc_name: str, *, trace_id: Optional[str],
+    user_id=None, project_id=None, version=None,
+) -> str:
+    """把 Markdown 落临时文件并上传 COS, 返回预览直链; 失败返回 '' (优雅降级, 不阻断主流程)。
+
+    与站点产物一致的版本化 key: previews/{user_id}/{project_id}/v{version}/{doc_name}。
+    """
+    try:
+        from ..tools.cos_upload import cos_upload
+
+        ver_seg = f"v{version}" if version else (trace_id or "doc")
+        uid = user_id if user_id is not None else "anon"
+        pid = project_id if project_id is not None else "anon"
+        base_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/{uid}/{pid}/{ver_seg}"
+        cos_key = f"{base_key}/{doc_name}"  # 中文名直接进 key(UTF-8 合法), 前端预览/下载时会编码
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as tf:
+            tf.write(full_md)
+            tmp_path = tf.name
+        try:
+            res = cos_upload(tmp_path, cos_key)
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        if res.get("ok") and res.get("url"):
+            return res["url"]
+        GEN_LOG.warning("[doc] COS 投递未返回 URL trace=%s name=%s cos_key=%s res=%s",
+                        trace_id, doc_name, cos_key, res)
+    except Exception as e:
+        GEN_LOG.warning("[doc] COS 上传异常 trace=%s name=%s: %s", trace_id, doc_name, e)
+    return ""
+
+
 async def _cancelled_now(fn) -> bool:
     import inspect
     if not fn:
@@ -136,8 +173,22 @@ async def generate_doc_skill(
     # 产物名按对话主题动态命名(首个 H1 / 用户请求), 而非固定 "开发文档.md"
     if full_md.strip():
         doc_name = _derive_doc_name(full_md, messages) + ".md"
-        GEN_LOG.info("[doc] 产物名 trace=%s name=%s", trace_id, doc_name)
-        yield ev("node", stage="doc_file", data={"name": doc_name, "content": full_md})
+        # md 也上传 COS(与站点产物一致: 版本化直链, 右侧可下载)
+        cos_url = _upload_doc_to_cos(
+            full_md, doc_name, trace_id=trace_id,
+            user_id=kwargs.get("user_id"),
+            project_id=kwargs.get("project_id"),
+            version=kwargs.get("version"),
+        )
+        doc_data: Dict[str, Any] = {
+            "name": doc_name,
+            "content": full_md,
+            "size": len(full_md.encode("utf-8")),
+        }
+        if cos_url:
+            doc_data["url"] = cos_url
+        GEN_LOG.info("[doc] 产物名 trace=%s name=%s cos=%s", trace_id, doc_name, bool(cos_url))
+        yield ev("node", stage="doc_file", data=doc_data)
     yield ev("node", stage="done")
 
 

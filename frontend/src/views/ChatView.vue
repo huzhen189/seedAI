@@ -990,6 +990,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
   return {
     onNode: (d) => {
       if (!d.stage) return
+      // 内部产物交付事件(doc_file 等)不是用户可见的过程步骤, 不进轨迹, 避免污染过程展示
+      if (d.stage === 'doc_file' || d.stage === 'previewing') return
       currentStage.value = d.stage
       // 之前进行中的步骤标记为完成
       thoughtSteps.value.forEach((s) => {
