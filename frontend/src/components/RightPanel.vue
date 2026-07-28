@@ -389,15 +389,12 @@ defineExpose({ selectFile, reset })
         </div>
       </template>
 
-      <!-- 空状态 -->
+      <!-- 空状态: 仅在"正在生成且无产物"时给出明确反馈(spinner);
+           非生成态不显示任何占位文案, 避免用户误以为项目为空/未运行(2026-07-29 用户要求)。 -->
       <template v-else>
         <div v-if="generating && !allFiles.length" class="pv-placeholder">
           <div class="spinner"></div>
           <span>AI 正在生成…</span>
-        </div>
-        <div v-else class="pv-placeholder">
-          <span>暂无生成产物</span>
-          <span class="pv-hint">文件生成后将在此预览</span>
         </div>
       </template>
     </div>
@@ -641,7 +638,6 @@ defineExpose({ selectFile, reset })
   color: var(--muted);
   gap: 6px;
 }
-.pv-hint { font-size: 11px; opacity: 0.6; }
 .spinner {
   width: 24px;
   height: 24px;
