@@ -28,9 +28,11 @@ import logging
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
-# 日志目录固定放在本服务包的上一级(backend/app/logs),
+# 日志目录固定放在本服务包内的 logs 子目录(backend/app/logs),
 # 不受进程启动 CWD 影响,保证本地直跑与 docker 内路径一致。
-_LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+# 注: 与 backend/app/agent/logging_config.py 的 _LOG_DIR 保持同一目录,
+#     避免"两套日志"分散在 backend/logs/ 与 backend/app/logs/。
+_LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 
 def setup_logging(service_name: str, *, level: int = logging.INFO) -> None:
