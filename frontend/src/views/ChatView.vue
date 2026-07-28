@@ -509,8 +509,12 @@ async function loadArtifacts() {
       const resp = await fetch(`/api/conversations/${convStore.currentConvId}/status`)
       const s = await resp.json()
       if (s.status === 'running' && s.active_trace_id) {
-        generating.value = true
-        resume(convStore.currentConvId, s.active_trace_id)
+        // 续接(F5 刷新/重开)走 resumeStream: 内部自管 generating, 不再前置 generating=true,
+        // 避免旧逻辑「先 generating=true 再调 resume() 被其守卫 self-return」死锁(续联永不发起)。
+        // 不带 resume 语义 → 仅回放/续接在途流, 不对孤儿 trace(无 checkpoint)无脑重跑,
+        // 流已消失时由后端续接守卫发 done 干净收尾(2026-07-29 修复刷新后无限转圈无反馈)。
+        const us = loadUserStatus()
+        resumeStream(convStore.currentConvId, s.active_trace_id, us?.after || null)
       }
     } catch { /* 状态查询失败不影响主流程 */ }
   }
@@ -538,6 +542,32 @@ function openEs(opts: Parameters<typeof startChat>[0]) {
   esRef.value?.close()
   esRef.value = null
   esRef.value = startChat(opts)
+}
+
+// 续联兜底: 刷新/重开后续接一个已死流(孤儿 running trace)时, SSE 可能既不回放也不发 done,
+// 导致 UI 永久 generating 转圈、零反馈。发起续联后若 15s 内无任何真事件/收尾到达, 主动收尾。
+let _reconnectGuard: ReturnType<typeof setTimeout> | null = null
+function disarmReconnectGuard() {
+  if (_reconnectGuard) { clearTimeout(_reconnectGuard); _reconnectGuard = null }
+}
+function armReconnectGuard() {
+  disarmReconnectGuard()
+  _reconnectGuard = setTimeout(() => {
+    _reconnectGuard = null
+    if (!generating.value) return
+    // 续联超时: 给出明确中断反馈, 不再静默转圈(2026-07-29 修复刷新后无反馈)
+    generating.value = false
+    finished.value = true
+    errorMsg.value = '生成连接已中断（刷新或网络断开后未能恢复），请重新发起这条对话。'
+    clearActiveGen()
+    clearUserStatus()
+    clearTrailSnapshot(traceId.value)
+    v4Pause.value = null
+    if (projectStore.currentProjectId) {
+      convStore.loadConversations(projectStore.currentProjectId).then(() => scrollToBottom(false))
+    }
+    dequeueAndSend()
+  }, 15000)
 }
 // 右侧预览面板实例(ChatView 通过它联动选中文件并打开预览)
 const rightPanel = ref<InstanceType<typeof RightPanel> | null>(null)
@@ -1031,6 +1061,7 @@ const streamingStageLabel = computed(
 function makeCallbacks(assistantIdx: number): ChatCallbacks {
   return {
     onNode: (d) => {
+      disarmReconnectGuard()
       if (!d.stage) return
       // 内部产物交付事件(doc_file 等)不是用户可见的过程步骤, 不进轨迹, 避免污染过程展示
       if (d.stage === 'doc_file' || d.stage === 'previewing') return
@@ -1046,6 +1077,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       }
     },
     onThink: (d) => {
+      disarmReconnectGuard()
       // think 事件的阶段名不带 enter_ 前缀(planner / reviewer),
       // 需映射到时间线里的节点步名(enter_planner / enter_reviewer)。
       const THINK_TO_STEP: Record<string, string> = {
@@ -1064,9 +1096,11 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       }
     },
     onPlan: (d) => {
+      disarmReconnectGuard()
       planNodes.value.push({ title: d.title, goal: d.goal, steps: d.steps })
     },
     onToken: (t, subTaskId) => {
+      disarmReconnectGuard()
       // 多意图: 合并结果(__merge__)进入主气泡; 子任务自身 token 进入对应泳道流式预览
       if (subTaskId === '__merge__') {
         const m = convStore.messages[assistantIdx]
@@ -1119,6 +1153,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       nextTick(() => rightPanel.value?.selectFile('__requirement_doc__'))
     },
     onDone: () => {
+      disarmReconnectGuard()
       generating.value = false
       sending.value = false
       finished.value = true
@@ -1554,6 +1589,7 @@ async function resume(convId: number, tid: string, q?: string) {
     resume: true,
     cb: makeCallbacks(assistantIdx),
   })
+  armReconnectGuard()
 }
 
 // 若当前存在未完成的 active 生成,则重连恢复(刷新/切会话时调用)。
@@ -1603,6 +1639,7 @@ async function resumeStream(convId: number, tid: string, after?: string | null) 
     ...(after ? { after } : {}),
     cb: makeCallbacks(assistantIdx),
   })
+  armReconnectGuard()
 }
 
 // v4 断点复联: 离开页面(新标签)后重开, 据 my-info 恢复「已暂停」横幅(区别于同标签刷新的 maybeResume)。
