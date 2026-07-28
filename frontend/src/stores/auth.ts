@@ -30,8 +30,15 @@ export const useAuthStore = defineStore('auth', () => {
     return u
   }
   async function logout() {
+    // 后端清除 HttpOnly Cookie,然后整页刷新。
+    // 刷新能保证彻底清空所有 Pinia store(project/conversation/agent)、
+    // 进行中的 EventSource(SSE) 连接与消息缓存,避免切换账号后
+    // 仍残留上一个账号的页面/数据(2026-07-29 用户要求)。
     await authApi.logout()
     user.value = null
+    if (typeof location !== 'undefined') {
+      location.reload()
+    }
   }
 
   function openLogin() {
