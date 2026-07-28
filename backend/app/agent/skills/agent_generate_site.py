@@ -539,8 +539,12 @@ def _select_requirement(requirement_doc, conversation_summary, messages):
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
         best = candidates[0][0]
-        # 纯指令句(如"帮我做个网站", 长度<12)无具体内容, 用摘要补充上下文
-        if len(best) < 12 and isinstance(conversation_summary, str) and conversation_summary.strip():
+        # 纯指令句(如"帮我做个网站", 长度<12)无具体内容, 用摘要补充上下文。
+        # 但**含建站词(has_build)的候选本身已表达明确建站意图**(如"我想做个水果电商网站"),
+        # 不应因字数短而回退到有损的 conversation_summary —— 摘要可能严重跑偏
+        # (如历史含"查询天气,助手拒绝"时, 摘要会完全偏离建站主题, 导致方案文不对题, 见 07-29 复现)。
+        best_has_build = any(kw in best for kw in _BUILD_KW)
+        if (not best_has_build) and len(best) < 12 and isinstance(conversation_summary, str) and conversation_summary.strip():
             return conversation_summary.strip(), "conversation_summary"
         return best, "user_message"
     # 3) 兜底: 对话摘要(可能有损, 但比无中生有强)
