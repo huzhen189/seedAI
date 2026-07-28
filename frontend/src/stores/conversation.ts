@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import * as projectsApi from '../api/projects'
 import type { Conversation, Message } from '../types'
-import { loadCache, saveCache } from '../utils/messageCache'
+import { loadCache, saveCache, type MessageCacheEntry } from '../utils/messageCache'
 
 export interface PastSession {
   conv: Conversation
@@ -56,7 +56,6 @@ export const useConversationStore = defineStore('conversation', () => {
           messages.value = cached as Message[]
         }
 
-        const c = await projectsApi.getConversation(targetConv.id)
         // ② 从独立 /messages 端点拉取消息(Conversation 元数据不含 messages)
         let dbMsgs: Message[] = []
         try {
@@ -76,7 +75,7 @@ export const useConversationStore = defineStore('conversation', () => {
           }
         }
         // ④ 更新 localStorage 缓存(保存最终展示的消息, 含本地乐观更新的部分)
-        if (messages.value.length) saveCache(projectId, messages.value)
+        if (messages.value.length) saveCache(projectId, messages.value as MessageCacheEntry[])
 
         _currentProjectId.value = projectId
       } else {
@@ -186,12 +185,11 @@ export const useConversationStore = defineStore('conversation', () => {
     currentConvId.value = convId
     const cached = loadCache(pid!)
     if (cached && cached.length) messages.value = cached as Message[]
-    const c = await projectsApi.getConversation(convId)
     let dbMsgs: Message[] = []
     try { dbMsgs = await projectsApi.getConversationMessages(convId) } catch { /* ignore */ }
     if (dbMsgs.length > 0) {
       messages.value = dbMsgs
-      saveCache(pid!, dbMsgs)
+      saveCache(pid!, dbMsgs as MessageCacheEntry[])
     }
     sessionStorage.setItem('activeConv_' + pid!, String(convId))
   }
