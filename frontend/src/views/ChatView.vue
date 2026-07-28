@@ -30,6 +30,7 @@ import { SOP_ROLES, SKILL_TO_ROLE } from '../types'
 const STAGE_LABELS: Record<string, string> = {
   enter_router: '意图路由 — 识别你的需求类型，匹配最合适的处理流程',
   dispatch: '技能调度 — 加载所需的 AI 能力和工具链',
+  writing: '撰写文档 — 正在生成结构化的 Markdown 文档',
   enter_planner: '需求规划 — 拆解任务、制定执行步骤和产出目标',
   enter_coder: '代码生成 — 正在为你编写/构建代码',
   enter_reviewer: '评审校验 — 检查生成结果的完整性和正确性',

@@ -992,6 +992,9 @@ async def chat(
                                                 preview_url = payload_obj["url"]
                                                 await cache_set(f"site_generated:{conversation_id}", "1", ttl=86400)
                                             # Fix B (#483): doc 技能下发的 Markdown 文件产物 → 供右侧面板预览/下载
+                                            # ev() 把 data 关键字参数包成 payload 的嵌套 data 子键:
+                                            #   {"event":"node","data":{"stage":"doc_file","data":{"name":..,"content":..,"url":..}}}
+                                            # 故从 payload_obj["data"] 取产物字典。
                                             if payload_obj.get("stage") == "doc_file":
                                                 _doc = payload_obj.get("data") or {}
                                                 if isinstance(_doc, dict) and _doc.get("content"):
