@@ -171,11 +171,8 @@ function onGripUp() {
   document.removeEventListener('mousemove', onGripMove)
   document.removeEventListener('mouseup', onGripUp)
 }
-// 方案选择(options 事件): 前端弹出单选框, 选中后记录, 下次 send 时一起发送
-const showOptionsModal = ref(false)
+// 方案选择(options 事件): 选项直接内嵌进 AI 气泡, 用户在下方的对话框用文字(如「选A」)确认
 const optionsData = ref<OptionEvent | null>(null)
-const selectedOption = ref('')  // radio 单选绑定
-const pendingOptionsText = ref('')  // 已确认但未发送的选项文本
 // 非阻塞候选提示(管道级 alternatives 事件): 系统已自行决定 top-1, 列出可切换候选
 const alternativesData = ref<AlternativesEvent | null>(null)
 // SIR 澄清卡(CLARIFY 事件): 意图模糊/缺规格时下发动态最少必要追问 + 结构化选项
@@ -205,45 +202,30 @@ function parseSelectionToken(text: string): number | null {
   if (nth) return _CN_NUM[nth] - 1
   return null
 }
-// 二次确认弹框(安全 high / 删除确认 / 方案确认)
+// 二次确认(安全 high / 删除确认 / 方案确认): 详情内嵌进 AI 气泡, 用户用文字(如「确认」)继续
 const pendingConfirm = ref<{ reason: string; skill: string; riskLevel?: string; target?: string; planTitle?: string; planGoal?: string; planSteps?: string[]; reqSource?: string; reqPreview?: string } | null>(null)
-const showConfirmModal = ref(false)
 // 高危拦截提示(安全 critical, 不可绕过)
 const blockReason = ref('')
 
-function onOptionsConfirm() {
-  if (!optionsData.value || !selectedOption.value) return
+// 文字选择方案选项(无弹窗): 解析用户输入是否为选项 token(选A/方案B/1...),
+// 命中则直接走原确认逻辑; 未命中返回 false(交由后续正常发送流程, 同时清掉卡片)。
+function chooseOption(text: string): boolean {
+  if (!optionsData.value) return false
+  const idx = parseSelectionToken(text)
   const choices = optionsData.value.choices || []
-  const selected = choices.find(c => c.id === selectedOption.value)
-  if (!selected) return
-  // 管道级多选项: 选中即带 skill 参数重发(不拼文本)
-  if (optionsData.value.mode === 'skill') {
-    showOptionsModal.value = false
-    resendWithSkill(selected.id)
-    return
-  }
-  // requirement_agent 级: 拼文本, 下次 send 一起发
-  pendingOptionsText.value = `方案确认: 选择了 ${selected.id}: ${selected.title}`
-  showOptionsModal.value = false
-  upsertStep('option_selected', 'done', `已选择: ${selected.id}. ${selected.title}`)
-  // 用户没在打字 → 自动发送选项
-  if (!input.value.trim()) {
-    sendOptionsNow()
-  }
-}
-
-async function sendOptionsNow() {
-  if (!pendingOptionsText.value) return
-  const text = pendingOptionsText.value
-  pendingOptionsText.value = ''
-  input.value = text
-  await send()
-}
-
-function cancelOptions() {
-  showOptionsModal.value = false
-  selectedOption.value = ''
+  if (idx === null || idx < 0 || idx >= choices.length) return false
+  const chosen = choices[idx]
+  const mode = optionsData.value.mode
   optionsData.value = null
+  upsertStep('option_selected', 'done', `已选择: ${chosen.id}. ${chosen.title}`)
+  if (mode === 'skill') {
+    // 管道级多选项: 选中即带 skill 参数重发(不拼文本)
+    resendWithSkill(chosen.id)
+  } else {
+    // requirement_agent 级: 拼结构化文本当普通消息发送, 后端靠历史路由识别
+    doSend(`方案确认: 选择了 ${chosen.id}: ${chosen.title}`)
+  }
+  return true
 }
 
 // 文字回复驱动续跑: 复用当前 trace_id, 把用户文字作为改进意见/确认一并带入后端
@@ -280,7 +262,6 @@ async function resendConfirmed() {
   // 方案确认: skill=agent_generate_site 且带有 planSteps(非 planTitle, 避免空字符串假值)
   const isPlan = skill === 'agent_generate_site' && (p.planSteps?.length ?? 0) > 0
   pendingConfirm.value = null
-  showConfirmModal.value = false
 
   resetGenState()
   traceId.value = genTraceId()
@@ -981,7 +962,7 @@ const activeTrailKey = computed<string | null>(() => {
     generating.value || planPreview.value || cancelSummary.value ||
     subTasks.value.length || mergeResult.value ||
     cosUploading.value || cosFailed.value || pendingConfirm.value ||
-    (showOptionsModal.value && !!optionsData.value)
+    (optionsData.value)
   if (!show) return null
   const sessions = allSessions.value
   for (let si = sessions.length - 1; si >= 0; si--) {
@@ -1138,8 +1119,6 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
         msgs.push({ role: 'assistant', content: '', conversation_id: convStore.currentConvId, id: 0, created_at: '', model_id: model.value } as any)
       }
       optionsData.value = d
-      selectedOption.value = ''
-      showOptionsModal.value = true
       // 本轮(产出方案选项)已结束、进入「等待用户选择」态: 显式关闭生成中态,
       // 否则 generating 持续为 true → 停止按钮常驻、输入框被锁、确认选项会被误入队且永不发送。
       // 后端 requirement_agent 在 options 后直接 return 不 yield done, 故此处主动收尾(兜底 done 到达前也已正确)。
@@ -1196,7 +1175,6 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
         riskLevel: (d as any).risk_level || 'high',
         target: (d as any).target || '',
       }
-      showConfirmModal.value = true
       clearActiveGen()
     },
     onPaused: (d: any) => {
@@ -1222,7 +1200,6 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
           reqSource: d.req_source || '',
           reqPreview: d.req_preview || '',
         }
-        showConfirmModal.value = true
         clearActiveGen()
       }
     },
@@ -1332,11 +1309,6 @@ async function loadCurrentProject() {
 
 async function send() {
   let text = input.value.trim()
-  // 如果有待发送的选项, 拼接到消息前面
-  if (pendingOptionsText.value) {
-    text = pendingOptionsText.value + '\n' + text
-    pendingOptionsText.value = ''
-  }
   if (!text) return
   // v4 断点复联: 处于「已暂停」态时, 当前输入即续跑指令(从 checkpoint 恢复并带新指令)
   if (v4Pause.value && !generating.value) {
@@ -1365,18 +1337,23 @@ async function send() {
       return
     }
   }
+  // 方案选项激活中: 解析用户输入是否为选项 token(选A/方案B/1...); 命中直接确认, 否则清卡片后正常发送
+  if (optionsData.value) {
+    if (chooseOption(text)) return
+    optionsData.value = null
+  }
   // 生成中: 加入队列
   if (generating.value) { enqueue(text); return }
-  // confirm 弹窗显示中: plan 类型→带改进意见续跑, 其他类型→关闭弹窗正常发送
-  if (showConfirmModal.value) {
-    showConfirmModal.value = false
-    const isPlanConfirm = pendingConfirm.value?.skill === 'agent_generate_site'
+  // 二次确认激活中(无弹窗, 详情已在气泡内): 方案确认→带改进意见续跑; 其他→带 confirmed 重发原 skill
+  if (pendingConfirm.value) {
+    const p = pendingConfirm.value
+    const isPlan = p.skill === 'agent_generate_site' && (p.planSteps?.length ?? 0) > 0
     pendingConfirm.value = null
     input.value = ''
-    if (isPlanConfirm) {
+    if (isPlan) {
       await resumeFromPlan(text)
     } else {
-      await doSend(text)
+      await resendConfirmed()
     }
     return
   }
@@ -1961,7 +1938,7 @@ watch(pendingRetry, (r) => {
                   </div>
                 </div>
 
-                <!-- P2: 二次确认详情移入气泡; 弹窗仅留标题(见下方 confirm-plan-backdrop 简化) -->
+                <!-- 二次确认详情移入气泡(无弹窗, 详情直接展示, 用文字在对话框确认) -->
                 <div v-if="pendingConfirm" class="confirm-card-in-bubble">
                   <template v-if="(pendingConfirm.planSteps?.length ?? 0) > 0">
                     <div class="cp-title">🏗️ 建站方案确认</div>
@@ -1976,7 +1953,7 @@ watch(pendingRetry, (r) => {
                         <li v-for="(s, i) in pendingConfirm.planSteps" :key="i">{{ s }}</li>
                       </ol>
                     </div>
-                    <div class="cp-hint">如需调整，取消后在对话框直接补充要求并重新发送即可。</div>
+                    <div class="cp-hint">请在下方对话框回复「确认」或「开始建站」即可继续；如需调整，直接补充要求并重新发送。</div>
                   </template>
                   <template v-else>
                     <div class="cp-title">
@@ -1989,25 +1966,25 @@ watch(pendingRetry, (r) => {
                     <div class="cp-body">
                       <div class="cp-goal">{{ pendingConfirm.reason }}</div>
                     </div>
+                    <div class="cp-hint">请在下方对话框回复「确认」或「继续」以放行；回复其他内容则取消本次操作。</div>
                   </template>
                 </div>
-                <!-- 选项选择内嵌气泡(P2 同构, 仿 confirm-card-in-bubble): 选项进气泡, 弹窗仅留标题 -->
-                <div v-if="showOptionsModal && optionsData" class="options-card-in-bubble">
+                <!-- 选项选择内嵌气泡(无弹窗): 选项只读展示, 用户在下方对话框用文字(选A/方案B/1)确认 -->
+                <div v-if="optionsData" class="options-card-in-bubble">
                   <div class="oc-title">{{ optionsData.question || '请选择方案' }}</div>
-                  <label
+                  <div
                     v-for="c in optionsData.choices"
                     :key="c.id"
                     class="oc-choice"
-                    :class="{ on: selectedOption === c.id }"
                   >
-                    <input v-model="selectedOption" type="radio" :value="c.id" class="oc-radio" />
                     <div class="oc-info">
                       <div class="oc-name">{{ c.id }}. {{ c.title }}</div>
                       <div v-if="c.desc" class="oc-desc">{{ c.desc }}</div>
                       <div v-if="c.pros" class="oc-pros">✅ {{ c.pros }}</div>
                       <div v-if="c.cons" class="oc-cons">⚠️ {{ c.cons }}</div>
                     </div>
-                  </label>
+                  </div>
+                  <div class="oc-hint">请在下方对话框输入「选A」/「选B」/「选C」确认，或直接补充要求重新发送。</div>
                 </div>
               </div>
             </template>
@@ -2064,10 +2041,6 @@ watch(pendingRetry, (r) => {
               <button class="qbtn qdel" title="删除" @click="deleteQueueItem(i)">✕</button>
             </span>
           </div>
-        </div>
-        <div v-if="pendingOptionsText" class="pending-opt-badge">
-          📌 待发送: {{ pendingOptionsText }}
-          <button class="pob-clear" @click="pendingOptionsText = ''">✕ 清除</button>
         </div>
         <ChatInput
           v-model:value="input"
@@ -2133,32 +2106,10 @@ class="clarify-confirm"
             </div>
           </transition>
         </Teleport>
-        <!-- 方案选择弹窗(单选, 确认后记录, 下次 send 一起发送) -->
-        <div v-if="showOptionsModal && optionsData" class="options-modal-backdrop" @click.self="cancelOptions" @keydown.escape="cancelOptions">
-          <div class="options-modal">
-            <div class="om-title">{{ optionsData.question || '请选择方案' }}</div>
-            <div class="om-hint">选项已在上方的 AI 回复中展示，请选择后确认。</div>
-            <div class="om-actions">
-              <button class="om-btn om-confirm" :disabled="!selectedOption" @click="onOptionsConfirm">确认选择</button>
-              <button class="om-btn om-cancel" @click="cancelOptions">取消</button>
-            </div>
-          </div>
-        </div>
         <!-- 高危拦截提示(安全 critical, 不可绕过) -->
         <div v-if="blockReason" class="error block-warn">
           🛑 高危操作已被拦截：{{ blockReason }}
           <button class="pob-clear" @click="blockReason = ''">✕ 我知道了</button>
-        </div>
-        <!-- 二次确认对话框(P2 简化: 仅标题 + 操作按钮; 详细方案/安全原因已内嵌进 AI 气泡) -->
-        <div v-if="showConfirmModal && pendingConfirm" class="confirm-plan-backdrop" @click.self="showConfirmModal = false; pendingConfirm = null" @keydown.escape="showConfirmModal = false; pendingConfirm = null">
-          <div class="confirm-plan">
-            <div class="cp-title">{{ (pendingConfirm.planSteps?.length ?? 0) > 0 ? '🏗️ 建站方案待确认' : '⚠️ 安全操作待确认' }}</div>
-            <div class="cp-hint">详细方案 / 安全原因已在上方的 AI 回复中展示，请确认是否继续。</div>
-            <div class="cp-actions">
-              <button class="cp-btn cp-confirm" @click="resendConfirmed">✅ 确认继续</button>
-              <button class="cp-btn cp-cancel" @click="showConfirmModal = false; pendingConfirm = null">取消</button>
-            </div>
-          </div>
         </div>
         <div v-if="finished && !errorMsg && !blockReason" class="feedback">
           <span class="rate-hint-text">评分已移到每条 AI 回复气泡内，点击「⭐ 评价」即可多维度打分</span>
@@ -2472,22 +2423,6 @@ class="clarify-confirm"
   padding: 8px 12px;
   margin-top: 8px;
 }
-.confirm-plan-backdrop {
-  position: fixed; inset: 0; background: rgba(0,0,0,.45);
-  display: flex; align-items: flex-end; justify-content: center;
-  padding: 16px; z-index: 300;
-}
-.confirm-plan {
-  background: #f0f9ff;
-  border: 1px solid #bae6fd;
-  border-radius: 10px;
-  padding: 14px;
-  width: 100%;
-  max-width: 640px;
-  max-height: 80vh;
-  overflow-y: auto;
-  box-shadow: 0 8px 32px rgba(0,0,0,.18);
-}
 .cp-title { font-weight: 600; font-size: 14px; margin-bottom: 10px; color: #0369a1; display: flex; align-items: center; gap: 10px; }
 .cp-risk { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
 .cp-risk.risk-high { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
@@ -2604,28 +2539,7 @@ class="clarify-confirm"
 .alc-dl, .asc-dl { margin-left: auto; font-size: 13px; color: #6366f1; cursor: pointer; opacity: 0.7; padding: 0 2px; }
 .alc-dl:hover, .asc-dl:hover { opacity: 1; }
 
-/* ── 方案选择弹窗(选项已内嵌进 assistant 气泡, 此处仅轻提示) ── */
-.options-modal-backdrop {
-  position: fixed; inset: 0; background: rgba(0,0,0,.45);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 200;
-}
-.options-modal {
-  background: var(--bg); border-radius: 12px;
-  padding: 24px; max-width: 440px; width: 90vw;
-  box-shadow: 0 8px 32px rgba(0,0,0,.18);
-}
-.om-title { font-size: 16px; font-weight: 700; margin-bottom: 10px; color: var(--text); }
-.om-hint { font-size: 13px; color: var(--muted); line-height: 1.6; }
-.om-actions { display: flex; gap: 8px; margin-top: 18px; justify-content: flex-end; }
-.om-btn { border: none; border-radius: 6px; padding: 8px 18px; cursor: pointer; font-size: 13px; font-weight: 600; }
-.om-btn:disabled { opacity: .5; cursor: not-allowed; }
-.om-confirm { background: #3b82f6; color: #fff; }
-.om-confirm:hover:not(:disabled) { background: #2563eb; }
-.om-cancel { background: #e2e8f0; color: #475569; }
-.om-cancel:hover { background: #cbd5e1; }
-
-/* ── 气泡内选项卡(P2 同构, 仿 .confirm-card-in-bubble): 保证气泡任意时刻可见 ── */
+/* ── 气泡内选项卡(无弹窗, 保证气泡任意时刻可见) ── */
 .options-card-in-bubble {
   border: 1px solid var(--border); border-radius: 10px;
   padding: 12px 14px; margin: 8px 0; background: rgba(59,130,246,.04);
@@ -2637,9 +2551,7 @@ class="clarify-confirm"
   cursor: pointer; transition: border-color .2s, background .2s; margin-bottom: 8px;
 }
 .oc-choice:last-child { margin-bottom: 0; }
-.oc-choice.on { border-color: #3b82f6; background: rgba(59,130,246,.08); }
 .oc-choice:hover { border-color: #93c5fd; background: rgba(59,130,246,.04); }
-.oc-radio { margin-top: 3px; accent-color: #3b82f6; }
 .oc-info { flex: 1; min-width: 0; }
 .oc-name { font-weight: 600; font-size: 14px; color: var(--text); }
 .oc-desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
@@ -2647,11 +2559,6 @@ class="clarify-confirm"
 .oc-cons { font-size: 12px; color: #dc2626; margin-top: 2px; }
 :global([data-theme="dark"]) .options-card-in-bubble { background: rgba(59,130,246,.10); }
 :global([data-theme="dark"]) .oc-title { color: #93c5fd; }
-.om-confirm { background: #3b82f6; color: #fff; }
-.om-confirm:disabled { opacity: .5; cursor: not-allowed; }
-.om-confirm:not(:disabled):hover { background: #2563eb; }
-.om-cancel { background: #f1f5f9; color: #64748b; }
-.om-cancel:hover { background: #e2e8f0; }
 
 /* ── 非阻塞候选提示条 ── */
 .alts-bar {
@@ -2759,18 +2666,7 @@ class="clarify-confirm"
 :global([data-theme="dark"]) .clarify-skip { background: rgba(30, 27, 46, 0.6); border-color: #4b5563; color: #c7c9d9; }
 :global([data-theme="dark"]) .clarify-skip:hover { background: rgba(55, 48, 80, 0.8); }
 
-/* ── 待发送选项提示 ── */
-.pending-opt-badge {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 12px; margin: 0 16px 4px;
-  background: rgba(59,130,246,.1); border: 1px solid #93c5fd;
-  border-radius: 6px; font-size: 12px; color: #1d4ed8;
-}
-.pob-clear {
-  margin-left: auto; border: none; background: none;
-  color: #94a3b8; cursor: pointer; font-size: 12px;
-}
-.pob-clear:hover { color: #dc2626; }
+/* ── 待发送选项提示(已移除弹窗, 选项改为气泡内文字确认) ── */
 
 .feedback {
   display: flex;
