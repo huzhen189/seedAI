@@ -48,6 +48,27 @@ _STREAM_PREFIX = "gen:stream:"  # + trace_id -> Redis Stream(可回放进度)
 logger = logging.getLogger("ai_service.queue")
 
 
+async def _persist_qc_score(trace_id: str, model_id: str | None,
+                            conversation_id: int | None, qc_result: dict) -> None:
+    """补齐 QC 落库断点(v0.8.5 遗留): 每次三裁判评审都写进 qc_scores 表,
+    供后台「AI 质量」报表 / 六维雷达图按历史逐条留痕、聚合统计。
+
+    此前 run_qc 只写 Redis + 推 SSE, qc_scores 表始终为空 → 报表看不到 AI 质量。
+    非阻塞: 调用方用 asyncio.create_task 触发, 失败仅告警, 绝不拖累主链路(done 流)。"""
+    if not qc_result or qc_result.get("error"):
+        return
+    try:
+        from ...db import SessionLocal
+        from ...repos.trace_repos import qc_score_repo
+        async with SessionLocal() as db:
+            await qc_score_repo.upsert(
+                db, trace_id, model_id, conversation_id, qc_result,
+            )
+            await db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[Worker] QC 落库失败(跳过, 不影响主链路) trace=%s: %s", trace_id, e)
+
+
 async def _commit_after_done(trace_id: str, skill_name: str, user_text: str) -> None:
     """§8: 每轮生成(up to done)完成后,把站点目录就地提交为一次 git 版本。
 
@@ -1214,6 +1235,10 @@ async def worker_loop(concurrency: int = 1):
                                     timeout=settings.qc_timeout_seconds,
                                 )
                                 await q.publish(trace_id, {"event": "qc", "data": qc_result})
+                                # 补齐 QC 落库(逐条留痕, 供报表/雷达图统计)
+                                asyncio.create_task(
+                                    _persist_qc_score(trace_id, model_id, conversation_id, qc_result)
+                                )
                             except Exception as qc_err:  # noqa: BLE001
                                 logger.warning("[Worker] [6/6] 编排 QC 失败(跳过) trace=%s: %s", trace_id, qc_err)
                         if done_event is not None:
@@ -1361,6 +1386,10 @@ async def worker_loop(concurrency: int = 1):
                             timeout=settings.qc_timeout_seconds,
                         )
                         await q.publish(trace_id, {"event": "qc", "data": qc_result})
+                        # 补齐 QC 落库(逐条留痕, 供报表/雷达图统计)
+                        asyncio.create_task(
+                            _persist_qc_score(trace_id, model_id, conversation_id, qc_result)
+                        )
                         logger.info("[Worker] [6/6] QC 完成 trace=%s overall=%.2f needs_review=%s partial=%s",
                                    trace_id, qc_result.get("overall", 0),
                                    qc_result.get("needs_review"), qc_result.get("partial"))
@@ -1379,6 +1408,10 @@ async def worker_loop(concurrency: int = 1):
                                     qc_result["fix_applied"] = True
                                     qc_result["fix_rounds"] = fix_rounds
                                     await q.publish(trace_id, {"event": "qc", "data": qc_result})
+                                    # 修复收敛后的最终 QC 也要落库(覆盖原记录, upsert 幂等)
+                                    asyncio.create_task(
+                                        _persist_qc_score(trace_id, model_id, conversation_id, qc_result)
+                                    )
                                     logger.info("[质量闭环] 自动修复完成 trace=%s rounds=%d overall=%.2f",
                                                trace_id, fix_rounds, qc_result.get("overall", 0))
                             except Exception as _fe:  # noqa: BLE001
