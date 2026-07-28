@@ -1891,15 +1891,19 @@ watch(pendingRetry, (r) => {
             :my-dims="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].dims : null"
             :my-comment="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].comment : null"
             :can-rate="!!auth.user"
-            :streaming="streamingMsgKey === 's' + si + '-' + i"
-            :stage-label="streamingMsgKey === 's' + si + '-' + i ? streamingStageLabel : ''"
-            :live-think="streamingMsgKey === 's' + si + '-' + i ? liveThinkText : ''"
             @rate="(p) => m.trace_id && onRate(m.trace_id, p)"
             @open-file="(name) => openArtifact(name, 'file')"
           >
             <!-- P1/P2: 执行轨迹 / 子任务 track / 取消摘要 / COS / 二次确认详情 全部内嵌进宿主 assistant 气泡 -->
             <template v-if="activeTrailKey === 's' + si + '-' + i" #trail>
               <div class="trail-wrap-inline">
+                <!-- 合并: 实时阶段头 + 思考(原 live-think 块) 与下方 ThoughtTrail 合成一块连贯执行面板 -->
+                <div v-if="streamingMsgKey === 's' + si + '-' + i" class="exec-head">
+                  <span class="exec-pulse"></span>
+                  <span class="exec-stage">{{ streamingStageLabel }}</span>
+                  <div v-if="liveThinkText" class="exec-body">{{ liveThinkText }}</div>
+                  <div v-else class="exec-body exec-placeholder">正在分析你的需求…</div>
+                </div>
                 <!-- §9: 执行前计划预览卡(含 SOP 角色链路 badge) -->
                 <div v-if="planPreview" class="plan-preview">
                   <div class="pp-head">
@@ -2341,6 +2345,41 @@ class="clarify-confirm"
   border-radius: 14px;
   max-height: 360px;
   overflow: auto;
+}
+/* 合并执行面板: 阶段头 + 实时思考(原 live-think 块, 现与 ThoughtTrail 同卡片显示) */
+.exec-head {
+  background: #f0f7ff;
+  border: 1px solid #b8d8ff;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+.exec-pulse {
+  display: inline-block;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--brand, #4f46e5);
+  animation: lt-blink 1.2s ease-in-out infinite;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.exec-stage {
+  font-size: 12px; font-weight: 600; color: var(--brand, #4f46e5);
+  vertical-align: middle;
+}
+.exec-body {
+  margin-top: 6px;
+  font-size: 12px; color: #475569; line-height: 1.5;
+  max-height: 6em; overflow-y: auto;
+  white-space: pre-wrap; word-break: break-word;
+  border-left: 2px solid var(--brand, #4f46e5);
+  padding-left: 8px;
+}
+.exec-placeholder {
+  color: #94a3b8; border-left-color: #cbd5e1; font-style: italic;
+}
+@keyframes lt-blink {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.75); }
 }
 /* P2: 二次确认详情卡内嵌气泡时, 与上方轨迹做视觉分隔 */
 .confirm-card-in-bubble {

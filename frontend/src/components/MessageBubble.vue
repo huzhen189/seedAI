@@ -19,14 +19,8 @@ const props = withDefaults(
     myComment?: string | null
     /** 是否允许评价(已登录可评) */
     canRate?: boolean
-    /** 气泡内实时思考(Problem 2): 该气泡是否为当前正在生成的那条 */
-    streaming?: boolean
-    /** 当前生成阶段中文标签(如「制定方案」「生成代码」) */
-    stageLabel?: string
-    /** 最新实时思考文本(流式展示在气泡内) */
-    liveThink?: string
   }>(),
-  { qc: null, myRating: null, myDims: null, myComment: null, canRate: true, streaming: false, stageLabel: '', liveThink: '' },
+  { qc: null, myRating: null, myDims: null, myComment: null, canRate: true },
 )
 
 const emit = defineEmits<{
@@ -128,15 +122,6 @@ function fmtTime(t: string): string {
     </div>
 
     <div class="body" :class="{ expanded: expanded }">
-      <!-- ── 气泡内实时思考(Problem 2): 流式展示后台当前阶段 + 思考文本, 让用户时刻看到 AI 在干什么 ── -->
-      <div v-if="streaming" class="live-think">
-        <div class="lt-head">
-          <span class="lt-pulse"></span>
-          <span class="lt-stage">{{ stageLabel || '思考中…' }}</span>
-        </div>
-        <div v-if="liveThink" class="lt-body">{{ liveThink }}</div>
-        <div v-else class="lt-body lt-placeholder">正在分析你的需求…</div>
-      </div>
       <!-- 纯文本 / 闲聊 -->
       <MarkdownView v-if="parsed.type === 'plain' && role === 'assistant'" :content="parsed.text" />
       <span v-else-if="parsed.type === 'plain'">{{ parsed.text }}</span>
@@ -300,43 +285,6 @@ function fmtTime(t: string): string {
   border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; background: #fff;
 }
 .time { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 6px; }
-
-/* ---- 气泡内实时思考显示 ---- */
-.live-think {
-  background: #f0f7ff;
-  border: 1px solid #b8d8ff;
-  border-radius: 8px;
-  padding: 8px 10px;
-  margin-bottom: 10px;
-  transition: opacity 0.25s;
-}
-.lt-head {
-  display: flex; align-items: center; gap: 6px;
-}
-.lt-pulse {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--brand, #4f46e5);
-  animation: lt-blink 1.2s ease-in-out infinite;
-}
-@keyframes lt-blink {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.75); }
-}
-.lt-stage {
-  font-size: 12px; font-weight: 600; color: var(--brand, #4f46e5);
-}
-.lt-body {
-  margin-top: 6px;
-  font-size: 12px; color: #475569; line-height: 1.5;
-  max-height: 6em; overflow-y: auto;
-  white-space: pre-wrap; word-break: break-word;
-  border-left: 2px solid var(--brand, #4f46e5);
-  padding-left: 8px;
-}
-.lt-placeholder {
-  color: #94a3b8; border-left-color: #cbd5e1; font-style: italic;
-}
-/* --------------------------------- */
 
 /* ---- Site Card ---- */
 .site-card {
