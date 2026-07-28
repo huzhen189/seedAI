@@ -934,6 +934,11 @@ async def chat(
 
                     event = None
                     data_parts: list[str] = []
+                    # 批量发送缓冲: 累计 SSE_OUT_BATCH 帧或命中终止事件再一次性 flush,
+                    # 减少网络写次数(对应"多累计一点数据再发")。客户端 EventSource 按空行
+                    # 切分事件, 合并发送对前端透明, 不影响流式展示。
+                    out_buf: list[bytes] = []
+                    SSE_OUT_BATCH = 8
                     async for raw_line in _sse_lines():
                             # 主动检测客户端断连(关闭/刷新/导航离开): 立即终止读取上游并触发级联取消
                             try:
@@ -1117,16 +1122,23 @@ async def chat(
                                     if event:
                                         frame += f"event: {event}\n"
                                     frame += f"data: {data}\n\n"
-                                    try:
-                                        yield frame.encode("utf-8")
-                                    except (RuntimeError, ConnectionError, OSError, BrokenPipeError) as _e:
-                                        # 客户端在发送中途断开(浏览器关闭/刷新): 触发级联取消并停止读取
-                                        logger.info("[chat] 发送失败(客户端已断开) trace=%s: %s",
-                                                    tid, type(_e).__name__)
-                                        remaining = await _on_disconnect()
-                                        # v4 续接: 断连不暂停, 让 Worker 继续跑完;
-                                        # 前端 F5 后用 after 游标续接回放, 不在此置 paused。
-                                        break
+                                    out_buf.append(frame.encode("utf-8"))
+                                    # 批量发送: 累计到 SSE_OUT_BATCH 帧, 或命中终止事件, 才一次性 flush
+                                    if len(out_buf) >= SSE_OUT_BATCH or event in ("done", "aborted", "error", "unsupported", "paused"):
+                                        _send_ok = True
+                                        for _f in out_buf:
+                                            try:
+                                                yield _f
+                                            except (RuntimeError, ConnectionError, OSError, BrokenPipeError) as _e:
+                                                # 客户端在发送中途断开(浏览器关闭/刷新): 触发级联取消并停止读取
+                                                logger.info("[chat] 批量发送失败(客户端已断开) trace=%s: %s",
+                                                            tid, type(_e).__name__)
+                                                await _on_disconnect()
+                                                _send_ok = False
+                                                break
+                                        out_buf.clear()
+                                        if not _send_ok:
+                                            break
                                 event, data_parts = None, []
                                 continue
                             if raw_line.startswith("event:"):
@@ -1138,9 +1150,25 @@ async def chat(
                     terminal_status = "error"
                     saw_terminal = True
                     await record_error("upstream_error")
-                    yield _error_frame("UPSTREAM_ERROR", "AI 服务暂时不可用，请稍后重试")
+                    out_buf.append(_error_frame("UPSTREAM_ERROR", "AI 服务暂时不可用，请稍后重试"))
+                    for _f in out_buf:
+                        try:
+                            yield _f
+                        except Exception:
+                            pass
+                    out_buf.clear()
                     return
         finally:
+            # 批量发送收尾: 若仍有未冲刷的缓冲帧(极端情况: 上游在正常 done 前结束且不足一批),
+            # 客户端仍连接时补发一次, 避免丢帧。
+            if out_buf:
+                try:
+                    if not await request.is_disconnected():
+                        for _f in out_buf:
+                            yield _f
+                except Exception:
+                    pass
+                out_buf.clear()
             # 断连自动取消: 用独立任务执行清理, 即便本流式任务被取消也能跑完(与 _do_persist 同模式,
             # 避免清理在 finally 的 await 中被取消信号打断)。主动检测/发送失败路径已 await 过,
             # 此处再跑一次幂等(SREM 无副作用, cancel 置位亦幂等)。

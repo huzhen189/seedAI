@@ -183,6 +183,9 @@ function fmtTime(t: string): string {
       <span v-else>{{ content }}</span>
     </div>
 
+    <!-- ===== 气泡内嵌执行轨迹 / 二次确认详情(P1/P2): 由 ChatView 通过 #trail 注入 ===== -->
+    <slot name="trail" />
+
     <button v-if="isExpandable && !expanded" class="expand" @click="expanded = true">展开全部 ▾</button>
     <button v-if="isExpandable && expanded" class="expand" @click="expanded = false">收起 ▲</button>
 

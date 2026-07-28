@@ -261,7 +261,7 @@ async def _review(model_id: str, html: str) -> Dict:
         return {"passed": False, "comment": "评审模型调用失败, 已标记待复核",
                 "scores": {"correctness": 5, "completeness": 5, "readability": 5,
                            "compliance": 6, "efficiency": 6, "craft": 5, "safety": 6},
-                "issues": ["评审模型调用失败"], "needs_review": True}
+                "issues": ["评审模型调用失败"], "needs_review": True, "llm_fail": True}
 
 
 def _deliver(html: str, trace_id: str, user_id: int | None = None,
@@ -677,11 +677,21 @@ async def generate_stream(
             review = await _review(model_id, html)
             await record_reviewer(SKILL_NAME, review, reason=_review_reason(review))
             GEN_LOG.info(
-                "[gen] Reviewer 第%s轮 trace=%s passed=%s",
-                attempt + 1, trace_id, review["passed"],
+                "[gen] Reviewer 第%s轮 trace=%s passed=%s llm_fail=%s",
+                attempt + 1, trace_id, review["passed"], review.get("llm_fail", False),
             )
-            yield ev("think", stage="reviewer", passed=review["passed"], comment=review["comment"])
             if review["passed"]:
+                yield ev("think", stage="reviewer", passed=True, comment=review["comment"])
+                break
+            # 🔧 P4 修复: 评审因模型基础设施故障(llm_fail)而非 HTML 质量问题未通过时,
+            #    不再触发 Coder Reflexion 整轮重生成, 直接放行交由后置 QC 二次复核, 避免烧多轮 LLM。
+            if review.get("llm_fail"):
+                GEN_LOG.warning(
+                    "[gen] Reviewer 第%s轮 llm_fail, 跳过 Reflexion 交 QC trace=%s",
+                    attempt + 1, trace_id,
+                )
+                yield ev("think", stage="reviewer", passed=False,
+                         comment="评审模型调用失败, 已跳过自动修复并交后置 QC 复核", llm_fail=True)
                 break
             # 检查取消(断点保存点 3: reviewer_rN)
             if await _cancelled_now(is_cancelled):

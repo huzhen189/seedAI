@@ -198,7 +198,7 @@ def build_rag_context(query: str, project_id: int | None = None,
     error_patterns 全局检索(错误经验复用)。所有检索优雅降级,失败不阻断生成。"""
     if not _available():
         return ""
-    logger.info("[RAG] build_rag_context 入口 query=%.60s project_id=%s user_id=%s",
+    logger.debug("[RAG] build_rag_context 入口 query=%.60s project_id=%s user_id=%s",
                 query, project_id, user_id)
     parts: list[str] = []
     # ── 组件库参考(全局) ──
@@ -206,10 +206,10 @@ def build_rag_context(query: str, project_id: int | None = None,
     if comps:
         snippets = "\n\n".join(f"- {c['content']}" for c in comps)
         parts.append(f"【组件库参考】\n{snippets}")
-        logger.info("[RAG] components 命中 %d 条(注入 %d 字), top=%.120s",
+        logger.debug("[RAG] components 命中 %d 条(注入 %d 字), top=%.120s",
                     len(comps), len(snippets), comps[0]["content"])
     else:
-        logger.info("[RAG] components 未命中")
+        logger.debug("[RAG] components 未命中")
     # ── 历史记忆(可按 project_id 隔离,避免跨项目污染) ──
     if project_id is not None:
         mems = _retrieve_where(
@@ -221,43 +221,43 @@ def build_rag_context(query: str, project_id: int | None = None,
     if mems:
         snippets = "\n\n".join(f"- {m['content']}" for m in mems)
         parts.append(f"【历史记忆】\n{snippets}")
-        logger.info("[RAG] memory 命中 %d 条(project_id=%s, 注入 %d 字)",
+        logger.debug("[RAG] memory 命中 %d 条(project_id=%s, 注入 %d 字)",
                     len(mems), project_id, len(snippets))
     else:
-        logger.info("[RAG] memory 未命中(project_id=%s)", project_id)
+        logger.debug("[RAG] memory 未命中(project_id=%s)", project_id)
     # ── 项目记忆(3.4, 按 project_id 隔离) ──
     if project_id is not None:
         pmems = retrieve_project_memory(project_id, query)
         if pmems:
             snippets = "\n\n".join(f"- {p['content']}" for p in pmems)
             parts.append(f"【项目记忆】\n{snippets}")
-            logger.info("[RAG] project_memory 命中 %d 条(project_id=%s, 注入 %d 字)",
+            logger.debug("[RAG] project_memory 命中 %d 条(project_id=%s, 注入 %d 字)",
                         len(pmems), project_id, len(snippets))
         else:
-            logger.info("[RAG] project_memory 未命中(project_id=%s)", project_id)
+            logger.debug("[RAG] project_memory 未命中(project_id=%s)", project_id)
     # ── 用户偏好(3.4, 按 user_id 隔离) ──
     if user_id is not None:
         prefs = retrieve_user_preferences(user_id, query)
         if prefs:
             snippets = "\n\n".join(f"- {p['content']}" for p in prefs)
             parts.append(f"【用户偏好】\n{snippets}")
-            logger.info("[RAG] user_preferences 命中 %d 条(user_id=%s, 注入 %d 字)",
+            logger.debug("[RAG] user_preferences 命中 %d 条(user_id=%s, 注入 %d 字)",
                         len(prefs), user_id, len(snippets))
         else:
-            logger.info("[RAG] user_preferences 未命中(user_id=%s)", user_id)
+            logger.debug("[RAG] user_preferences 未命中(user_id=%s)", user_id)
     # ── 错误模式经验(3.4, 全局复用) ──
     errs = retrieve_error_patterns(query)
     if errs:
         snippets = "\n\n".join(f"- {e['content']}" for e in errs)
         parts.append(f"【错误模式经验】\n{snippets}")
-        logger.info("[RAG] error_patterns 命中 %d 条(注入 %d 字)", len(errs), len(snippets))
+        logger.debug("[RAG] error_patterns 命中 %d 条(注入 %d 字)", len(errs), len(snippets))
     else:
-        logger.info("[RAG] error_patterns 未命中")
+        logger.debug("[RAG] error_patterns 未命中")
     ctx = "\n\n".join(parts)
     if ctx:
-        logger.info("[RAG] 注入 Planner 上下文总长=%d 字(有增益)", len(ctx))
+        logger.debug("[RAG] 注入 Planner 上下文总长=%d 字(有增益)", len(ctx))
     else:
-        logger.info("[RAG] 无 RAG 增益(所有集合均未命中)")
+        logger.debug("[RAG] 无 RAG 增益(所有集合均未命中)")
     return ctx[:_RAG_INJECT_MAX_CHARS] if ctx else ""
 
 
@@ -345,7 +345,7 @@ def index_message(msg_id: int, conversation_id: int, role: str, content: str) ->
             documents=[content[:2000]],
             metadatas=[{"conversation_id": conversation_id, "role": role, "msg_id": msg_id}],
         )
-        logger.info("[向量] 索引消息 msg=%s conv=%s role=%s content=%.80s", msg_id, conversation_id, role, content)
+        logger.debug("[向量] 索引消息 msg=%s conv=%s role=%s content=%.80s", msg_id, conversation_id, role, content)
     except Exception as e:
         logger.warning("[向量] 索引消息失败 msg=%s: %s", msg_id, e)
 
@@ -354,7 +354,7 @@ def find_relevant_messages(query: str, conversation_id: int, top_k: int = 10) ->
     """找与 query 相关的历史消息 id(按相似度排序)。只限同一会话。"""
     if not _available():
         return []
-    logger.info("[向量-上下文] find_relevant_messages 入口 query=%.60s conv=%s", query, conversation_id)
+    logger.debug("[向量-上下文] find_relevant_messages 入口 query=%.60s conv=%s", query, conversation_id)
     try:
         # 用 get_or_create 而非 get_collection: 集合尚未创建时也能自愈,
         # 避免重置后集合被删、本函数抢先执行而抛 404。
@@ -378,13 +378,13 @@ def find_relevant_messages(query: str, conversation_id: int, top_k: int = 10) ->
         relevant.sort(key=lambda x: x[0])
         result = [r[0] for r in relevant]
         best_sim = max((s for _, s in relevant), default=0.0)
-        logger.info(
+        logger.debug(
             "[向量-上下文] 检索结果 query=%.60s conv=%s 命中=%d 最高相似度=%.3f 阈值=%.2f ids=%s (未达标丢弃=%d)",
             query, conversation_id, len(result), best_sim,
             CTX_SIMILARITY_THRESHOLD, result, discarded,
         )
         if not result:
-            logger.info("[向量-上下文] 未命中(全部低于阈值 %.2f), 不注入历史消息", CTX_SIMILARITY_THRESHOLD)
+            logger.debug("[向量-上下文] 未命中(全部低于阈值 %.2f), 不注入历史消息", CTX_SIMILARITY_THRESHOLD)
         return result
     except Exception as e:
         logger.warning("[向量] 上下文检索失败: %s", e)
@@ -416,12 +416,12 @@ def find_relevant_message_contents(query: str, conversation_id: int,
             if sim >= CTX_SIMILARITY_THRESHOLD and d and d.strip():
                 out.append({"content": d[:600], "score": round(sim, 3)})
                 best = max(best, sim)
-        logger.info(
+        logger.debug(
             "[向量-上下文] 内容召回 query=%.60s conv=%s 命中=%d 最高相似度=%.3f 阈值=%.2f",
             query, conversation_id, len(out), best, CTX_SIMILARITY_THRESHOLD,
         )
         if not out:
-            logger.info("[向量-上下文] 内容召回未命中(低于阈值 %.2f), 不注入历史消息",
+            logger.debug("[向量-上下文] 内容召回未命中(低于阈值 %.2f), 不注入历史消息",
                         CTX_SIMILARITY_THRESHOLD)
         return out
     except Exception as e:
@@ -453,7 +453,7 @@ def upsert_user_preference(user_id: int, ptype: str, content: str,
         metas=[{"user_id": user_id, "type": ptype, "importance": importance,
                 "source": source, "ts": int(time.time())}],
     )
-    logger.info("[向量] 用户偏好 upsert user=%s type=%s hash=%s", user_id, ptype, hash4)
+    logger.debug("[向量] 用户偏好 upsert user=%s type=%s hash=%s", user_id, ptype, hash4)
 
 
 def retrieve_user_preferences(user_id: int, query: str, top_k: int = 5) -> list[dict]:
@@ -462,7 +462,7 @@ def retrieve_user_preferences(user_id: int, query: str, top_k: int = 5) -> list[
         query, settings.chroma_collection_user_preferences,
         where={"user_id": user_id}, top_k=top_k,
     )
-    logger.info("[向量-个性化] 检索 user_preferences user=%s query=%.50s 命中=%d 条 top=%s",
+    logger.debug("[向量-个性化] 检索 user_preferences user=%s query=%.50s 命中=%d 条 top=%s",
                 user_id, query, len(res), (res[0]["content"][:80] if res else ""))
     return res
 
@@ -486,7 +486,7 @@ def upsert_project_memory(project_id: int, user_id: int, ptype: str,
         metas=[{"project_id": project_id, "user_id": user_id, "type": ptype,
                 "importance": importance, "ts": int(time.time())}],
     )
-    logger.info("[向量] 项目记忆 upsert proj=%s type=%s hash=%s", project_id, ptype, hash4)
+    logger.debug("[向量] 项目记忆 upsert proj=%s type=%s hash=%s", project_id, ptype, hash4)
 
 
 def retrieve_project_memory(project_id: int, query: str, top_k: int = 5) -> list[dict]:
@@ -495,7 +495,7 @@ def retrieve_project_memory(project_id: int, query: str, top_k: int = 5) -> list
         query, settings.chroma_collection_project_memory,
         where={"project_id": project_id}, top_k=top_k,
     )
-    logger.info("[向量-个性化] 检索 project_memory proj=%s query=%.50s 命中=%d 条 top=%s",
+    logger.debug("[向量-个性化] 检索 project_memory proj=%s query=%.50s 命中=%d 条 top=%s",
                 project_id, query, len(res), (res[0]["content"][:80] if res else ""))
     return res
 
@@ -526,7 +526,7 @@ def retrieve_project_code(project_id: int, query: str, top_k: int = 8) -> list[d
         query, settings.chroma_collection_project_code,
         where={"project_id": project_id}, top_k=top_k,
     )
-    logger.info("[向量-代码] 检索 project_code proj=%s query=%.50s 命中=%d 条 top=%s",
+    logger.debug("[向量-代码] 检索 project_code proj=%s query=%.50s 命中=%d 条 top=%s",
                 project_id, query, len(res), (res[0]["content"][:80] if res else ""))
     return res
 
@@ -549,13 +549,13 @@ def upsert_error_pattern(error_type: str, trigger_pattern: str, fix_pattern: str
                 "fix_pattern": fix_pattern, "language": language,
                 "success_count": 1, "ts": int(time.time())}],
     )
-    logger.info("[向量] 错误模式 upsert type=%s hash=%s", error_type, hash4)
+    logger.debug("[向量] 错误模式 upsert type=%s hash=%s", error_type, hash4)
 
 
 def retrieve_error_patterns(query: str, top_k: int = 5) -> list[dict]:
     """检索全局错误模式(无需隔离 where)。"""
     res = retrieve(query, settings.chroma_collection_error_patterns, top_k=top_k)
-    logger.info("[向量-错误模式] 检索 error_patterns query=%.50s 命中=%d 条 top=%s",
+    logger.debug("[向量-错误模式] 检索 error_patterns query=%.50s 命中=%d 条 top=%s",
                 query, len(res), (res[0]["content"][:80] if res else ""))
     return res
 
@@ -626,7 +626,7 @@ def seed_error_patterns() -> int:
                     "success_count": 0, "ts": now}],
         )
         count += 1
-    logger.info("[向量] 错误模式种子写入 %d 条", count)
+    logger.debug("[向量] 错误模式种子写入 %d 条", count)
     return count
 
 

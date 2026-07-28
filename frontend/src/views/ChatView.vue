@@ -771,6 +771,115 @@ function clearUserStatus() {
   try { localStorage.removeItem(USER_STATUS_KEY) } catch { /* 忽略 */ }
 }
 
+// ---- 执行轨迹 UI 快照(localStorage, 关页/重开后可恢复 trail-wrap 进度, P5) ----
+// 生成中的执行 UI(思考步骤/计划预览/子任务 track/取消摘要/二次确认)原本只在内存,
+// 关页即失。按 trace_id 把这份 UI 状态快照到 localStorage, 重开页面(同标签刷新或新标签)
+// 时若流已结束无法回放, 可据此立即还原进度展示。
+const TRAIL_KEY = (tid: string) => `seedai:trail:${tid}`
+interface TrailSnapshot {
+  convId: number
+  thoughtSteps: any[]
+  planNodes: any[]
+  currentStage: string
+  currentIntent: { level1: string; level2: string }
+  isMultiIntent: boolean
+  subTasks: any[]
+  mergeResult: any
+  planPreview: any
+  cancelSummary: any
+  cosUploading: any
+  cosFailed: any
+  pendingConfirm: any
+  generating: boolean
+  finished: boolean
+  sopCurrentRole: any
+}
+function saveTrailSnapshot() {
+  const tid = traceId.value
+  if (!tid) return
+  const live =
+    generating.value || planPreview.value || cancelSummary.value ||
+    subTasks.value.length || mergeResult.value ||
+    cosUploading.value || cosFailed.value || pendingConfirm.value
+  if (!live) return
+  const snap: TrailSnapshot = {
+    convId: convStore.currentConvId ?? -1,
+    thoughtSteps: thoughtSteps.value,
+    planNodes: planNodes.value,
+    currentStage: currentStage.value,
+    currentIntent: currentIntent.value,
+    isMultiIntent: isMultiIntent.value,
+    subTasks: subTasks.value,
+    mergeResult: mergeResult.value,
+    planPreview: planPreview.value,
+    cancelSummary: cancelSummary.value,
+    cosUploading: cosUploading.value,
+    cosFailed: cosFailed.value,
+    pendingConfirm: pendingConfirm.value,
+    generating: generating.value,
+    finished: finished.value,
+    sopCurrentRole: sopCurrentRole.value,
+  }
+  try { localStorage.setItem(TRAIL_KEY(tid), JSON.stringify(snap)) } catch { /* 忽略 */ }
+}
+function loadTrailSnapshot(tid: string): TrailSnapshot | null {
+  try {
+    const raw = localStorage.getItem(TRAIL_KEY(tid))
+    if (!raw) return null
+    return JSON.parse(raw) as TrailSnapshot
+  } catch { return null }
+}
+function clearTrailSnapshot(tid?: string) {
+  try {
+    if (tid) localStorage.removeItem(TRAIL_KEY(tid))
+    else if (traceId.value) localStorage.removeItem(TRAIL_KEY(traceId.value))
+  } catch { /* 忽略 */ }
+}
+function applyTrailSnapshot(tid: string) {
+  const snap = loadTrailSnapshot(tid)
+  if (!snap) return
+  thoughtSteps.value = snap.thoughtSteps || []
+  planNodes.value = snap.planNodes || []
+  currentStage.value = snap.currentStage || ''
+  currentIntent.value = snap.currentIntent || { level1: '', level2: '' }
+  isMultiIntent.value = !!snap.isMultiIntent
+  subTasks.value = snap.subTasks || []
+  mergeResult.value = snap.mergeResult ?? null
+  planPreview.value = snap.planPreview ?? null
+  cancelSummary.value = snap.cancelSummary ?? null
+  // 注: cosUploading/cosFailed 为 computed(由 projectArtifacts 派生), 不可直接赋值;
+  // 关页重开后经 resume → loadArtifacts() 重新拉取产物, watch 会自动重启 COS 轮询。
+  pendingConfirm.value = snap.pendingConfirm ?? null
+  sopCurrentRole.value = snap.sopCurrentRole
+  generating.value = !!snap.generating
+  finished.value = !!snap.finished
+  // P5 健壮性: 关页重开(新标签)时可能无本地草稿气泡, 保证有宿主 assistant 气泡承载 in-bubble trail
+  const live =
+    generating.value || planPreview.value || cancelSummary.value ||
+    subTasks.value.length || mergeResult.value || pendingConfirm.value
+  if (live) {
+    const msgs = convStore.messages
+    const last = msgs[msgs.length - 1]
+    if (!last || last.role !== 'assistant') {
+      msgs.push({
+        role: 'assistant', content: '', conversation_id: snap.convId, id: 0,
+        created_at: '', model_id: model.value,
+      } as any)
+    }
+  }
+}
+
+// 生成中执行 UI 变化 → 防抖快照到 localStorage(P5: 关页/重开可恢复 trail-wrap 进度)
+let _trailSaveTimer: ReturnType<typeof setTimeout> | null = null
+watch(
+  [thoughtSteps, planPreview, cancelSummary, subTasks, mergeResult, cosUploading, cosFailed, pendingConfirm, generating, isMultiIntent, currentStage, sopCurrentRole],
+  () => {
+    if (_trailSaveTimer) clearTimeout(_trailSaveTimer)
+    _trailSaveTimer = setTimeout(saveTrailSnapshot, 400)
+  },
+  { deep: true },
+)
+
 // ---- 生成中消息本地快照(刷新/崩溃恢复) ----
 const DRAFT_KEY_PREFIX = 'seedai:draft:'
 
@@ -857,6 +966,25 @@ const streamingMsgKey = computed<string | null>(() => {
   if (!generating.value) return null
   const sessions = allSessions.value
   for (let si = sessions.length - 1; si >= 0; si--) {
+    const msgs = sessions[si].msgs
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'assistant') return `s${si}-${i}`
+    }
+  }
+  return null
+})
+
+// ── 宿主气泡 key(P1/P2): 当前会话「正在生成 / 待确认 / 取消摘要 / 子任务」的执行 UI 应内嵌进
+//    哪一条 assistant 气泡。取当前会话最后一条 assistant 气泡;没有则 null(此时回退由弹窗兜底)。 ──
+const activeTrailKey = computed<string | null>(() => {
+  const show =
+    generating.value || planPreview.value || cancelSummary.value ||
+    subTasks.value.length || mergeResult.value ||
+    cosUploading.value || cosFailed.value || pendingConfirm.value
+  if (!show) return null
+  const sessions = allSessions.value
+  for (let si = sessions.length - 1; si >= 0; si--) {
+    if (sessions[si].conv.id !== convStore.currentConvId) continue
     const msgs = sessions[si].msgs
     for (let i = msgs.length - 1; i >= 0; i--) {
       if (msgs[i].role === 'assistant') return `s${si}-${i}`
@@ -961,6 +1089,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planPreview.value = null
       clearActiveGen()
       clearUserStatus()
+      clearTrailSnapshot(traceId.value)  // P5: 终止态清理快照, 避免陈旧轨迹复活
       v4Pause.value = null
       clearDraft()
       loadArtifacts()
@@ -978,6 +1107,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       errorMsg.value = '已取消'
       clearActiveGen()
       clearUserStatus()
+      clearTrailSnapshot(traceId.value)
       v4Pause.value = null
       if (projectStore.currentProjectId) {
         convStore.loadConversations(projectStore.currentProjectId).then(() => scrollToBottom(false))
@@ -1043,6 +1173,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       blockReason.value = d.reason || '该操作存在高风险，已被安全策略拦截'
       clearActiveGen()
       clearUserStatus()
+      clearTrailSnapshot(traceId.value)
     },
     onConfirm: (d: ConfirmEvent) => {
       generating.value = false
@@ -1091,6 +1222,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       errorMsg.value = m
       clearActiveGen()
       clearUserStatus()
+      clearTrailSnapshot(traceId.value)
       v4Pause.value = null
     },
     // F5 续接游标: 每个 SSE 事件回传 lastEventId → 存 localStorage 供刷新后 after 续接
@@ -1368,6 +1500,10 @@ async function maybeResume() {
     await convStore.loadConversations(projectStore.currentProjectId)
   }
   resumeStream(us.convId, us.traceId, us.after)
+  // P5: 关页后重开, 先按 trace_id 恢复执行轨迹 UI 快照, 等 SSE 续接事件到来后再增量更新
+  applyTrailSnapshot(us.traceId)
+  // 重新拉取产物, 让 COS 上传状态经 watch(cosUploading/cosFailed) 自动恢复轮询
+  void loadArtifacts().catch(() => {})
 }
 
 // 续接在跑的流(F5 刷新/重开/切会话): 不带 q/resume, 后端 stream_exists 命中则回放历史并续接实时。
@@ -1437,6 +1573,8 @@ async function restoreFromMyInfo() {
     // 极端竞态(断连尚未翻 paused): 直接续跑
     await resume(cid, tid)
   }
+  // P5: 新标签重开, 据 trace_id 恢复执行轨迹 UI 快照(含 await_confirm 方案卡)
+  applyTrailSnapshot(tid)
 }
 
 // v4 断点复联: 「已暂停」横幅「继续」按钮 —— 带当前输入(或仅续跑)从 checkpoint 恢复
@@ -1736,84 +1874,116 @@ watch(pendingRetry, (r) => {
             :live-think="streamingMsgKey === 's' + si + '-' + i ? liveThinkText : ''"
             @rate="(p) => m.trace_id && onRate(m.trace_id, p)"
             @open-file="(name) => openArtifact(name, 'file')"
-          />
-
-          <!-- 当前会话内联: 执行轨迹/子任务 track, 紧跟气泡; 结果出来后原地替换 -->
-          <div
-            v-if="s.conv.id === convStore.currentConvId && (generating || planPreview || cancelSummary || subTasks.length || mergeResult || cosUploading || cosFailed)"
-            class="trail-wrap-inline"
           >
-            <!-- §9: 执行前计划预览卡(含 SOP 角色链路 badge) -->
-            <div v-if="planPreview" class="plan-preview">
-              <div class="pp-head">
-                <span class="pp-icon">🧭</span>
-                <div>
-                  <div class="pp-title">{{ planPreview.title || '执行计划' }}</div>
-                  <div v-if="planPreview.note" class="pp-note">{{ planPreview.note }}</div>
+            <!-- P1/P2: 执行轨迹 / 子任务 track / 取消摘要 / COS / 二次确认详情 全部内嵌进宿主 assistant 气泡 -->
+            <template v-if="activeTrailKey === 's' + si + '-' + i" #trail>
+              <div class="trail-wrap-inline">
+                <!-- §9: 执行前计划预览卡(含 SOP 角色链路 badge) -->
+                <div v-if="planPreview" class="plan-preview">
+                  <div class="pp-head">
+                    <span class="pp-icon">🧭</span>
+                    <div>
+                      <div class="pp-title">{{ planPreview.title || '执行计划' }}</div>
+                      <div v-if="planPreview.note" class="pp-note">{{ planPreview.note }}</div>
+                    </div>
+                  </div>
+                  <div class="sop-chain">
+                    <template v-for="(r, i) in sopChain" :key="r.key">
+                      <span class="sop-node" :class="{ active: r.active }">{{ r.label }}</span>
+                      <span v-if="i < sopChain.length - 1" class="sop-arrow">→</span>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- §6 D: 取消结构化摘要卡 -->
+                <div v-if="cancelSummary" class="cancel-summary">
+                  <div class="cs-head">⏹ 已取消 · 执行摘要</div>
+                  <div class="cs-body">
+                    <span class="cs-chip done">✓ 已完成 {{ cancelSummary.completed.length }}</span>
+                    <span class="cs-chip cancelled">⏹ 已取消 {{ cancelSummary.cancelled.length }}</span>
+                    <span class="cs-chip skipped">⤼ 已跳过 {{ cancelSummary.skipped.length }}</span>
+                  </div>
+                  <ul v-if="cancelSummary.cancelled.length || cancelSummary.skipped.length" class="cs-list">
+                    <li v-for="id in cancelSummary.cancelled" :key="'c-' + id" class="cs-item cancelled">
+                      已取消: {{ id }}
+                    </li>
+                    <li v-for="id in cancelSummary.skipped" :key="'s-' + id" class="cs-item skipped">
+                      未执行(已跳过): {{ id }}
+                    </li>
+                  </ul>
+                </div>
+
+                <ThoughtTrail
+                  v-if="!isMultiIntent"
+                  :steps="thoughtSteps"
+                  :plans="planNodes"
+                  :degraded="degraded"
+                  :current="currentStage"
+                  :intent="currentIntent"
+                  :current-role="sopCurrentRole"
+                />
+                <template v-else>
+                  <SubTaskTrack
+                    v-if="generating && !mergeResult"
+                    :subtasks="subTasks"
+                    :strategy="orchStrategy"
+                    @confirm="confirmSubTask"
+                  />
+                  <MergedResult
+                    v-if="mergeResult"
+                    :success-count="mergeResult.success_count"
+                    :fail-count="mergeResult.fail_count"
+                    :failed-tasks="mergeResult.failed_tasks"
+                  />
+                </template>
+
+                <!-- COS 上传状态: 生成完成后产物直传对象存储, 进度/失败在同一卡片内显示 -->
+                <div v-if="cosUploading || cosFailed" class="cos-trail">
+                  <div v-if="cosUploading" class="cos-row uploading">
+                    <span class="cos-spinner"></span>
+                    <span>COS 上传中…（{{ cosUploadingList.length }} 个文件）</span>
+                  </div>
+                  <div v-if="cosFailed" class="cos-row failed">
+                    <span>⚠ {{ cosFailedList.length }} 个文件上传失败</span>
+                    <button class="cos-retry-btn" type="button" @click="retryCosUpload">重试</button>
+                  </div>
+                </div>
+
+                <!-- P2: 二次确认详情移入气泡; 弹窗仅留标题(见下方 confirm-plan-backdrop 简化) -->
+                <div v-if="pendingConfirm" class="confirm-card-in-bubble">
+                  <template v-if="(pendingConfirm.planSteps?.length ?? 0) > 0">
+                    <div class="cp-title">🏗️ 建站方案确认</div>
+                    <div v-if="pendingConfirm.reqSource" class="cp-reqsrc">
+                      需求来源：<b>{{ pendingConfirm.reqSource }}</b>
+                      <span v-if="pendingConfirm.reqPreview" class="cp-reqprev">「{{ pendingConfirm.reqPreview }}…」</span>
+                    </div>
+                    <div class="cp-body">
+                      <div class="cp-plan-title">{{ pendingConfirm.planTitle || '未命名方案' }}</div>
+                      <div class="cp-goal">{{ pendingConfirm.planGoal || pendingConfirm.reason }}</div>
+                      <ol class="cp-steps">
+                        <li v-for="(s, i) in pendingConfirm.planSteps" :key="i">{{ s }}</li>
+                      </ol>
+                    </div>
+                    <div class="cp-hint">如需调整，取消后在对话框直接补充要求并重新发送即可。</div>
+                  </template>
+                  <template v-else>
+                    <div class="cp-title">
+                      ⚠️ 安全确认
+                      <span
+                        class="cp-risk"
+                        :class="pendingConfirm.riskLevel === 'high' ? 'risk-high' : 'risk-medium'"
+                      >{{ pendingConfirm.riskLevel === 'high' ? '高风险' : '中风险' }}</span>
+                    </div>
+                    <div class="cp-body">
+                      <div class="cp-goal">{{ pendingConfirm.reason }}</div>
+                    </div>
+                  </template>
                 </div>
               </div>
-              <div class="sop-chain">
-                <template v-for="(r, i) in sopChain" :key="r.key">
-                  <span class="sop-node" :class="{ active: r.active }">{{ r.label }}</span>
-                  <span v-if="i < sopChain.length - 1" class="sop-arrow">→</span>
-                </template>
-              </div>
-            </div>
-
-            <!-- §6 D: 取消结构化摘要卡 -->
-            <div v-if="cancelSummary" class="cancel-summary">
-              <div class="cs-head">⏹ 已取消 · 执行摘要</div>
-              <div class="cs-body">
-                <span class="cs-chip done">✓ 已完成 {{ cancelSummary.completed.length }}</span>
-                <span class="cs-chip cancelled">⏹ 已取消 {{ cancelSummary.cancelled.length }}</span>
-                <span class="cs-chip skipped">⤼ 已跳过 {{ cancelSummary.skipped.length }}</span>
-              </div>
-              <ul v-if="cancelSummary.cancelled.length || cancelSummary.skipped.length" class="cs-list">
-                <li v-for="id in cancelSummary.cancelled" :key="'c-' + id" class="cs-item cancelled">
-                  已取消: {{ id }}
-                </li>
-                <li v-for="id in cancelSummary.skipped" :key="'s-' + id" class="cs-item skipped">
-                  未执行(已跳过): {{ id }}
-                </li>
-              </ul>
-            </div>
-
-            <ThoughtTrail
-              v-if="!isMultiIntent"
-              :steps="thoughtSteps"
-              :plans="planNodes"
-              :degraded="degraded"
-              :current="currentStage"
-              :intent="currentIntent"
-              :current-role="sopCurrentRole"
-            />
-            <template v-else>
-              <SubTaskTrack
-                v-if="generating && !mergeResult"
-                :subtasks="subTasks"
-                :strategy="orchStrategy"
-                @confirm="confirmSubTask"
-              />
-              <MergedResult
-                v-if="mergeResult"
-                :success-count="mergeResult.success_count"
-                :fail-count="mergeResult.fail_count"
-                :failed-tasks="mergeResult.failed_tasks"
-              />
             </template>
+          </MessageBubble>
 
-            <!-- COS 上传状态: 生成完成后产物直传对象存储, 进度/失败在同一卡片内显示 -->
-            <div v-if="cosUploading || cosFailed" class="cos-trail">
-              <div v-if="cosUploading" class="cos-row uploading">
-                <span class="cos-spinner"></span>
-                <span>COS 上传中…（{{ cosUploadingList.length }} 个文件）</span>
-              </div>
-              <div v-if="cosFailed" class="cos-row failed">
-                <span>⚠ {{ cosFailedList.length }} 个文件上传失败</span>
-                <button class="cos-retry-btn" type="button" @click="retryCosUpload">重试</button>
-              </div>
-            </div>
-          </div>
+          <!-- 当前会话内联执行 UI 已移入宿主 assistant 气泡(见上方 MessageBubble 的 #trail 插槽, P1) -->
         </template>
 
         <!-- 生成完成的产物清单: 文字反馈 + 点击在右侧预览面板打开 -->
@@ -1969,46 +2139,15 @@ class="clarify-confirm"
           🛑 高危操作已被拦截：{{ blockReason }}
           <button class="pob-clear" @click="blockReason = ''">✕ 我知道了</button>
         </div>
-        <!-- 二次确认对话框(安全 high) -->
+        <!-- 二次确认对话框(P2 简化: 仅标题 + 操作按钮; 详细方案/安全原因已内嵌进 AI 气泡) -->
         <div v-if="showConfirmModal && pendingConfirm" class="confirm-plan-backdrop" @click.self="showConfirmModal = false; pendingConfirm = null" @keydown.escape="showConfirmModal = false; pendingConfirm = null">
           <div class="confirm-plan">
-          <!-- 方案确认(建站): 结构化方案卡 + 确认/修改双按钮 -->
-          <template v-if="(pendingConfirm.planSteps?.length ?? 0) > 0">
-            <div class="cp-title">🏗️ 建站方案确认</div>
-            <div v-if="pendingConfirm.reqSource" class="cp-reqsrc">
-              需求来源：<b>{{ pendingConfirm.reqSource }}</b>
-              <span v-if="pendingConfirm.reqPreview" class="cp-reqprev">「{{ pendingConfirm.reqPreview }}…」</span>
-            </div>
-            <div class="cp-body">
-              <div class="cp-plan-title">{{ pendingConfirm.planTitle || '未命名方案' }}</div>
-              <div class="cp-goal">{{ pendingConfirm.planGoal || pendingConfirm.reason }}</div>
-              <ol class="cp-steps">
-                <li v-for="(s, i) in pendingConfirm.planSteps" :key="i">{{ s }}</li>
-              </ol>
-            </div>
-            <div class="cp-actions">
-              <button class="cp-btn cp-confirm" @click="resendConfirmed">✅ 确认并生成</button>
-              <button class="cp-btn cp-cancel" @click="showConfirmModal = false; pendingConfirm = null">取消</button>
-            </div>
-            <div class="cp-hint">如需调整，取消后在对话框直接补充要求并重新发送即可。</div>
-          </template>
-          <!-- 安全 / 删除确认 -->
-          <template v-else>
-            <div class="cp-title">
-              ⚠️ 安全确认
-              <span
-                class="cp-risk"
-                :class="pendingConfirm.riskLevel === 'high' ? 'risk-high' : 'risk-medium'"
-              >{{ pendingConfirm.riskLevel === 'high' ? '高风险' : '中风险' }}</span>
-            </div>
-            <div class="cp-body">
-              <div class="cp-goal">{{ pendingConfirm.reason }}</div>
-            </div>
+            <div class="cp-title">{{ (pendingConfirm.planSteps?.length ?? 0) > 0 ? '🏗️ 建站方案待确认' : '⚠️ 安全操作待确认' }}</div>
+            <div class="cp-hint">详细方案 / 安全原因已在上方的 AI 回复中展示，请确认是否继续。</div>
             <div class="cp-actions">
               <button class="cp-btn cp-confirm" @click="resendConfirmed">✅ 确认继续</button>
               <button class="cp-btn cp-cancel" @click="showConfirmModal = false; pendingConfirm = null">取消</button>
             </div>
-          </template>
           </div>
         </div>
         <div v-if="finished && !errorMsg && !blockReason" class="feedback">
@@ -2208,6 +2347,12 @@ class="clarify-confirm"
   border-radius: 14px;
   max-height: 360px;
   overflow: auto;
+}
+/* P2: 二次确认详情卡内嵌气泡时, 与上方轨迹做视觉分隔 */
+.confirm-card-in-bubble {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
 }
 /* COS 上传状态: 同一卡片内显示进度/失败, 与主轨迹视觉一致 */
 .cos-trail {
