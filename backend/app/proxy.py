@@ -733,6 +733,10 @@ async def chat(
     try:
         conv = await db.get(Conversation, conversation_id)
         project_id = conv.project_id if conv else None
+        # 关键修复: 将真实的 conv.project_id 回填进 payload, 否则 Worker 始终收不到
+        # project_id(3.4 的 project_memory 按 project_id 隔离检索无法生效, auto-start
+        # 会话尤其明显——会话已被挂在项目下但 project_id 一直是 None)。
+        payload["project_id"] = project_id
         if project_id:
             # 计算产物版本号(第几版): 该项目现有 artifact 数 + 1, 用于 COS 版本化(避免覆盖历史)
             try:
