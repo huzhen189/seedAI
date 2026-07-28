@@ -166,6 +166,45 @@ async def _gen_outline(model_id: str, messages: list) -> str:
         return ""
 
 
+async def _polish_doc(model_id: str, outline: str, body: str) -> str:
+    '''把大纲拼进正文首部, 让模型对「大纲 + 正文」整篇略作润色。
+
+    润色仅统一格式/标题层级、优化衔接过渡、修正笔误, 保持不变结构与信息。
+    失败/异常优雅降级: 直接把大纲拼到首部返回(用 H2 区块, 不抢占正文 H1), 不阻断主流程。
+    '''
+    head = '## 文档大纲\n\n' + outline.strip() + '\n\n---\n\n' if outline else ''
+    combined = head + body
+    try:
+        sys_polish = (
+            '你是技术文档润色助手。下面是一份文档：开头是 ## 文档大纲 区块，其后为完整正文。'
+            '请对整体略作润色——保持原有章节结构与全部信息不变，仅统一 Markdown 格式与标题层级、'
+            '优化章节衔接过渡、修正明显笔误与标点；不要增删章节、不要改写实质内容。'
+            '必须原样保留开头的 ## 文档大纲 区块（不得删除或移动），它作为文档目录需始终位于文首。'
+            '仅输出润色后的完整 Markdown，不要任何前言或解释。'
+        )
+        for mid in resolve_fallback_order(model_id):
+            try:
+                chat = get_chat_model(mid, streaming=False)
+                resp = await chat.ainvoke([
+                    {'role': 'system', 'content': sys_polish},
+                    {'role': 'user', 'content': combined},
+                ])
+                text = getattr(resp, 'content', None) or ''
+                text = text.strip()
+                if text:
+                    if outline and '文档大纲' not in text:
+                        GEN_LOG.warning('[doc] 润色输出丢失大纲区块, 强制拼回首部 model=%s', mid)
+                        return head + text
+                    GEN_LOG.info('[doc] 润色成功 model=%s chars=%s', mid, len(text))
+                    return text
+            except Exception as e:
+                GEN_LOG.warning('[doc] 润色失败 model=%s: %s', mid, e)
+        return combined
+    except Exception as e:
+        GEN_LOG.warning('[doc] 润色异常(降级为直接拼接): %s', e)
+        return combined
+
+
 async def generate_doc_skill(
     model_id: str,
     messages: list,
@@ -216,31 +255,38 @@ async def generate_doc_skill(
         yield ev("aborted")
         return
 
-    full_md = "".join(parts)
-    GEN_LOG.info("[doc] 完成 trace=%s chars=%s", trace_id, len(full_md))
-    # 校对格式阶段: 统一 Markdown 规范与排版(在投递产物前; COS 上传期间此步保持进行中)
-    yield ev("node", stage="doc_proofread")
-    # Fix B (#482): 把完整 Markdown 作为产物文件下发, 供 proxy 落库为 artifact(右侧面板预览/下载)
-    # 产物名按对话主题动态命名(首个 H1 / 用户请求), 而非固定 "开发文档.md"
-    if full_md.strip():
-        doc_name = _derive_doc_name(full_md, messages) + ".md"
+    raw_md = ''.join(parts)
+    GEN_LOG.info('[doc] 正文完成 trace=%s chars=%s', trace_id, len(raw_md))
+    # 产物名基于正文本体(raw_md)推导, 避免被拼入首部的大纲(用 H2, 不抢正文 H1)影响命名
+    if raw_md.strip():
+        doc_name = _derive_doc_name(raw_md, messages) + '.md'
+        # 校对格式 + 润色阶段: 把大纲拼进正文首部, 让模型对整篇「大纲+正文」略作润色
+        yield ev('node', stage='doc_proofread')
+        if outline:
+            yield ev(
+                'think', stage='doc_proofread',
+                content='正在对「大纲 + 正文」做整体润色：统一 Markdown 格式、优化章节衔接、修正笔误。',
+            )
+        full_md = await _polish_doc(model_id, outline, raw_md)
+        GEN_LOG.info('[doc] 润色后 trace=%s chars=%s', trace_id, len(full_md))
+        # Fix B (#482): 把完整 Markdown 作为产物文件下发, 供 proxy 落库为 artifact(右侧面板预览/下载)
         # md 也上传 COS(与站点产物一致: 版本化直链, 右侧可下载)
         cos_url = _upload_doc_to_cos(
             full_md, doc_name, trace_id=trace_id,
-            user_id=kwargs.get("user_id"),
-            project_id=kwargs.get("project_id"),
-            version=kwargs.get("version"),
+            user_id=kwargs.get('user_id'),
+            project_id=kwargs.get('project_id'),
+            version=kwargs.get('version'),
         )
         doc_data: Dict[str, Any] = {
-            "name": doc_name,
-            "content": full_md,
-            "size": len(full_md.encode("utf-8")),
+            'name': doc_name,
+            'content': full_md,
+            'size': len(full_md.encode('utf-8')),
         }
         if cos_url:
-            doc_data["url"] = cos_url
-        GEN_LOG.info("[doc] 产物名 trace=%s name=%s cos=%s", trace_id, doc_name, bool(cos_url))
-        yield ev("node", stage="doc_file", data=doc_data)
-    yield ev("node", stage="done")
+            doc_data['url'] = cos_url
+        GEN_LOG.info('[doc] 产物名 trace=%s name=%s cos=%s', trace_id, doc_name, bool(cos_url))
+        yield ev('node', stage='doc_file', data=doc_data)
+    yield ev('node', stage='done')
 
 
 register_skill(
