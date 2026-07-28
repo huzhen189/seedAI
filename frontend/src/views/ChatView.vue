@@ -455,19 +455,52 @@ function teardownScrollLoading() {
 }
 
 // ---- 自动滚动到底部(微信风格) ----
-let autoScroll = true  // 用户手动上滚后暂停自动滚动
-function scrollToBottom(smooth = true) {
+// 仅当用户本就贴在底部时才自动追随新内容; 用户上滚看历史时保持原位不滚动。
+const BOTTOM_THRESHOLD = 48 // 距底 <= 该值视为"贴底"(宽容亚像素/差一截)
+let autoScroll = true // 用户手动上滚离开底部后暂停自动追底
+let suppressScrollHandler = false // 程序触发滚动期间抑制 onConvScroll 误改写 autoScroll
+let rafScrollId = 0
+
+function isAtBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_THRESHOLD
+}
+
+// force=true: 进入/切换会话、自己发消息等离散事件, 无视是否贴底都滚到底;
+// force=false: 流式内容增量, 仅当用户当前贴底才跟随(用户正在看中间则不滚动)。
+function scrollToBottom(smooth = true, force = false) {
   const el = convRef.value
   if (!el) return
-  nextTick(() => {
-    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'instant' })
-  })
+  if (!force && !isAtBottom(el)) {
+    autoScroll = false
+    return
+  }
+  autoScroll = true
+  suppressScrollHandler = true
+  cancelAnimationFrame(rafScrollId)
+  const startHeight = el.scrollHeight
+  // 平滑定位(离散事件)或瞬间贴合(流式中途)
+  el.scrollTo({ top: startHeight, behavior: smooth ? 'smooth' : 'instant' })
+  // rAF 补偿异步渲染(图片/Markdown/代码高亮)导致的高度增长, 直到真正贴底,
+  // 仅在内容确实又长高时才用 instant 追底, 绝不打断 smooth 动画本身。
+  const compensate = () => {
+    const target = el.scrollHeight
+    if (target > startHeight + 1 && el.scrollTop + el.clientHeight < target - 1) {
+      el.scrollTo({ top: target, behavior: 'instant' })
+      rafScrollId = requestAnimationFrame(compensate)
+    } else {
+      // 内容未增长: 让 smooth 动画自然收尾; 已贴底则直接定位确保无亚像素差
+      if (isAtBottom(el)) el.scrollTop = target
+      suppressScrollHandler = false
+    }
+  }
+  rafScrollId = requestAnimationFrame(compensate)
 }
+
 function onConvScroll() {
   const el = convRef.value
-  if (!el) return
-  // 距底部 > 80px 视为用户手动上滚, 暂停自动追底
-  autoScroll = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  if (!el || suppressScrollHandler) return
+  // 用户手动滚动: 距底部 > 阈值 视为上滚看历史, 暂停自动追底; 滚回底部则恢复跟随
+  autoScroll = isAtBottom(el)
 }
 
 async function loadArtifacts() {
@@ -698,13 +731,30 @@ const auth = useAuth()
 const projectStore = useProjectStore()
 const convStore = useConversationStore()
 
-// 当有新消息时自动追底(除非用户手动上滚查看历史)
-watch(() => convStore.messages.length, () => {
-  if (autoScroll) scrollToBottom(true)
-})
-// 生成中 token 持续追加也追底
+// 仅当当前会话(被渲染为真实 DOM 的会话)的消息数变化时才可能追底,
+// 避免激活历史折叠会话时其子列表突变误触发当前列表滚动。
+function currentConvHasContent(): boolean {
+  return convStore.currentConvId != null &&
+    allSessions.value.some((s) => s.conv.id === convStore.currentConvId && s.msgs.length > 0)
+}
+
+// 新消息/节点步骤等离散出现 → 跟随滚动(用户贴底才跟, 看中间不动)
+watch(
+  () => (currentConvHasContent() ? convStore.messages.length : -1),
+  () => {
+    if (autoScroll) scrollToBottom(true, false)
+  },
+)
+// 内容持续增量(任意气泡 token 追加 / 长文非 build 意图 / 子任务泳道): content 变化即触发
+watch(
+  () => (currentConvHasContent() ? convStore.messages.map((m) => m.content.length).join(',') : ''),
+  () => {
+    if (autoScroll && generating.value) scrollToBottom(false, false)
+  },
+)
+// 生成中 builder 的 HTML 预览增量也跟随
 watch(generatedHtml, () => {
-  if (autoScroll && generating.value) scrollToBottom(false)
+  if (autoScroll && generating.value) scrollToBottom(false, false)
 })
 
 // 所有会话统一消息流(微信风格: 最老的在上方, 最新的在最下方)
@@ -1867,7 +1917,7 @@ watch(
       await convStore.loadConversations(projectStore.currentProjectId)
       convStore.pendingConvId = null
       autoScroll = true
-      scrollToBottom(false)
+      scrollToBottom(false, true)
       await maybeResume()
     }
   },
