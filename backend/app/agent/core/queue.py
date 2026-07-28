@@ -358,6 +358,9 @@ class QueueBackend:
     async def clear_pause(self, trace_id: str) -> None:
         raise NotImplementedError
 
+    async def clear_cancel(self, trace_id: str) -> None:
+        raise NotImplementedError
+
 
 class MemoryBackend(QueueBackend):
     def __init__(self):
@@ -437,6 +440,9 @@ class MemoryBackend(QueueBackend):
 
     async def clear_pause(self, trace_id: str) -> None:
         self._pause.pop(trace_id, None)
+
+    async def clear_cancel(self, trace_id: str) -> None:
+        self._cancel.discard(trace_id)
 
 
 class RedisBackend(QueueBackend):
@@ -591,6 +597,12 @@ class RedisBackend(QueueBackend):
 
     async def set_cancel(self, trace_id: str) -> None:
         await self._r.set(f"cancel:{trace_id}", "1", ex=3600)
+
+    async def clear_cancel(self, trace_id: str) -> None:
+        try:
+            await self._r.delete(f"cancel:{trace_id}")
+        except Exception:
+            pass
 
     async def is_paused(self, trace_id: str) -> "str | None":
         try:
@@ -1043,6 +1055,12 @@ async def worker_loop(concurrency: int = 1):
                             original_query=user_text,
                             project_system_prompt=proj_prompt,
                             project_constraints=proj_constraints,
+                            # 断点续跑(G5): 多意图拆分后, 顶层 resume 的 checkpoint(建站子任务的
+                            # await_confirm 计划)必须下传到子任务 skill, 否则 sub_0(generate_site)
+                            # 收不到、会重新走需求确认再次 paused, 永远产不出 preview。
+                            # 非建站子任务(如天气)忽略该参数, 无副作用。
+                            checkpoint=job.get("checkpoint"),
+                            resume_mode=job.get("resume_mode", "resume"),
                         ):
                             if event.get("event") == "done":
                                 done_event = event
@@ -1142,6 +1160,20 @@ async def worker_loop(concurrency: int = 1):
                         continue
 
                 # 5) 正常路由 / fallback / 已确认 / 已选项 → 直接执行
+                # §方案B P0: 单意图也进入角色编排层(上下文隔离 + 强交接物捕获),
+                # 与多意图共用同一套角色注入逻辑,消除"单/多两套逻辑"观感。
+                try:
+                    from ..roles.handoff import ROLE_ORCHESTRATOR_ENABLED as _ROE, map_skill_to_role as _m2r
+                    from ..roles.orchestrator import get_role_agent as _get_agent
+                    _role = _m2r(skill_name) if _ROE else None
+                    _agent = _get_agent(_role) if _role else None
+                    _enriched_messages = _agent.inject_context(messages, None) if _agent else messages
+                    if _agent is not None:
+                        logger.info("[Worker] [5/6] 单意图启用角色上下文 role=%s skill=%s", _agent.label, skill_name)
+                except Exception as _re_e:  # noqa: BLE001
+                    logger.debug("[Worker] 角色上下文注入失败(忽略,降级直跑) skill=%s: %s", skill_name, _re_e)
+                    _agent = None
+                    _enriched_messages = messages
                 logger.info("[Worker] [5/6] 路由执行 skill=%s decision=%s doc=%s status=%s confirmed=%s (+%.0fms)",
                            skill_name, decision, "有" if doc else "无", proj_status, confirmed,
                            (time.time() - t_job) * 1000)
@@ -1152,6 +1184,7 @@ async def worker_loop(concurrency: int = 1):
                         qc_user_text = m.get("content", "") or ""
                         break
                 qc_assistant_buf: list[str] = []
+                artifacts: list[str] = []
                 done_event: dict | None = None
                 review_needs = False
                 # 生成阶段耗时统计: 记录进入各阶段的时间戳(供 record_gen_stage 算时长)
@@ -1160,7 +1193,7 @@ async def worker_loop(concurrency: int = 1):
                 last_stage: str | None = None
                 last_ck: tuple | None = None
                 async for event in run_skill(
-                    skill_name, model_id, messages,
+                    skill_name, model_id, _enriched_messages,
                     trace_id=trace_id, is_cancelled=_cancelled,
                     intent_info=intent,
                     requirement_doc=doc,
@@ -1187,6 +1220,10 @@ async def worker_loop(concurrency: int = 1):
                         data = event.get("data", "")
                         if isinstance(data, str):
                             qc_assistant_buf.append(data)
+                    if event.get("event") == "preview" and isinstance(event.get("data"), dict):
+                        _pu = event["data"].get("url")
+                        if _pu:
+                            artifacts.append(_pu)
                     # 生成阶段进入埋点: node(stage=enter_planner|enter_coder|enter_reviewer|previewing)
                     # 仅记录「首次进入该阶段」的耗时基准, 阶段耗时统计走 record_gen_stage。
                     if event.get("event") == "node" and skill_name in ("agent_build", "agent_generate_site"):
@@ -1213,6 +1250,20 @@ async def worker_loop(concurrency: int = 1):
                         break
                 if paused:
                     continue
+                # §方案B P0: 单意图角色强交接物捕获 + 入参/出参日志(与多意图对齐)
+                if _agent is not None:
+                    try:
+                        _hf = _agent.capture_handoff(qc_assistant_text, artifacts)
+                        if _hf is not None:
+                            _agent.log_io(
+                                skill_name, model_id,
+                                input_summary=f"single_intent skill={skill_name}",
+                                status="done",
+                                output_summary=_hf.summary[:120],
+                                duration_ms=int((time.time() - t_job) * 1000),
+                            )
+                    except Exception as _hf_e:  # noqa: BLE001
+                        logger.debug("[Worker] 单意图交接物捕获失败(忽略): %s", _hf_e)
                 # ── [6/6] 后置 QC 三裁判(按需触发) ──
                 # 生成类技能: 仅当 reviewer 标记 needs_review 才跑三裁判(省 LLM 成本)。
                 # 闲聊(agent_chat) 无 reviewer, 始终 QC 兜底以保证对话质量 + 支撑低分重答(Phase D)。

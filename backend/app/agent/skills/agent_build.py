@@ -404,11 +404,12 @@ def _req_doc_to_text(doc: dict) -> str:
 
 
 def _select_requirement(requirement_doc, conversation_summary, messages):
-    """从 需求文档 → 对话摘要 → 最近含需求语义的用户消息 挑选最优需求文本。
+    """从 需求文档 → 含建站/内容语义的用户消息 → 对话摘要 挑选最优需求文本。
 
-    返回 (text, source)。修复 RC1: 当用户说"按我刚刚的要求生成网站"时,
-    必须取对话里真正描述需求的消息(如"首页天气+附近美食+地图定位"),
-    而不是首条闲聊(如"今天天气怎么样")。
+    返回 (text, source)。修复 RC1: 把"含建站/内容语义的用户消息"提到
+    conversation_summary 之前 —— 对话摘要是 LLM 有损压缩, 可能丢消息/变空,
+    不能作为需求真相源; 仅当没有候选, 或候选极短(如纯指令"帮我做个网站")时,
+    才用 conversation_summary 补充上下文。
     """
     # 1) 结构化需求文档(最权威)
     if isinstance(requirement_doc, dict) and requirement_doc:
@@ -416,23 +417,31 @@ def _select_requirement(requirement_doc, conversation_summary, messages):
         if isinstance(report, str) and report.strip():
             return report.replace("\\n", "\n"), "requirement_doc"
         return _req_doc_to_text(requirement_doc), "requirement_doc"
-    # 2) 对话摘要(business 层 get_summary 产出)
-    if isinstance(conversation_summary, str) and conversation_summary.strip():
-        return conversation_summary.strip(), "conversation_summary"
-    # 3) 从消息里找"含建站语义且内容最丰富"的用户消息(排除纯指令句如"帮我做个网站")
+    # 2) 从消息里找"含建站或内容语义"的用户消息(放宽: 命中任一类关键词即入选,
+    #    但纯内容词需 >=2 个, 避免 "今天天气怎么样" 这类单发闲聊被误判为需求)
     candidates = []
     for m in messages:
         if m.get("role") != "user":
             continue
         c = m.get("content") or ""
-        if not isinstance(c, str):
+        if not isinstance(c, str) or not c.strip():
             continue
-        if any(kw in c for kw in _BUILD_KW):
-            score = sum(1 for kw in _CONTENT_KW if kw in c) * 2 + len(c) // 40
+        has_build = any(kw in c for kw in _BUILD_KW)
+        content_hits = sum(1 for kw in _CONTENT_KW if kw in c)
+        # 入选条件: 含建站词, 或含 >=2 个内容词(避免单发闲聊被误判)
+        if has_build or content_hits >= 2:
+            score = (10 if has_build else 0) + content_hits * 3 + len(c) // 20
             candidates.append((c, score))
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
-        return candidates[0][0], "user_message"
+        best = candidates[0][0]
+        # 纯指令句(如"帮我做个网站", 长度<12)无具体内容, 用摘要补充上下文
+        if len(best) < 12 and isinstance(conversation_summary, str) and conversation_summary.strip():
+            return conversation_summary.strip(), "conversation_summary"
+        return best, "user_message"
+    # 3) 兜底: 对话摘要(可能有损, 但比无中生有强)
+    if isinstance(conversation_summary, str) and conversation_summary.strip():
+        return conversation_summary.strip(), "conversation_summary"
     # 4) 兜底: 最后一条用户消息
     for m in reversed(messages):
         if m.get("role") == "user":

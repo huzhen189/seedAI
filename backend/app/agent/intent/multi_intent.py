@@ -35,6 +35,7 @@ from .common import (
     SAFETY_HARD_KEYWORDS,
     SAFETY_SOFT_CRITICAL,
     SAFETY_SOFT_HIGH,
+    _BUILD_KW,
 )
 from .tools import resolve_skill
 from ..analytics import record_multi_intent_path
@@ -54,6 +55,11 @@ _GATE_KEYWORDS: dict[str, list[str]] = {
     "design": ["配色", "设计风格", "布局建议", "字体推荐", "动效方案"],
     "search": ["搜索", "查一下", "帮我查", "最新", "最近有什么"],
 }
+
+# 确定性建站兜底: 含建站名词 + 建站动作动词的片段, 强制走生成站管线,
+# 避免 LLM 片段分类偶发把「帮我做个网站」误判为闲聊(导致只口头生成、无 preview)。
+_SITE_BUILD_VERBS = ("做", "做一个", "做个", "生成", "创建一个", "建", "搭建", "帮我做",
+                     "帮我生成", "帮我建", "制作", "开发", "搞个", "写个站", "出个站", "整一个")
 
 # 多意图强触发词(并列/顺接连词): 命中即进混合分层,
 # 不再要求命中 ≥2 意图大类(防止 13/14/19 多意图漏召回的主因)。
@@ -107,7 +113,7 @@ _SPLIT_BEFORE = (
     "一方面", "另一方面", "以及", "加上", "然后", "接着", "之后", "随后",
     "先", "再", "最后", "步骤",
 )
-_SPLIT_RE = re.compile(r"(?<=[\u4e00-\u9fff])(" + "|".join(_SPLIT_BEFORE) + r")")
+_SPLIT_RE = re.compile(r"(?<=[\u4e00-\u9fff，,；;])(" + "|".join(_SPLIT_BEFORE) + r")")
 _CUE_LEAD_RE = re.compile(
     r"^(另外|同时|并且|还有|此外|顺便|顺带|一方面|另一方面|以及|加上|"
     r"然后|接着|之后|随后|先|再|最后|步骤\s*\d+)"
@@ -202,13 +208,24 @@ async def split_hybrid(
             intent = pr.intent
             l1 = intent.get("level1", "chat")
             l2 = intent.get("level2", "casual")
+            skill = pr.selected_skill
             industry = intent.get("industry", base_industry) or base_industry
             if industry not in VALID_INDUSTRIES:
                 industry = "other"
+
+            # ── 确定性建站兜底: 含建站名词 + 建站动作 → 强制生成站管线 ──
+            seg_txt = seg["text"]
+            if any(kw in seg_txt for kw in _BUILD_KW) and any(
+                vb in seg_txt for vb in _SITE_BUILD_VERBS
+            ):
+                l1, l2, skill = "build", "site", "agent_generate_site"
+                logger.info("[方案B] 片段命中建站兜底 → skill=agent_generate_site (%s)",
+                            seg_txt[:40])
+
             classified.append({
                 "text": seg["text"], "cue": seg["cue"],
                 "l1": l1, "l2": l2, "industry": industry,
-                "skill": pr.selected_skill,
+                "skill": skill,
                 "conf": float(intent.get("confidence", 0.3)),
             })
         except Exception as e:  # noqa: BLE001

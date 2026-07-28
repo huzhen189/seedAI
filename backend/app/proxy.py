@@ -48,7 +48,7 @@ from .config import settings
 from .db import get_db
 from .metrics import consume_daily_quota, record_model_usage, record_model_tokens, record_api_latency, record_unsupported
 from .models import Artifact, Conversation, Message, Project, Trace, User
-from .repos.business_repos import conv_repo, message_repo
+from .repos.business_repos import conv_repo, message_repo, artifact_repo
 from .repos.trace_repos import feedback_repo, qc_score_repo, trace_repo
 from .schemas import FeedbackReq
 from .security import ACCESS_COOKIE, CurrentUser, _set_access_cookie, create_access_token, decode_token, get_current_user
@@ -397,7 +397,10 @@ async def get_summary(conversation_id: int) -> str:
 
 
 async def save_summary(conversation_id: int, text: str) -> None:
-    """写入对话摘要, TTL 由 settings.conversation_summary_ttl 控制(默认30min滑动窗口)"""
+    """写入对话摘要, TTL 由 settings.conversation_summary_ttl 控制(默认30min滑动窗口)。
+    防御: 不允许写入空串(LLM 可能返回空摘要), 空串直接跳过, 避免覆盖成空。"""
+    if not text or not text.strip():
+        return
     try:
         r = await get_redis()
         await r.setex(f"summary:{conversation_id}", settings.conversation_summary_ttl, text[:1000])
@@ -420,6 +423,7 @@ async def maybe_compress_summary(conversation_id: int, model: str, latest_user: 
             async with httpx.AsyncClient(timeout=15) as client:
                 compress_prompt = (
                     "把对话压缩成 ≤200字 摘要(主题/决策/进度)。\n"
+                    "必须保留用户明确提出的网站类型/页面/功能需求原文, 不要丢弃或概括掉关键诉求。\n"
                     f"旧摘要: {old_summary or '(无)'}\n"
                     f"用户: {latest_user[:300]}\nAI: {latest_assistant[:500]}\n新摘要: "
                 )
@@ -430,7 +434,13 @@ async def maybe_compress_summary(conversation_id: int, model: str, latest_user: 
                           "max_tokens": 200, "temperature": 0.3},
                 )
                 data = resp.json()
-                new_summary = data["choices"][0]["message"]["content"].strip()
+                new_summary = (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+                if not new_summary:
+                    # 不允许空摘要覆盖: 回退到旧摘要, 旧摘要也为空则用最新用户消息兜底
+                    new_summary = (old_summary or latest_user or "").strip()[:1000]
+                    if not new_summary:
+                        logger.warning("[chat] 摘要压缩结果为空, 跳过写入 conv=%s", conversation_id)
+                        return
                 await save_summary(conversation_id, new_summary)
                 logger.info("[chat] 对话摘要已更新 conv=%s len=%d", conversation_id, len(new_summary))
         except Exception as e:
@@ -813,6 +823,8 @@ async def chat(
         # 才置 cancel:<tid>, 避免刷新/多标签时旧连接误伤仍在使用同一 trace_id 的新连接(回放)。
         conn_id = uuid.uuid4().hex
         saw_terminal = False  # 是否已收到终止事件(done/aborted/error/unsupported/paused)
+        _paused_locked = False  # 多意图修复: 命中 await_confirm 暂停后锁死 terminal_status=paused,
+                                # 避免其他子任务跑完使整条流以 done 收尾, 把刚存的断点 ck 误删(续跑丢断点)
         try:
             r0 = await get_redis()
             before = await r0.scard(f"clients:{tid}")
@@ -872,7 +884,10 @@ async def chat(
                         # v4: 续跑前清暂停 + 杀掉可能存活的老 Worker(避免双 Worker 并发), 再重新入队
                         try:
                             await q.clear_pause(tid)
-                            await q.set_cancel(tid)
+                            await q.set_cancel(tid)   # 仅用于通知可能存活的老 Worker 停止
+                            await q.clear_cancel(tid) # 必须在 enqueue 之前清除, 否则新 run 复用同一
+                                                     # trace_id 入队后一查 is_cancelled 即命中,
+                                                     # 导致所有子任务被误标 skipped(建站/天气全空跑)。
                         except Exception as _cp_e:  # noqa: BLE001
                             logger.warning("[chat] clear_pause/set_cancel 失败(忽略) trace=%s: %s", tid, _cp_e)
                         # v4: 状态翻回 running(从断点续跑)
@@ -1023,6 +1038,11 @@ async def chat(
                                             pending_decision="continue_instruction",
                                             current_stage=(payload_obj or {}).get("stage"),
                                         )
+                                        # 多意图修复: 方案确认暂停已落断点 → 锁死终态为 paused,
+                                        # 即便 orchestrator 其他子任务跑完 emit done 使整条流收尾,
+                                        # 也不覆盖(否则 finally 的 ck_delete 会把 await_confirm 断点删掉,
+                                        # 续跑 ck_get 为空、永远产不出 preview)。done 仍照常转发给前端关闭流。
+                                        _paused_locked = True
                                     elif event == "intent" and isinstance(payload_obj, dict):
                                         # 两级意图记录(供管理后台系统分析)
                                         l1 = payload_obj.get("level1") or payload_obj.get("intent") or "unknown"
@@ -1068,16 +1088,23 @@ async def chat(
                                     elif event == "done":
                                         # 正常完成: 标记已见终止事件, finally 不再触发自动取消
                                         saw_terminal = True
-                                        terminal_status = "done"
-                                        # v4: 正常完成 → user_states 翻 done, 清暂停标记
-                                        await touch_user_state(
-                                            user.id,
-                                            status="done",
-                                            current_stage="done",
-                                            progress_pct=100,
-                                            pause_reason=None,
-                                            pending_decision=None,
-                                        )
+                                        # 多意图修复: 若此前命中 await_confirm 暂停并锁死 paused,
+                                        # 则本 done(其他子任务正常收尾)不覆盖终态 —— 仍转发给前端
+                                        # 让流正常关闭, 但保留 paused 终态以保住断点(避免 ck_delete)。
+                                        if not _paused_locked:
+                                            terminal_status = "done"
+                                            # v4: 正常完成 → user_states 翻 done, 清暂停标记
+                                            await touch_user_state(
+                                                user.id,
+                                                status="done",
+                                                current_stage="done",
+                                                progress_pct=100,
+                                                pause_reason=None,
+                                                pending_decision=None,
+                                            )
+                                        else:
+                                            logger.info(
+                                                "[chat] done 被 paused 锁抑制(多意图方案确认仍生效) trace=%s", tid)
                                     logger.info(
                                             "[chat] ◇ SSE #%d type=%s stage=%s data=%.200s",
                                             event_seq, event, stage or "-", data,

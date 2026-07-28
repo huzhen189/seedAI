@@ -28,7 +28,7 @@ QC_DIM_LABELS = {
     "correctness": "正确性", "completeness": "完整性", "compliance": "合规性",
     "efficiency": "效率", "readability": "可读性", "safety": "安全性",
 }
-from .orchestrator import run_scale, run_start, run_stop
+from .deployment import run_scale, run_start, run_stop
 from .schemas import AdminUserResp, SetPlanReq, SetRoleReq
 from .security import (
     ROLE_ADMIN,

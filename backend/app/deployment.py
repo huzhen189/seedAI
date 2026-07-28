@@ -1,4 +1,4 @@
-"""控制面 Orchestrator(⑥-b):真实调用本地 docker compose 执行启停/扩缩容,并返回执行日志。
+"""控制面部署编排(⑥-b):真实调用本地 docker compose 执行启停/扩缩容,并返回执行日志。
 
 安全约束:
   - 仅由 `require_super_admin` 守卫的端点调用(admin.py)。
@@ -13,7 +13,7 @@ import logging
 import shlex
 
 
-logger = logging.getLogger("business.orchestrator")
+logger = logging.getLogger("business.deployment")
 
 # 受控服务白名单(防止对任意服务名执行 docker 操作)
 ALLOWED_SERVICES = {"business", "ai-service", "frontend", "mysql", "redis", "chroma"}

@@ -196,8 +196,11 @@ async def reset_user_state(user_id: int) -> None:
             if row is not None:
                 row.status = "idle"
                 for f in _RESET_FIELDS:
-                    if hasattr(row, f):
-                        setattr(row, f, None)
+                    if not hasattr(row, f):
+                        continue
+                    # progress_pct 是 NOT NULL 列, 不能置 None(会触发 IntegrityError),
+                    # 重置为 0 表示无进度; 其余字段可置空以清除指向已死 Worker 的脏值。
+                    setattr(row, f, 0 if f == "progress_pct" else None)
                 await s.commit()
     except Exception as e:  # noqa: BLE001
         logger.warning("[user_state] reset MySQL 失败 uid=%s: %s", user_id, e)

@@ -155,17 +155,25 @@ INDUSTRY_DESIGN: dict[str, str] = {
 
 
 def _chat(model_id: str, system: str, user_msgs: list) -> str:
-    """同步调用模型(Planner/Reviewer)。失败时不自动降级,抛 ModelUnavailableError 让前端选替代。"""
-    try:
-        chat = get_chat_model(model_id, streaming=False)
-        resp = chat.invoke([{"role": "system", "content": system}, *user_msgs])
-        return resp.content
-    except Exception as e:
-        order = resolve_fallback_order(model_id)
-        suggested = [m for m in order if m != model_id]
-        raise ModelUnavailableError(
-            failed=model_id, message=f"模型 {model_id} 不可用: {e}", suggested=suggested
-        ) from e
+    """同步调用模型(Planner/Reviewer)。主模型失败按 FALLBACK_ORDER 自动降级到下一可用模型,
+    全部失败才抛 ModelUnavailableError。避免 deepseek 瞬时抖动导致短调用(规划/评审)直接中断整轮生成。"""
+    from ..providers import resolve_fallback_order, PROVIDERS
+    order = resolve_fallback_order(model_id)
+    last_err: Exception | None = None
+    for mid in order:
+        try:
+            chat = get_chat_model(mid, streaming=False)
+            if mid != model_id:
+                logger.warning("[gen] _chat 降级: %s 不可用, 改用 %s", model_id, mid)
+            resp = chat.invoke([{"role": "system", "content": system}, *user_msgs])
+            return resp.content
+        except Exception as e:
+            last_err = e
+            continue
+    suggested = [m for m in order if m != model_id and m in PROVIDERS and PROVIDERS[m].api_key]
+    raise ModelUnavailableError(
+        failed=model_id, message=f"模型 {model_id} 不可用: {last_err}", suggested=suggested
+    ) from last_err
 
 
 async def _cancelled_now(fn) -> bool:
@@ -336,9 +344,13 @@ def _deliver(html: str, trace_id: str, user_id: int | None = None,
             res = cos_upload(str(site_dir), cos_key)
             if res.get("ok") and res.get("url"):
                 result_urls[fname] = res["url"]
+            else:
+                # 诊断可见性: 投递失败必须留痕, 否则 preview 空了无从查起(本次踩坑: 缺 cos SDK 被静默吞)
+                GEN_LOG.warning("[deliver] COS 投递未返回 URL trace=%s file=%s cos_key=%s res=%s",
+                                trace_id, fname, cos_key, res)
 
-    except Exception:
-        pass
+    except Exception as e:
+        GEN_LOG.warning("[deliver] 本地落盘/COS 投递异常 trace=%s: %s", trace_id, e)
     return result_urls
 
 
@@ -454,11 +466,12 @@ def _req_doc_to_text(doc: dict) -> str:
 
 
 def _select_requirement(requirement_doc, conversation_summary, messages):
-    """从 需求文档 → 对话摘要 → 最近含需求语义的用户消息 挑选最优需求文本。
+    """从 需求文档 → 含建站/内容语义的用户消息 → 对话摘要 挑选最优需求文本。
 
-    返回 (text, source)。修复 RC1: 当用户说"按我刚刚的要求生成网站"时,
-    必须取对话里真正描述需求的消息(如"首页天气+附近美食+地图定位"),
-    而不是首条闲聊(如"今天天气怎么样")。
+    返回 (text, source)。修复 RC1: 把"含建站/内容语义的用户消息"提到
+    conversation_summary 之前 —— 对话摘要是 LLM 有损压缩, 可能丢消息/变空,
+    不能作为需求真相源; 仅当没有候选, 或候选极短(如纯指令"帮我做个网站")时,
+    才用 conversation_summary 补充上下文。
     """
     # 1) 结构化需求文档(最权威)
     if isinstance(requirement_doc, dict) and requirement_doc:
@@ -466,23 +479,31 @@ def _select_requirement(requirement_doc, conversation_summary, messages):
         if isinstance(report, str) and report.strip():
             return report.replace("\\n", "\n"), "requirement_doc"
         return _req_doc_to_text(requirement_doc), "requirement_doc"
-    # 2) 对话摘要(business 层 get_summary 产出)
-    if isinstance(conversation_summary, str) and conversation_summary.strip():
-        return conversation_summary.strip(), "conversation_summary"
-    # 3) 从消息里找"含建站语义且内容最丰富"的用户消息(排除纯指令句如"帮我做个网站")
+    # 2) 从消息里找"含建站或内容语义"的用户消息(放宽: 命中任一类关键词即入选,
+    #    但纯内容词需 >=2 个, 避免 "今天天气怎么样" 这类单发闲聊被误判为需求)
     candidates = []
     for m in messages:
         if m.get("role") != "user":
             continue
         c = m.get("content") or ""
-        if not isinstance(c, str):
+        if not isinstance(c, str) or not c.strip():
             continue
-        if any(kw in c for kw in _BUILD_KW):
-            score = sum(1 for kw in _CONTENT_KW if kw in c) * 2 + len(c) // 40
+        has_build = any(kw in c for kw in _BUILD_KW)
+        content_hits = sum(1 for kw in _CONTENT_KW if kw in c)
+        # 入选条件: 含建站词, 或含 >=2 个内容词(避免单发闲聊被误判)
+        if has_build or content_hits >= 2:
+            score = (10 if has_build else 0) + content_hits * 3 + len(c) // 20
             candidates.append((c, score))
     if candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
-        return candidates[0][0], "user_message"
+        best = candidates[0][0]
+        # 纯指令句(如"帮我做个网站", 长度<12)无具体内容, 用摘要补充上下文
+        if len(best) < 12 and isinstance(conversation_summary, str) and conversation_summary.strip():
+            return conversation_summary.strip(), "conversation_summary"
+        return best, "user_message"
+    # 3) 兜底: 对话摘要(可能有损, 但比无中生有强)
+    if isinstance(conversation_summary, str) and conversation_summary.strip():
+        return conversation_summary.strip(), "conversation_summary"
     # 4) 兜底: 最后一条用户消息
     for m in reversed(messages):
         if m.get("role") == "user":
@@ -520,6 +541,22 @@ async def generate_stream(
     req_text, req_source = _select_requirement(requirement_doc, conversation_summary, messages)
     first_user_msg = req_text or (messages[-1].get("content", "") if messages else "")
     GEN_LOG.info("[gen] 需求来源=%s 长度=%d trace=%s", req_source, len(req_text), trace_id)
+
+    # ② 需求闸门(修复 RC2): 选中需求为空, 或无建站语义且无摘要时, 不发"垃圾站",
+    #    直接 clarify 早退, 引导用户补充明确需求。
+    _has_site = any(kw in req_text for kw in _BUILD_KW)
+    _summary_ok = isinstance(conversation_summary, str) and conversation_summary.strip()
+    if not req_text.strip() or (not _has_site and not _summary_ok):
+        GEN_LOG.warning(
+            "[gen] 需求闸门拦截 trace=%s source=%s has_site=%s: 需求为空或无建站语义, 转 clarify",
+            trace_id, req_source, _has_site,
+        )
+        yield ev(
+            "clarify",
+            questions=["为了给您生成合适的网站，请补充一下需求～"],
+            freeTextHint="可以告诉我：网站类型 / 主要页面 / 核心功能 / 行业风格。例如：做一个XX品牌官网，需要首页、产品列表、关于我们。",
+        )
+        return
 
     # 断点恢复入口(§7): 跳过已完成阶段
     if checkpoint:
@@ -674,7 +711,9 @@ async def generate_stream(
             plan_title=plan.get("title", ""),
             plan_goal=plan.get("goal", ""),
             plan_steps=plan.get("steps", []),
-            content="已根据您的需求生成建站方案，确认后开始设计与开发。点击「确认并生成」，或直接回复「开始生成 / 帮我做网站」即可。",
+            req_source=req_source,
+            req_preview=req_text[:80],
+            content=f"已根据您的需求(来源: {req_source})生成建站方案，确认后开始设计与开发。点击「确认并生成」，或直接回复「开始生成 / 帮我做网站」即可。",
             cta_label="确认并生成",
         )
         # 暂停, 等待前端发起 resume/confirm 续接。

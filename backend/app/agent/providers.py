@@ -139,31 +139,54 @@ def get_chat_model(model_id: str, streaming: bool = True) -> ChatOpenAI:
 async def astream_with_fallback(
     primary: str, messages: list, system: str | None = None
 ) -> AsyncGenerator:
-    """流式生成,仅使用主模型;失败 1 次自动重连,仍失败抛 ModelUnavailableError。
+    """流式生成,主模型优先;瞬时失败自动重连,主模型持续不可用时按 FALLBACK_ORDER 自动降级到下一可用模型。
 
-    前端收到 retry 事件后弹框让用户选择替代模型,确认后重新发起请求——以此替代自动降级。
+    设计权衡(修复 deepseek 长链路频繁瞬时掉线导致整轮生成中断):
+      - 主模型先重试 1 次(应对瞬时抖动);
+      - 仍失败则遍历 FALLBACK_ORDER 中其余「已配 key」的模型,每个尝试 1 次;
+      - 任一模型成功流完即返回,并在首个 chunk 标注实际使用的模型(degraded 信号由调用方决定);
+      - 全部失败才抛 ModelUnavailableError(前端再弹切换框)。
+    这样「建站/代码生成」这类长任务不再因单点模型抖动而前功尽弃。
     """
-    for attempt in range(2):
-        try:
-            logger.info("LLM 调用 model=%s attempt=%d streaming=True", primary, attempt + 1)
-            chat = get_chat_model(primary, streaming=True)
-            msgs = ([{"role": "system", "content": system}] if system else []) + messages
-            async for chunk in chat.astream(msgs):
-                yield chunk, primary
-            return  # 正常结束
-        except (GeneratorExit, ConnectionResetError, ConnectionError) as e:
-            if attempt == 0:
-                logger.warning("LLM 连接中断, 1s 后重试(%s/2): %s", attempt + 1, e)
-                await asyncio.sleep(1)
-                continue
-            break
-        except Exception as e:
-            break
-    # 重试耗尽 → 抛 ModelUnavailableError
     order = resolve_fallback_order(primary)
+    # 构造 (模型id, 是否主模型) 尝试序列:主模型优先,失败再按降级序
+    plan: List[tuple[str, bool]] = [(primary, True)]
+    for m in order:
+        if m != primary:
+            plan.append((m, False))
+
+    last_err: Exception | None = None
+    # 主模型: 允许 1 次瞬时重连
+    first = True
+    for mid, is_primary in plan:
+        attempts = 2 if is_primary else 1
+        for attempt in range(attempts):
+            try:
+                logger.info("LLM 调用 model=%s attempt=%d streaming=True", mid, attempt + 1)
+                chat = get_chat_model(mid, streaming=True)
+                msgs = ([{"role": "system", "content": system}] if system else []) + messages
+                emitted = False
+                async for chunk in chat.astream(msgs):
+                    if not emitted:
+                        if not is_primary:
+                            logger.warning("LLM 降级生效: %s 不可用, 改用 %s", primary, mid)
+                        emitted = True
+                    yield chunk, mid
+                return  # 正常流完
+            except (GeneratorExit, ConnectionResetError, ConnectionError) as e:
+                last_err = e
+                if attempt < attempts - 1:
+                    logger.warning("LLM 连接中断, 1s 后重试(%s/%s): %s", attempt + 1, attempts, e)
+                    await asyncio.sleep(1)
+                    continue
+                break
+            except Exception as e:
+                last_err = e
+                break
+    # 全部模型均失败 → 抛 ModelUnavailableError(前端弹切换框)
     suggested = [m for m in order if m != primary and m in PROVIDERS and PROVIDERS[m].api_key]
     raise ModelUnavailableError(
         failed=primary,
-        message=f"模型 {primary} 不可用",
+        message=f"模型 {primary} 不可用(已尝试降级序 {order})",
         suggested=suggested,
-    )
+    ) from last_err
