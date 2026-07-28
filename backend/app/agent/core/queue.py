@@ -171,7 +171,8 @@ async def _qc_fix_loop(
                 safety_risk = run_safety(review_msgs, project_constraints).risk_level
                 qc2 = await asyncio.wait_for(
                     run_qc(qc_user_text, fixed_code,
-                           project_constraints=project_constraints, safety_risk=safety_risk),
+                           project_constraints=project_constraints, safety_risk=safety_risk,
+                           model_id=model_id),
                     timeout=settings.qc_timeout_seconds,
                 )
                 final_result = qc2
@@ -1213,7 +1214,7 @@ async def worker_loop(concurrency: int = 1):
                         except Exception as oe:  # noqa: BLE001
                             logger.warning("[Worker] 编排统计失败(跳过): %s", oe)
                         # 后置 QC(合并文本, 按需触发)
-                        # 编排场景: 仅当任一子任务 reviewer 标记 needs_review 才跑三裁判(省 LLM 成本)。
+                        # 编排场景: 仅当任一子任务 reviewer 标记 needs_review 才跑单裁判 QC(省 LLM 成本)。
                         qc_assistant_text = "".join(qc_assistant_buf)
                         qc_result = None
                         # 决策日志: 编排场景 QC 仅当子任务 reviewer 标 needs_review 才触发
@@ -1231,7 +1232,8 @@ async def worker_loop(concurrency: int = 1):
                                 qc_result = await asyncio.wait_for(
                                     run_qc(qc_user_text, qc_assistant_text,
                                            project_constraints=project_constraints,
-                                           safety_risk=safety_risk),
+                                           safety_risk=safety_risk,
+                                           model_id=model_id),
                                     timeout=settings.qc_timeout_seconds,
                                 )
                                 await q.publish(trace_id, {"event": "qc", "data": qc_result})
@@ -1359,8 +1361,8 @@ async def worker_loop(concurrency: int = 1):
                             )
                     except Exception as _hf_e:  # noqa: BLE001
                         logger.debug("[Worker] 单意图交接物捕获失败(忽略): %s", _hf_e)
-                # ── [6/6] 后置 QC 三裁判(按需触发) ──
-                # 生成类技能: 仅当 reviewer 标记 needs_review 才跑三裁判(省 LLM 成本)。
+                # ── [6/6] 后置 QC 单裁判(按需触发) ──
+                # 生成类技能: 仅当 reviewer 标记 needs_review 才跑单裁判(省 LLM 成本); 闲聊强制兜底。
                 # 闲聊(agent_chat) 无 reviewer, 始终 QC 兜底以保证对话质量 + 支撑低分重答(Phase D)。
                 qc_assistant_text = "".join(qc_assistant_buf)
                 qc_result = None
@@ -1382,7 +1384,8 @@ async def worker_loop(concurrency: int = 1):
                         qc_result = await asyncio.wait_for(
                             run_qc(qc_user_text, qc_assistant_text,
                                    project_constraints=project_constraints,
-                                   safety_risk=safety_risk),
+                                   safety_risk=safety_risk,
+                                   model_id=model_id),
                             timeout=settings.qc_timeout_seconds,
                         )
                         await q.publish(trace_id, {"event": "qc", "data": qc_result})

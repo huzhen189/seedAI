@@ -473,11 +473,11 @@ async def role_stats() -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 5. 后置 QC 三裁判统计 (v1.2.3)
+# 5. 后置 QC 统计 (v1.2.3; v2.3.0 起单裁判)
 # ──────────────────────────────────────────────────────────────────────
 
 async def record_qc(result: dict, duration_ms: float = 0.0) -> None:
-    """后置 QC 三裁判每次运行的统计。
+    """后置 QC(单裁判 v2.3.0)每次运行的统计。
 
     result: run_qc() 返回的聚合 dict(见 qc.py)。提取:
       - overall 整体评分(zset → p50/p90/p99/avg, 看整体质量趋势)
@@ -513,7 +513,7 @@ async def record_qc(result: dict, duration_ms: float = 0.0) -> None:
 
 
 async def qc_stats() -> dict:
-    """读取 QC 三裁判统计(整体评分 / 7 维均值 / 复核率 / 掉线率 / 安全风险)。"""
+    """读取 QC(单裁判)统计(整体评分 / 7 维均值 / 复核率 / 掉线率 / 安全风险)。"""
     try:
         r = _get_redis()
         if r is None:

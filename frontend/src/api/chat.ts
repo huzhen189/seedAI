@@ -45,7 +45,7 @@ export interface ChatCallbacks {
   onCancelSummary?: (data: CancelSummaryEvent) => void
   /** §9: 执行前计划预览(含 SOP 角色链路 badge), 前端渲染「执行计划」卡 */
   onPlanPreview?: (data: PlanPreviewEvent) => void
-  /** 后置 QC 三裁判结果(v0.8.5 M1):整体分 + 6 维聚合, 落入气泡徽标 */
+  /** 后置 QC 单裁判结果(v2.3.0):整体分 + 6 维聚合, 落入气泡徽标 */
   onQc?: (data: QcResult) => void
   /** L2 精炼结果(v0.9.0): done 前下发的终版润色文本(建站类), 用于覆盖气泡内容 */
   onRefined?: (data: string) => void

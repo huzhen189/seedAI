@@ -10,7 +10,7 @@ const props = withDefaults(
     content: string
     time?: string
     traceId?: string
-    /** 后置 QC 三裁判结果(来自 SSE `qc` 事件) */
+    /** 后置 QC 单裁判结果(来自 SSE `qc` 事件) */
     qc?: QcResult | null
     /** 当前用户已提交的评分(1-10), 缺省 null=未评价 */
     myRating?: number | null

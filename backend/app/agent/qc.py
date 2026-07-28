@@ -1,30 +1,29 @@
-"""后置质检(QC)三裁判模块 v0.8.5 (M1)。
+"""后置质检(QC)单裁判模块 v2.3.0。
 
-设计要点:
-- 默认开启, 默认三裁判全量(deepseek / qwen / hy3 各按 6 维度独立打分)。
-- 6 维度: correctness(正确性) / completeness(完整性) / compliance(合规性) /
-  efficiency(效率) / readability(可读性) / safety(安全性), 各 1-10 整数。
-- 聚合: 每维取均值 + 方差; 方差大(分歧大)标 needs_review。
-- 混合判定(降本): compliance / safety / efficiency 叠加 run_safety 确定性地板 +
-  用量确定性规则(零额外成本), 仅 correctness / completeness / readability 走 LLM 三裁判。
-- 韧性: 单裁判失败不影响其他; 全部失败则 partial=True 降级; 超时由调用方控制。
+设计要点(v2.3.0 改造, 取代三裁判并行):
+- 直接用「本次生成所用模型」跑一次 QC(单裁判), 不再 deepseek/qwen/hy3 并行 → 降本。
+- 6 维度: correctness / completeness / compliance / efficiency / readability / safety, 各 1-10 整数。
+- 引擎维度(correctness / completeness / readability / craft 由 LLM 打分;
+  compliance / efficiency / safety 叠加 run_safety 确定性地板 + 固定基线, 零额外成本)。
+- 复核判定: overall 低于 config.qc_solo_needs_review_overall 即标 needs_review
+  → 触发质量闭环重做(建站)或闲聊 Phase D 重答。低分打回由主链路闭环兜底, 故不再需要多裁判互验。
+- 韧性: 单次调用失败返回 partial=True 降级(不影响主链路落库 / 展示)。
 
-输出结构(可直接作为 SSE `qc` 事件 data, 亦可直接落库 / 供后台雷达图):
+输出结构(与旧三裁判版保持兼容, 可直接作为 SSE `qc` 事件 data / 落库 / 供后台雷达图):
 {
-  "judges": [{"model": "deepseek", "valid": true, "comment": "..."}, ...],  # 顺序=QC_JUDGES
+  "judges": [{"model": "<所用模型>", "valid": true, "comment": "..."}],  # 长度=1(单裁判)
   "dimensions": {                                                          # 键=QC_DIMENSIONS
-     "<dim>": {"mean": float, "variance": float, "scores": [d, d, d]}      # scores 对齐 QC_JUDGES
+     "<dim>": {"mean": float, "variance": float, "scores": [d]}            # scores 长度=1
   },
   "overall": float,          # 6 维均值的平均(整体评分)
-  "needs_review": bool,      # 任一维方差过大 → 需人工复核
+  "needs_review": bool,      # overall < 阈值 → 需复核(触发重做/重答)
   "safety_risk": str,        # low|medium|high|critical (来自 run_safety 地板)
-  "partial": bool            # 有裁判失败/未参与
+  "partial": bool            # 单裁判调用失败 → True
 }
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -39,17 +38,14 @@ from .analytics import record_qc, record_llm_call
 
 logger = logging.getLogger("ai_service.qc")
 
-# 7 维度定义(顺序即雷达图轴序), 与 scoring.SCORING_DIMENSIONS 对齐(单一来源)
+# 维度定义(顺序即雷达图轴序), 与 scoring.SCORING_DIMENSIONS 对齐(单一来源)
 QC_DIMENSIONS: List[str] = list(SCORING_DIMENSIONS)
 
-# 默认三裁判(全量);顺序即 scores 数组下标。来源: config.qc_judges(单一来源)
-QC_JUDGES: List[str] = [m.strip() for m in settings.qc_judges.split(",") if m.strip()]
-
-# 走 LLM 三裁判的维度(其余走确定性地板); 与 scoring.LLM_SCORING_DIMS 对齐
+# 走 LLM 打分的维度(其余走确定性地板); 与 scoring.LLM_SCORING_DIMS 对齐
 _LLM_DIMS = tuple(LLM_SCORING_DIMS)
 
 _SYSTEM_PROMPT = """你是一名严格的中文内容质量评审专家。
-请基于「用户请求」与「AI 助手的最终输出」, 从以下 4 个维度独立打分(1-10 整数, 10 为最佳):
+请基于「用户请求」与「AI 助手的最终输出」, 从以下维度独立打分(1-10 整数, 10 为最佳):
 - correctness(正确性): 事实 / 逻辑 / 技术是否准确, 是否答其所问、有无明显错误。
 - completeness(完整性): 是否覆盖用户需求的核心点, 有无明显遗漏。
 - readability(可读性): 结构清晰、表达易懂、格式规范。
@@ -88,12 +84,12 @@ def _parse_judge_output(raw: str) -> Optional[Dict[str, Any]]:
         dims["comment"] = str(obj.get("comment", ""))[:60]
         return dims
     except Exception as e:  # noqa: BLE001
-        logger.warning("QC 评委输出解析失败: %s", e)
+        logger.warning("QC 输出解析失败: %s", e)
         return None
 
 
-async def _judge_one(model_id: str, user_text: str, assistant_text: str) -> Dict[str, Any]:
-    """单个裁判打分(非流式 ainvoke)。失败返回空维度(标记异常, 不阻断整体)。
+async def _judge_once(model_id: str, user_text: str, assistant_text: str) -> Dict[str, Any]:
+    """单裁判打分(非流式 ainvoke), 使用本次生成所用模型。失败返回空维度(标记异常)。
 
     同时写入 LLM Provider 统计(耗时 / 成功 / Token 用量 / 错误类型)。
     """
@@ -116,16 +112,16 @@ async def _judge_one(model_id: str, user_text: str, assistant_text: str) -> Dict
         raw = resp.content if hasattr(resp, "content") else str(resp)
         parsed = _parse_judge_output(raw)
         if parsed is None:
-            logger.warning("QC 评委 %s 输出无法解析(标记无效)", model_id)
+            logger.warning("QC 模型 %s 输出无法解析(标记无效)", model_id)
             return {"model": model_id, "valid": False,
                     "dims": {d: 0 for d in QC_DIMENSIONS}, "comment": "解析失败"}
-        logger.info("[QC] 评委 %s 打分 valid=True overall=%.2f", model_id,
-                    sum(parsed.get(d, 0) for d in QC_DIMENSIONS) / max(len(QC_DIMENSIONS), 1))
+        avg = sum(parsed.get(d, 0) for d in QC_DIMENSIONS) / max(len(QC_DIMENSIONS), 1)
+        logger.info("[QC] 单裁判打分 model=%s valid=True overall=%.2f", model_id, avg)
         return {"model": model_id, "valid": True, "dims": parsed, "comment": parsed.get("comment", "")}
     except Exception as e:  # noqa: BLE001
         await record_llm_call(model_id, False, (time.monotonic() - t0) * 1000,
                               error_type=type(e).__name__)
-        logger.warning("QC 评委 %s 调用失败: %s", model_id, e)
+        logger.warning("QC 模型 %s 调用失败: %s", model_id, e)
         return {"model": model_id, "valid": False,
                 "dims": {d: 0 for d in QC_DIMENSIONS}, "comment": f"调用失败:{type(e).__name__}"}
 
@@ -141,57 +137,51 @@ def _deterministic_dim(dim: str, safety_risk: str) -> float:
     return 8.0
 
 
-def _aggregate(judges: List[Dict[str, Any]], safety_risk: str = "low") -> Dict[str, Any]:
-    """聚合三裁判打分 → 每维均值 / 方差 + 整体; 叠加确定性地板。"""
-    valid = [j for j in judges if j.get("valid")]
+def _assemble(judge: Dict[str, Any], safety_risk: str = "low") -> Dict[str, Any]:
+    """聚合单裁判打分 → 每维均值 / 方差 + 整体; 叠加确定性地板。
+
+    单裁判下 variance 恒为 0(无多裁判分歧); needs_review 改由 overall 阈值判定。
+    """
     dimensions: Dict[str, Any] = {}
     for d in QC_DIMENSIONS:
-        scores = [j["dims"].get(d, 0) for j in valid if j["dims"].get(d, 0) > 0]
-        if scores:
-            mean = sum(scores) / len(scores)
-            var = sum((s - mean) ** 2 for s in scores) / len(scores)
-        else:
-            mean, var = 0.0, 0.0
-        # scores 数组对齐 QC_JUDGES(无效/失败填 0, 供后台雷达图识别缺失)
-        aligned = [j["dims"].get(d, 0) for j in judges]
+        score = judge["dims"].get(d, 0)
         dimensions[d] = {
-            "mean": round(mean, 2),
-            "variance": round(var, 2),
-            "scores": aligned,
+            "mean": float(score),
+            "variance": 0.0,
+            "scores": [score],  # 单裁判: 长度=1(前台雷达图兼容可空)
         }
-    # 确定性维度(合规/效率/安全): 不走 LLM, 由规则地板 + 固定基线决定(降本, 与文档一致)
+    # 确定性维度(合规/效率/安全): 不走 LLM, 由规则地板 + 固定基线决定(降本)
     for d in QC_DIMENSIONS:
         if d not in _LLM_DIMS:
             score = _deterministic_dim(d, safety_risk)
-            dimensions[d] = {
-                "mean": score, "variance": 0.0,
-                "scores": [score] * len(QC_JUDGES),
-            }
+            dimensions[d] = {"mean": score, "variance": 0.0, "scores": [score]}
     # 整体均值(6 维 mean 的平均; mean=0 视为该维无有效分, 不计入)
     means = [dimensions[d]["mean"] for d in QC_DIMENSIONS if dimensions[d]["mean"] > 0]
     overall = round(sum(means) / len(means), 2) if means else 0.0
 
-    # 最大方差(任一维方差 >= 阈值 ≈ 标准差 >= 2 即分歧大) → 标注需人工复核
-    # 阈值来源: config.qc_needs_review_variance(单一来源)
-    max_var = max((dimensions[d]["variance"] for d in QC_DIMENSIONS), default=0.0)
-    needs_review = max_var >= settings.qc_needs_review_variance
-
-    # 确定性地板: 安全 / 合规 / 效率(零成本, 来自 run_safety + 规则)
+    # 确定性地板: 安全 / 合规 / 效率(零成本, 来自 run_safety + 规则) → 命中高风险必复核
     if safety_risk in ("high", "critical"):
         dimensions["safety"]["mean"] = min(dimensions["safety"]["mean"], 3.0)
         dimensions["compliance"]["mean"] = min(dimensions["compliance"]["mean"], 4.0)
-        needs_review = True
     elif safety_risk == "medium":
         dimensions["safety"]["mean"] = min(dimensions["safety"]["mean"], 6.0)
 
+    # 复核判定: overall 低于阈值 → 需复核(触发重做/重答)。高风险亦强制复核。
+    needs_review = (
+        not judge.get("valid")
+        or overall < settings.qc_solo_needs_review_overall
+        or safety_risk in ("high", "critical")
+    )
+    partial = not judge.get("valid")
+
     return {
-        "judges": [{"model": j["model"], "valid": j["valid"], "comment": j.get("comment", "")}
-                   for j in judges],
+        "judges": [{"model": judge["model"], "valid": judge.get("valid", False),
+                    "comment": judge.get("comment", "")}],
         "dimensions": dimensions,
         "overall": overall,
         "needs_review": needs_review,
         "safety_risk": safety_risk,
-        "partial": len(valid) < len(judges),  # 有评委失败
+        "partial": partial,
     }
 
 
@@ -200,26 +190,21 @@ async def run_qc(
     assistant_text: str,
     project_constraints: Optional[List[str]] = None,
     safety_risk: str = "low",
+    model_id: str = "qwen",
 ) -> Dict[str, Any]:
-    """运行三裁判 QC, 返回聚合结果(可直接作为 SSE `qc` 事件 data)。
+    """运行单裁判 QC(使用本次生成所用模型), 返回聚合结果(可直接作为 SSE `qc` 事件 data)。
 
-    默认三裁判全量并行(deepseek / qwen / hy3); 超时由调用方 asyncio.wait_for 控制。
-    project_constraints 预留(当前地板仅用 safety_risk, 后续可扩展约束命中检测)。
+    v2.3.0 起: 取消三裁判并行, 改用 model_id(调用方传入的生成所用模型)单次打分 → 降本。
+    低分(overall<阈值)由主链路质量闭环打回重做/重答兜底, 故无需多裁判互验。
     """
-    logger.info("[QC] 开始三裁判评分 judges=%s safety_risk=%s", QC_JUDGES, safety_risk)
+    logger.info("[QC] 单裁判评分 model=%s safety_risk=%s", model_id, safety_risk)
     t0 = time.monotonic()
-    judges = await asyncio.gather(*[
-        _judge_one(mid, user_text, assistant_text) for mid in QC_JUDGES
-    ])
-    result = _aggregate(judges, safety_risk=safety_risk)
+    judge = await _judge_once(model_id, user_text, assistant_text)
+    result = _assemble(judge, safety_risk=safety_risk)
     dur = time.monotonic() - t0
-    # 逐维方差日志: 方差大 = 评委分歧大, 直接定位需复核的维度
-    var_parts = " ".join(
-        f"{d}={result['dimensions'][d]['variance']:.1f}" for d in QC_DIMENSIONS
-    )
-    logger.info("[QC] 评分完成 耗时=%.2fs overall=%.2f needs_review=%s partial=%s | 方差 %s",
+    logger.info("[QC] 评分完成 耗时=%.2fs overall=%.2f needs_review=%s partial=%s model=%s",
                 dur, result.get("overall", 0), result.get("needs_review"),
-                result.get("partial"), var_parts)
+                result.get("partial"), model_id)
     # 写入后置 QC 统计(整体/7维/复核率/掉线率/安全风险), 失败仅告警
     try:
         await record_qc(result, dur * 1000)

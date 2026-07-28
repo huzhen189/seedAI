@@ -125,7 +125,12 @@ class Settings(BaseSettings):
     split_repair_max_rounds: int = 2
 
     # ---- 后置质检(QC) ----
+    # v2.3.0 起改为「单裁判」: 直接用本次生成所用模型跑一次 QC, 不再三裁判并行(降本)。
+    # qc_judges 保留为兼容字段(不再用于并行打分)。
     qc_judges: str = "deepseek,qwen,hy3"
+    # 单裁判复核阈值: overall 低于此值判定需复核 → 触发质量闭环重做(或闲聊 Phase D 重答)。
+    qc_solo_needs_review_overall: float = 7.0
+    # 旧「三裁判方差」阈值保留, 当前流程不再使用 variance 触发复核(单裁判 variance=0)。
     qc_needs_review_variance: float = 4.0
     qc_timeout_seconds: float = 60.0
     qc_fix_enabled: bool = True

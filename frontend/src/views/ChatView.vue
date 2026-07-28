@@ -603,7 +603,7 @@ function armReconnectGuard() {
 }
 // 右侧预览面板实例(ChatView 通过它联动选中文件并打开预览)
 const rightPanel = ref<InstanceType<typeof RightPanel> | null>(null)
-// 后置 QC 三裁判结果 / 用户评价, 均按 trace_id 索引(气泡内展示, v0.8.5 M1)
+// 后置 QC 单裁判结果 / 用户评价, 均按 trace_id 索引(气泡内展示, v2.3.0 单裁判)
 const qcMap = reactive<Record<string, QcResult>>({})
 const ratedMap = reactive<Record<string, { rating: number; dims: RatingDims; comment: string }>>({})
 const projectArtifacts = ref<Artifact[]>([])

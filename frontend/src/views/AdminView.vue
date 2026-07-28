@@ -199,7 +199,7 @@ interface QualityData {
   generation_total: number
   generation_success_rate: number
   unsupported_count?: number
-  // QC 三裁判聚合(v0.8.5 M1)
+  // QC 单裁判聚合(v2.3.0)
   qc_count: number
   qc_overall_avg: number | null
   qc_overall_dim_avg: Record<string, number>
@@ -220,34 +220,54 @@ async function fetchQuality() {
   finally { qualityLoading.value = false }
 }
 
-// QC 雷达图序列: 3 模型 + 整体(各 6 维)
+// 单裁判下每个实际出现的 QC 模型配一条固定色序列(避免撞色)
+const QC_MODEL_COLORS = ['#2563eb', '#16a34a', '#d97706', '#0ea5e9', '#db2777', '#7c3aed']
+function modelColor(idx: number): string {
+  return QC_MODEL_COLORS[idx % QC_MODEL_COLORS.length]
+}
+
+// 当前 QC 报表里实际出现的模型序列(供明细表表头 / 单元格遍历)
+const qcModels = computed(() =>
+  (quality.value?.qc_judges || []).filter((m) => m && m !== 'unknown'),
+)
+
+// QC 雷达图序列: 实际出现的模型各一条 + 整体基线(各 6 维)
 const qcSeries = computed(() => {
   const q = quality.value
   if (!q || !q.qc_dimensions?.length) return []
   const axes = q.qc_dimensions
+  const models = qcModels.value
   const mk = (name: string, color: string, src: Record<string, number>) => ({
     name, color, values: axes.map((d) => Number(src?.[d] ?? 0)),
   })
-  return [
-    mk('DeepSeek', '#2563eb', q.qc_model_avg?.['deepseek'] || {}),
-    mk('Qwen', '#16a34a', q.qc_model_avg?.['qwen'] || {}),
-    mk('HY3', '#d97706', q.qc_model_avg?.['hy3'] || {}),
-    mk('整体', '#7c3aed', q.qc_overall_dim_avg || {}),
-  ]
+  const series: Array<{ name: string; color: string; values: number[] }> = models.map(
+    (m, i) => mk(m, modelColor(i), q.qc_model_avg?.[m] || {}),
+  )
+  series.push(mk('整体', '#7c3aed', q.qc_overall_dim_avg || {}))
+  return series
 })
 
-// QC 评分明细表(三裁判 + 整体): 把"评分"以数字清晰呈现(R3)
-const qcTable = computed(() => {
+// QC 评分明细表(各实际模型 + 整体): 把"评分"以数字清晰呈现
+interface QcTableRow {
+  dim: string
+  label: string
+  scores: Record<string, number | null>
+  overall: number | null
+}
+const qcTable = computed<QcTableRow[]>(() => {
   const q = quality.value
   if (!q || !q.qc_dimensions?.length) return []
-  return q.qc_dimensions.map((d) => ({
-    dim: d,
-    label: (QC_DIM_LABELS as Record<string, string>)[d] || d,
-    deepseek: q.qc_model_avg?.['deepseek']?.[d] ?? null,
-    qwen: q.qc_model_avg?.['qwen']?.[d] ?? null,
-    hy3: q.qc_model_avg?.['hy3']?.[d] ?? null,
-    overall: q.qc_overall_dim_avg?.[d] ?? null,
-  }))
+  const models = qcModels.value
+  return q.qc_dimensions.map((d) => {
+    const scores: Record<string, number | null> = {}
+    for (const m of models) scores[m] = q.qc_model_avg?.[m]?.[d] ?? null
+    return {
+      dim: d,
+      label: (QC_DIM_LABELS as Record<string, string>)[d] || d,
+      scores,
+      overall: q.qc_overall_dim_avg?.[d] ?? null,
+    }
+  })
 })
 
 // 维度 key -> 中文标签(兼容任意字符串 key, 避免模板内严格索引报错)
@@ -266,7 +286,16 @@ interface TraceEventItem {
   seq: number; event_type: string; stage: string | null
   payload: unknown; created_at: string | null
 }
-interface QcDetail { overall: number; result: any; needs_review: boolean; safety_risk: string; partial: boolean; created_at: string | null }
+interface QcJudgeDetail { model: string; valid: boolean; comment: string }
+interface QcDetail {
+  overall: number
+  result: { dimensions?: Record<string, { mean: number; variance: number; scores: number[] }> }
+  judges?: QcJudgeDetail[]
+  needs_review: boolean
+  safety_risk: string
+  partial: boolean
+  created_at: string | null
+}
 interface FeedbackDetail { rating: number; comment: string | null; dimensions: any; created_at: string | null }
 interface TraceMessage { role: string; model_id: string | null; content: string; created_at: string | null }
 interface TraceDetail {
@@ -631,7 +660,7 @@ onUnmounted(() => {
       </div>
       <!-- QC 六维雷达图(v0.8.5 M1) -->
       <div v-if="qcSeries.length" class="block qc-radar">
-        <h3>QC 六维雷达(三裁判 + 整体)</h3>
+        <h3>QC 六维雷达(实际模型 + 整体)</h3>
         <RadarChart
           :axes="(quality?.qc_dimensions || []).map((d: string) => quality?.qc_dim_labels?.[d] || d)"
           :series="qcSeries"
@@ -640,20 +669,26 @@ onUnmounted(() => {
       </div>
       <!-- QC 评分明细(数字, R3) -->
       <div v-if="qcTable.length" class="block">
-        <h3>QC 评分明细（三裁判 + 整体, 0-10）</h3>
+        <h3>QC 评分明细（模型 + 整体, 0-10）</h3>
         <table class="qctable">
-          <thead><tr><th>维度</th><th>DeepSeek</th><th>Qwen</th><th>HY3</th><th>整体</th></tr></thead>
+          <thead>
+            <tr>
+              <th>维度</th>
+              <th v-for="m in qcModels" :key="m">{{ m }}</th>
+              <th>整体</th>
+            </tr>
+          </thead>
           <tbody>
             <tr v-for="r in qcTable" :key="r.dim">
               <td>{{ r.label }}</td>
-              <td>{{ r.deepseek != null ? r.deepseek.toFixed(2) : '-' }}</td>
-              <td>{{ r.qwen != null ? r.qwen.toFixed(2) : '-' }}</td>
-              <td>{{ r.hy3 != null ? r.hy3.toFixed(2) : '-' }}</td>
+              <td v-for="m in qcModels" :key="m">
+                {{ r.scores[m] != null ? r.scores[m]!.toFixed(2) : '-' }}
+              </td>
               <td><b>{{ r.overall != null ? r.overall.toFixed(2) : '-' }}</b></td>
             </tr>
           </tbody>
         </table>
-        <p v-if="!quality?.qc_count" class="hint">提示: QC 仅对「需复核」的 trace 触发三裁判评分, 样本数 = {{ quality?.qc_count ?? 0 }}。</p>
+        <p v-if="!quality?.qc_count" class="hint">提示: QC 仅对「需复核」或闲聊类 trace 触发单裁判评分, 样本数 = {{ quality?.qc_count ?? 0 }}。</p>
       </div>
       <div v-if="quality && quality.rating_distribution && Object.keys(quality.rating_distribution).length" class="block">
         <h3>评分分布</h3>
@@ -687,24 +722,30 @@ onUnmounted(() => {
         <button class="back" @click="selectedTrace = null">← 返回列表</button>
         <p class="hint">Trace: {{ selectedTrace.trace.trace_id }} | 模型: {{ selectedTrace.trace.model_id || '-' }} | 状态: {{ statusLabel(selectedTrace.trace.status) }} | Token: ~{{ selectedTrace.trace.total_tokens }}</p>
 
-        <!-- 后置 QC 三裁判详情 -->
+        <!-- 后置 QC 单裁判详情 -->
         <div v-if="selectedTrace.qc && selectedTrace.qc.result?.dimensions" class="block">
           <h3>
-            后置 QC 三裁判
+            后置 QC 单裁判
+            <span class="pill">模型 {{ selectedTrace.qc.judges?.[0]?.model || '—' }}</span>
             <span class="pill">整体 {{ selectedTrace.qc.overall.toFixed(2) }}</span>
             <span v-if="selectedTrace.qc.needs_review" class="pill warn">需复核</span>
-            <span v-if="selectedTrace.qc.partial" class="pill gray">部分裁判</span>
+            <span v-if="selectedTrace.qc.partial" class="pill gray">评分失败</span>
             <span v-if="selectedTrace.qc.safety_risk && selectedTrace.qc.safety_risk !== 'low'" class="pill danger">{{ selectedTrace.qc.safety_risk }}</span>
           </h3>
           <table class="qctable">
-            <thead><tr><th>维度</th><th>均值</th><th>DeepSeek</th><th>Qwen</th><th>HY3</th></tr></thead>
+            <thead>
+              <tr>
+                <th>维度</th><th>均值</th>
+                <th v-for="(jdg, ji) in (selectedTrace.qc.judges || [])" :key="ji">{{ jdg.model }}</th>
+              </tr>
+            </thead>
             <tbody>
               <tr v-for="d in Object.keys(selectedTrace.qc.result.dimensions)" :key="d">
                 <td>{{ qcLabel(d) }}</td>
                 <td>{{ selectedTrace.qc.result.dimensions[d].mean.toFixed(1) }}</td>
-                <td>{{ selectedTrace.qc.result.dimensions[d].scores?.[0] || '-' }}</td>
-                <td>{{ selectedTrace.qc.result.dimensions[d].scores?.[1] || '-' }}</td>
-                <td>{{ selectedTrace.qc.result.dimensions[d].scores?.[2] || '-' }}</td>
+                <td v-for="(_, ji) in (selectedTrace.qc.judges || [])" :key="ji">
+                  {{ selectedTrace.qc.result.dimensions[d].scores?.[ji] || '-' }}
+                </td>
               </tr>
             </tbody>
           </table>
@@ -969,9 +1010,9 @@ onUnmounted(() => {
             <div class="card"><div class="k">人均生成</div><div class="v">{{ al.user_stats.avg_per_user }}</div></div>
           </div>
         </div>
-        <!-- 后置三裁判 QC(v0.8.5) -->
+        <!-- 后置单裁判 QC(v2.3.0) -->
         <div v-if="al.qc && al.qc.count" class="block">
-          <h4>后置三裁判质检 (QC)</h4>
+          <h4>后置单裁判质检 (QC)</h4>
           <div class="card-row">
             <div class="card"><div class="k">触发次数</div><div class="v">{{ al.qc.count }}</div></div>
             <div class="card"><div class="k">整体均分</div><div class="v">{{ al.qc.overall_avg ?? '-' }}</div></div>
@@ -1009,7 +1050,7 @@ onUnmounted(() => {
           </div>
           <!-- 后置 QC -->
           <div v-if="al.ai_core.qc && al.ai_core.qc.total" class="block">
-            <h4>后置 QC 三裁判（AI 核心）</h4>
+            <h4>后置 QC 单裁判（AI 核心）</h4>
             <div class="card-row">
               <div class="card"><div class="k">样本数</div><div class="v">{{ al.ai_core.qc.total }}</div></div>
               <div class="card"><div class="k">整体均分</div><div class="v">{{ al.ai_core.qc.overall?.avg != null ? al.ai_core.qc.overall.avg.toFixed(2) : '-' }}</div></div>

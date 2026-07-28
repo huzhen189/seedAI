@@ -334,8 +334,9 @@ export interface AdminUser {
   plan: string
 }
 
-// ---------- 后置 QC 三裁判(v0.8.5 M1) ----------
-// 维度与 3 裁判顺序须与 backend/ai_service/app/qc.py 保持一致(雷达图轴序 + scores 下标)
+// ---------- 后置 QC(单裁判 v2.3.0) ----------
+// 维度顺序须与 backend/app/agent/qc.py 保持一致(雷达图轴序)。
+// v2.3.0 起不再固定三裁判: scores / judges 长度 = 实际参与评分的模型数(通常 1)。
 export const QC_DIMENSIONS = [
   'correctness',
   'completeness',
@@ -355,24 +356,25 @@ export const QC_DIM_LABELS: Record<QcDimension, string> = {
   safety: '安全性',
 }
 
-export const QC_JUDGES = ['deepseek', 'qwen', 'hy3'] as const
-export type QcJudge = (typeof QC_JUDGES)[number]
+// v2.3.0 单裁判: 实际 QC 模型不再固定, 由后端运行时决定(model=本次生成所用模型)。
+// 保留 QC_JUDGES 仅作历史兼容占位; 雷达图序列名以后端返回的 qc_judges(实际出现模型)为准。
+export const QC_JUDGES: string[] = []
 
 /** 单裁判结果(整体评分用不到原始分, 明细走 dimensions.scores) */
 export interface QcJudgeResult {
-  model: QcJudge
+  model: string
   valid: boolean
   comment: string
 }
 
-/** 单维度聚合: 均值 + 方差 + 三裁判原始分(对齐 QC_JUDGES) */
+/** 单维度聚合: 均值 + 方差 + 各裁判原始分(长度=实际裁判数, 0=未参与/失败) */
 export interface QcDimensionScore {
   mean: number
   variance: number
-  scores: number[] // [deepseek, qwen, hy3], 0=未参与/失败
+  scores: number[] // 长度=实际裁判数; 单裁判时长度=1
 }
 
-/** QC 三裁判聚合结果(即 SSE `qc` 事件 data, 亦为 qc_scores.result) */
+/** QC 聚合结果(即 SSE `qc` 事件 data, 亦为 qc_scores.result) */
 export interface QcResult {
   judges: QcJudgeResult[]
   dimensions: Record<QcDimension, QcDimensionScore>

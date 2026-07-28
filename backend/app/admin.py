@@ -8,6 +8,7 @@
 admin 进入后控制面板置灰 / 隐藏,仅 super_admin 可见可执行。
 """
 import logging
+from typing import List
 
 import asyncio
 import json
@@ -21,9 +22,10 @@ from .db import reset_db as do_reset_db
 from .metrics import snapshot
 from .models import Feedback, Message, QcScore, Trace, TraceEvent, UsageLog, User
 
-# 6 维度 / 3 裁判(与 backend/ai_service/app/qc.py 保持一致, 供雷达图轴序)
+# 6 维度(与 backend/ai_service/app/qc.py 保持一致, 供雷达图轴序)
 QC_DIMENSIONS = ["correctness", "completeness", "compliance", "efficiency", "readability", "safety"]
-QC_JUDGES = ["deepseek", "qwen", "hy3"]
+# v2.3.0 单裁判: 不再固定 3 裁判; 实际出现的 model 由报表运行时收集(qc_models)。
+QC_JUDGES: List[str] = []
 QC_DIM_LABELS = {
     "correctness": "正确性", "completeness": "完整性", "compliance": "合规性",
     "efficiency": "效率", "readability": "可读性", "safety": "安全性",
@@ -448,29 +450,36 @@ async def quality(_=Depends(require_admin), db: AsyncSession = Depends(get_db)):
         unsupported_total = 0
         samples = []
 
-    # ── QC 三裁判聚合(v0.8.5 M1) ──
+    # ── QC 单裁判聚合(v2.3.0) ──
     qc_rows = (await db.execute(select(QcScore))).scalars().all()
     qc_count = len(qc_rows)
-    # 每模型每维平均分(雷达图 3 条序列) + 整体每维平均分(第 4 条序列)
-    qc_model_dims: dict[str, dict] = {m: {d: [] for d in QC_DIMENSIONS} for m in QC_JUDGES}
+    # 单裁判下: 每条 QC 记录的 scores 长度=1(仅本次生成模型)。
+    # 雷达图按「实际出现的模型」各画一条序列(而不是固定 3 条), 另保留整体每维均值。
+    qc_model_dims: dict[str, dict] = {}      # {model: {dim: [scores...]}}
     qc_overall_dim: dict[str, list] = {d: [] for d in QC_DIMENSIONS}
     qc_overall_list: list[float] = []
+    seen_models: list[str] = []
     for q in qc_rows:
         res = q.result or {}
-        if isinstance(res, dict):
-            if res.get("overall") is not None:
-                qc_overall_list.append(float(res.get("overall", 0)))
-            dims = res.get("dimensions", {}) or {}
-            for d in QC_DIMENSIONS:
-                dd = dims.get(d, {}) or {}
-                # 整体序列: 用每维 mean
-                mean = dd.get("mean")
-                if mean is not None and mean > 0:
-                    qc_overall_dim[d].append(float(mean))
-                scores = dd.get("scores", []) or []
-                for mi, m in enumerate(QC_JUDGES):
-                    if mi < len(scores) and scores[mi] and scores[mi] > 0:
-                        qc_model_dims[m][d].append(float(scores[mi]))
+        if not isinstance(res, dict):
+            continue
+        if res.get("overall") is not None:
+            qc_overall_list.append(float(res.get("overall", 0)))
+        # 该次 QC 的模型标签: 取 judges[0].model(单裁判)
+        judges = res.get("judges") or []
+        model_label = (judges[0].get("model") if judges else "unknown") or "unknown"
+        if model_label not in qc_model_dims:
+            qc_model_dims[model_label] = {d: [] for d in QC_DIMENSIONS}
+            seen_models.append(model_label)
+        dims = res.get("dimensions", {}) or {}
+        for d in QC_DIMENSIONS:
+            dd = dims.get(d, {}) or {}
+            mean = dd.get("mean")
+            if mean is not None and mean > 0:
+                qc_overall_dim[d].append(float(mean))
+            scores = dd.get("scores", []) or []
+            if scores and scores[0] and scores[0] > 0:
+                qc_model_dims[model_label][d].append(float(scores[0]))
     qc_model_avg = {
         m: {d: round(sum(v) / len(v), 2) if v else 0.0 for d, v in dm.items()}
         for m, dm in qc_model_dims.items()
@@ -494,15 +503,15 @@ async def quality(_=Depends(require_admin), db: AsyncSession = Depends(get_db)):
         "generation_success_rate": round(done / max(total, 1), 3),
         "unsupported_count": unsupported_total,
         "unsupported_samples": samples,
-        # QC 三裁判聚合(M1)
+        # QC 单裁判聚合(v2.3.0)
         "qc_count": qc_count,
         "qc_overall_avg": qc_overall_avg,
-        "qc_overall_dim_avg": qc_overall_dim_avg,   # 整体每维均值(雷达图第4序列)
-        "qc_model_avg": qc_model_avg,               # 3 模型每维均值(雷达图 3 序列)
+        "qc_overall_dim_avg": qc_overall_dim_avg,   # 整体每维均值(雷达图基线序列)
+        "qc_model_avg": qc_model_avg,               # 实际出现的模型每维均值(每条=一个模型序列)
         "qc_review_rate": qc_review_rate,           # 需人工复核占比
         "qc_dimensions": QC_DIMENSIONS,
         "qc_dim_labels": QC_DIM_LABELS,
-        "qc_judges": QC_JUDGES,
+        "qc_judges": seen_models,                   # 实际出现的 QC 模型(前端雷达图序列名)
     }
 
 
