@@ -141,15 +141,17 @@ export const useConversationStore = defineStore('conversation', () => {
     s.collapsed = false
   }
 
-  /** 新建会话(当前项目下)。 */
-  async function create(projectId: number, name?: string): Promise<Conversation> {
+  /** 新建会话(当前项目下)。keepMessages=true 时保留当前消息流(并把会话 id 修正为新会话),
+   *  用于发送中乐观推送的场景: 避免 create 的网络延迟 + messages.value=[] 清空刚推送的 user 气泡。 */
+  async function create(projectId: number, name?: string, keepMessages = false): Promise<Conversation> {
     creating.value = true
     try {
       const c = await projectsApi.createConversation(projectId, name)
       if (!conversations.value.some(x => x.id === c.id)) {
         conversations.value.unshift(c)
       }
-      if (currentConvId.value && messages.value.length > 0) {
+      if (!keepMessages && currentConvId.value && messages.value.length > 0) {
+        // 常规新建会话: 把当前(旧)会话内容移入历史折叠区
         const oldConv = conversations.value.find(x => x.id === currentConvId.value)
         if (oldConv) {
           pastSessions.value.unshift({
@@ -159,7 +161,13 @@ export const useConversationStore = defineStore('conversation', () => {
         }
       }
       currentConvId.value = c.id
-      messages.value = []
+      if (keepMessages && messages.value.length > 0) {
+        // 发送中乐观推送的消息(user 气泡 + assistant 占位)需保留并修正会话 id,
+        // 否则 create 的网络延迟会清空气泡, 导致用户消息在后台返回前被隐藏。
+        messages.value = messages.value.map(m => ({ ...m, conversation_id: c.id }))
+      } else {
+        messages.value = []
+      }
       sessionStorage.setItem('activeConv_' + projectId, String(c.id))
       return c
     } finally {
