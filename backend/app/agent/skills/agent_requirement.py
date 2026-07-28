@@ -286,12 +286,13 @@ async def requirement_agent_handler(
         # 文字版总结(进入对话主气泡, 修复"只有文件没文字")
         summary_md = _build_requirement_summary(data)
         yield ev("refined", data=summary_md, agent_id="requirement_agent")
-        # 主动咨询是否建站 + 持久化 CTA 提示(不依赖脆弱的前端瞬时态)
-        yield ev("paused", stage="await_confirm", plan_title=data["brand"].get("name", ""),
-                 content="需求文档已就绪 ✅ 是否现在开始为您建站？点击下方「开始建站」按钮，或直接回复「开始生成 / 帮我做网站」即可。",
-                 cta_label="开始建站",
+        # 主动咨询是否建站 —— 用纯文字提示(不阻塞/不锁定前端, D/#500)。
+        # 任务到此正常结束(done), 等待用户二次回复; 跨轮 DST 已记录 build/requirement 意图,
+        # 用户回复「开始生成 / 帮我做网站」会重新进入意图分类并被门控放行到生成器。
+        yield ev("think", stage="analyst",
+                 content="✅ 需求分析已完成。点击下方「开始建站」按钮，或直接回复「开始生成 / 帮我做网站」即可进入设计与开发。",
                  agent_id="requirement_agent")
-        AGENT_LOG.info("[需求] [4/4] 需求文档已推送,等待用户确认")
+        AGENT_LOG.info("[需求] [4/4] 需求文档已推送(纯文字CTA, 不阻塞)")
         return
 
     # 信息不全 → 追问

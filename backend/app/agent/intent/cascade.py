@@ -422,24 +422,39 @@ async def _classify_segment(
             _site_intent = get_intent("build_site") or {
                 "level1": "build", "level2": "site", "skill": "agent_generate_site", "id": "build_site",
             }
-            logger.info("[级联][%s] 建站共现启发式命中 → 直路由 build_site conf=0.92 (verb=%s noun=%s)",
-                        req_id, _has_verb, _has_noun)
+            # ── 建站需求门控(D/#501): 用户显式要建站但「既无需求文档、对话中也读不到可读需求」
+            #    → 先转产品经理(agent_requirement)采集规格, 而不是直冲生成器(否则产空壳站 / 卡 await_confirm)。
+            #    注意: 此启发式在 run_tools 之前短路返回, 所以必须在这里自己加门控,
+            #    不能指望下游 run_tools 的 doc-gate(它只作用于 LLM 终判路径)。
+            if not has_requirement_doc and not has_conv_req:
+                _sel_skill = "agent_requirement"
+                _conf = 0.9
+                _reason = "建站共现启发式: 动词+站点名词(无需求文档→先转产品经理采集规格)"
+                logger.info("[级联][%s] 建站共现启发式命中 但无需求 → 转 PM conf=%.2f (verb=%s noun=%s)",
+                            req_id, _conf, _has_verb, _has_noun)
+            else:
+                _sel_skill = _site_intent["skill"]
+                _conf = 0.92
+                _reason = "建站共现启发式: 动词+站点名词"
+                logger.info("[级联][%s] 建站共现启发式命中 → 直路由 conf=%.2f skill=%s (verb=%s noun=%s)",
+                            req_id, _conf, _sel_skill, _has_verb, _has_noun)
             reset_slots(conversation_id)
             await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                     user_id=user_id, raw_input=current_user_msg,
-                                    llm_intent="build/site", llm_confidence=0.92,
+                                    llm_intent="build/site", llm_confidence=_conf,
                                     rules_triggered=["heur_build_site"],
-                                    belief_before=0.0, belief_after=0.92, decision="route",
+                                    belief_before=0.0, belief_after=_conf, decision="route",
                                     latency_ms=(time.time() - t0) * 1000, tokens_used=0,
-                                    specialist_routed=_site_intent["skill"], outcome="pending",
+                                    specialist_routed=_sel_skill, outcome="pending",
                                     extra={"source": "heur_build_site"})
-            await record_intent_classify("route", "heur_build_site", (time.time() - t0) * 1000, confidence=0.92)
+            await record_intent_classify("route", "heur_build_site", (time.time() - t0) * 1000, confidence=_conf)
             return _emit_route(
-                _site_intent, 0.92, decision="route",
-                selected_skill=_site_intent["skill"], industry="other",
-                reason="建站共现启发式: 动词+站点名词",
+                _site_intent, _conf, decision="route",
+                selected_skill=_sel_skill, industry="other",
+                reason=_reason,
                 request_id=req_id,
-                evidence={"heur_build_site": True, "verb": _has_verb, "noun": _has_noun},
+                evidence={"heur_build_site": True, "verb": _has_verb, "noun": _has_noun,
+                          "routed_to_pm": _sel_skill == "agent_requirement"},
             )
 
     # ── [1] 规则强信号 ──

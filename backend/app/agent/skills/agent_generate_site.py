@@ -764,23 +764,10 @@ async def generate_stream(
             goal=plan.get("goal", ""),
             steps=plan.get("steps", []),
         )
-        # 方案确认: 暂停等待用户确认后才开始生成代码
-        yield ev(
-            "paused",
-            stage="await_confirm",
-            plan_title=plan.get("title", ""),
-            plan_goal=plan.get("goal", ""),
-            plan_steps=plan.get("steps", []),
-            req_source=req_source,
-            req_preview=req_text[:80],
-            content=f"已根据您的需求(来源: {req_source})生成建站方案，确认后开始设计与开发。点击「确认并生成」，或直接回复「开始生成 / 帮我做网站」即可。",
-            cta_label="确认并生成",
-        )
-        # 暂停, 等待前端发起 resume/confirm 续接。
-        # 注意: 业务代理 proxy.py 收到 paused(await_confirm) 时会 ck_set 持久化
-        # {title,goal,steps}, resume 时注入 checkpoint → handler 从 planner_done 续跑 Coder,
-        # 因此此处只需 return, 无需 emit checkpoint(那会进入 dead 分支)。
-        return
+        # D/#502: 不再暂停等待确认 —— 直接 PLANNER 完成后进 CODER 生成。
+        # 去掉 await_confirm 断点: 之前此处 yield paused + return 会把下方 Coder/Reviewer/投递
+        # 变成死代码, 且会让前端卡在「running/await_confirm」无法继续。
+        # 现在方案以 plan 事件展示后即开始生成, 无需用户手动确认(用户要停可随时点停止)。
 
         # 2) Coder(流式,模型不可用时不自动降级,由前端确认后重发)
         # 提前告知前端正在生成的文件名(供跑马灯占位 + loading 状态), 不含文件内容
