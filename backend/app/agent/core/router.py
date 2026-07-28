@@ -43,12 +43,14 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
                            project_constraints: list[str] | None = None,
                            user_id: int | None = None,
                            project_id: int | None = None,
-                           has_requirement_doc: bool = False) -> dict:
+                           has_requirement_doc: bool = False,
+                           has_site_artifact: bool = False) -> dict:
     """意图识别入口: 统一走混合级联 classify_v3(自 v1.2.0 起为唯一分类器)。
 
     v0.9.0: 新增 user_id/project_id 用于 Chroma 上下文增强。
     v1.0.7: 新增 has_requirement_doc, 透传给工具路由决定是否放行建站。
     v1.2.0: 收敛为单一分类器(cascade), 移除 SIR(classify_v2)双轨分支。
+    v1.2.6: 新增 has_site_artifact, 供上下文闸门(已落地站点 → 追问直路由 build_modify)。
     """
     t0 = time.time()
     # 精细日志[发送结构体]:打印意图识别的完整入参(消息数 + 末条用户输入 + 全部透传参数)
@@ -75,6 +77,7 @@ async def detect_intent_v2(messages: list[dict], model_id: str = "deepseek",
         user_id=user_id,
         project_id=project_id,
         has_requirement_doc=has_requirement_doc,
+        has_site_artifact=has_site_artifact,
     )
     l1 = result.intent["level1"]
     l2 = result.intent["level2"]

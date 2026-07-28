@@ -781,6 +781,37 @@ async def worker_loop(concurrency: int = 1):
                         logger.debug("[Worker] 需求文档统计失败(忽略): %s", _rd_e)
                 proj_status = job.get("project_status", "draft")
                 has_req_doc = bool(doc)  # v1.0.7: 是否已存在需求文档(决定工具路由是否放行建站)
+                # D(#486): 上下文闸门——本会话是否已落地建站产物(repo="site" 的 Artifact)。
+                # 命中站点词 + 非 delete/reset/纯闲聊 → 直路由 build_modify(网站迭代),
+                # 解决"html 里按钮点不动/打不开"等追问进不了修改流程的问题。
+                has_site_artifact = False
+                try:
+                    from ...repos.business_repos import artifact_repo as _art_repo
+                    from ...db import SessionLocal as _Sess
+                    from ...cache import ck_get
+                    if conversation_id:
+                        async with _Sess() as _s:
+                            has_site_artifact = await _art_repo.exists_repo_for_conversation(
+                                _s, conversation_id, repo="site")
+                        # D(#486) 竞态加固: 已落地建站产物 == 已生成 Artifact(repo=site)
+                        #   或 存在「await_confirm 建站计划断点」(方案已确认将生成站点)。
+                        #   否则 #8/#11 类「建站→追问修改」同会话, 修改请求若早于上一条
+                        #   建站 Artifact 落库即发, has_site_artifact=False → 误路由 agent_chat。
+                        if not has_site_artifact:
+                            try:
+                                _ck = await ck_get(conversation_id)
+                                if isinstance(_ck, dict) and (
+                                    _ck.get("status") == "paused"
+                                    and _ck.get("stage") == "await_confirm"
+                                ):
+                                    has_site_artifact = True
+                                    logger.info("[Worker] [3/6] 上下文闸门: 命中await_confirm建站计划断点, "
+                                                "视为已落站(竞态加固) conv=%s", conversation_id)
+                            except Exception as _ck_e:  # noqa: BLE001
+                                logger.debug("[Worker] 读 ck 失败(忽略) conv=%s: %s", conversation_id, _ck_e)
+                except Exception as _art_e:  # noqa: BLE001
+                    logger.debug("[Worker] 查 site artifact 失败(忽略) conv=%s: %s", conversation_id, _art_e)
+                logger.info("[Worker] [3/6] 上下文闸门 has_site_artifact=%s conv=%s", has_site_artifact, conversation_id)
                 # Tier 1/2: 项目系统 prompt + 结构化硬约束(由 business 侧解析后下发)
                 proj_prompt = job.get("project_system_prompt", "") or ""
                 proj_constraints = job.get("project_constraints") or []
@@ -852,7 +883,8 @@ async def worker_loop(concurrency: int = 1):
                                              project_status=proj_status,
                                              project_constraints=proj_constraints,
                                              user_id=user_id, project_id=project_id,
-                                             has_requirement_doc=has_req_doc),
+                                             has_requirement_doc=has_req_doc,
+                                             has_site_artifact=has_site_artifact),
                             timeout=35.0,
                         )
                     except asyncio.TimeoutError:

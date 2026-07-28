@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import time
+import re
 from collections.abc import AsyncGenerator
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -129,7 +130,11 @@ SYS_REVIEWER = (
     "你是严格的资深前端评审 + 设计总监。检查给定 HTML 是否:① 以 <html 开头且结构基本完整;"
     "② 标签基本闭合;③ 不含明显会白屏的致命错误(eval / 未定义脚本、外部不可达资源);"
     "④ 视觉与交互是否达到『高级感』: 有层次/留白/微交互/缓动,而非平涂色块或简陋排版;"
-    "⑤ 颜色/排版/响应式/可访问性有无问题;⑥ 是否含危险内容/外部不可控脚本(safety)。\n"
+    "⑤ 颜色/排版/响应式/可访问性有无问题;⑥ 是否含危险内容/外部不可控脚本(safety);"
+    "⑦【交互行为】用户要求的功能(按钮/导航/轮播/表单/弹窗/Tab 等)必须有真实 JS 事件绑定,"
+    "且 DOM 选择器能匹配到元素: 逐项核对每个可见交互控件, 确认存在 addEventListener/onclick="
+    "().querySelector(.+)/getElementById(.+) 之类绑定且 class/id 与 HTML 中一致;"
+    "若页面含『点击 X 跳转/切换/提交』但找不到对应事件或选择器对不上, 视为未实现(不通过)。\n"
     "输出 JSON(不要代码块围栏):\\n"
     '{"passed": true/false, "comment": "..., 最多60字", '
     '"scores": {"correctness": 1-10, "completeness": 1-10, "readability": 1-10, '
@@ -257,6 +262,29 @@ async def _review(model_id: str, html: str) -> Dict:
                 "scores": {"correctness": 2, "completeness": 5, "readability": 5,
                            "compliance": 5, "efficiency": 5, "craft": 3, "safety": 8},
                 "issues": ["标签未闭合"], "needs_review": True}
+    # C(#487): 静态交互校验 —— 仅当页面存在「必须 JS 才能工作」的控件(按钮 / 表单提交 /
+    # Tab 切换 / 轮播 / 折叠菜单 等), 且 JS 里没有任何事件绑定时, 才判不通过, 触发 Reflexion
+    # 让 Coder 补上交互逻辑(修复"按钮无法点击/不工作却过了 QC"的痛点)。
+    # 注意: <a href> 链接、营销文案里的"点击/导航/跳转"等并**不**需要 JS, 必须排除,
+    # 否则每个含导航链接的整站都会误判不通过 → 反复 Reflexion 拖垮建站耗时(实测 7~8min/站)。
+    _has_interactive_controls = bool(
+        re.search(
+            r"<button|<input[^>]*type=[\"']?(?:button|submit|reset)|"
+            r"data-(?:tab|toggle|target|action|accordion|carousel|slide)|"
+            r"class=[\"'][^\"']*(?:hamburger|menu-toggle|dropdown|accordion|carousel|slider|tab)",
+            html, re.IGNORECASE)
+    )
+    _has_js_binding = bool(
+        re.search(r"addEventListener|onclick\s*=|querySelector|getElementById|\.on\w+\s*=", html, re.IGNORECASE)
+        and "<script" in low
+    )
+    if _has_interactive_controls and not _has_js_binding:
+        GEN_LOG.warning("[gen] 静态交互校验未通过: 存在交互控件但无 JS 事件绑定")
+        return {"passed": False,
+                "comment": "检测到的交互控件(按钮/导航/切换等)缺少 JS 事件绑定, 点击会无反应",
+                "scores": {"correctness": 3, "completeness": 4, "readability": 5,
+                           "compliance": 5, "efficiency": 5, "craft": 4, "safety": 8},
+                "issues": ["交互控件缺少 JS 事件绑定(按钮/导航点击无反应)"], "needs_review": True}
     # LLM 自审(给 JSON 结论)
     try:
         t0r = time.monotonic()
@@ -317,41 +345,55 @@ def _parse_multi_files(raw: str) -> dict[str, str]:
     return files
 
 
-def _deliver(html: str, trace_id: str, user_id: int | None = None,
-             project_id: int | None = None, version: int | None = None) -> dict[str, str]:
-    """落盘本地产物并上传 COS,返回各文件预览直链 dict{文件名: url}(失败返回 {},不阻断主流程)。
+async def _deliver(html: str, trace_id: str, user_id: int | None = None,
+              project_id: int | None = None, version: int | None = None) -> AsyncGenerator[Dict, None]:
+    """落盘本地产物并上传 COS,逐文件 yield 上传进度事件,末帧 yield 汇总直链。
+
+    事件协议(供 proxy / 前端 exec-head 消费):
+      ev("cos_upload", filename=..., index=..., total=..., url=...)        # 单文件上传完成
+      ev("progress", pct=N, stage="cos_upload", file=...)                  # 上传中(预留进度)
+      ev("deliver_done", data={"files": {fname: url}})                     # 全部完成
 
     COS key 版本化: previews/{user_id}/{project_id}/v{version}/{filename},
     使每次生成/调整在云存储留痕、不被覆盖(旧版仍可按 artifact 行点选)。
     """
+    from ..tools.cos_upload import cos_upload
+
+    files = _parse_multi_files(html)
+    # 优先按本地落盘生成预览(即便 COS 不可用, 前端也可 iframe 内联 srcdoc 兜底)
+    art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
+    ver_seg = f"v{version}" if version else (trace_id or "site")
+    uid = user_id if user_id is not None else "anon"
+    pid = project_id if project_id is not None else "anon"
+    base_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/{uid}/{pid}/{ver_seg}"
+
+    total = len(files)
     result_urls: dict[str, str] = {}
-    try:
-        from ..tools.cos_upload import cos_upload
-
-        files = _parse_multi_files(html)
-        art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
-        ver_seg = f"v{version}" if version else (trace_id or "site")
-        uid = user_id if user_id is not None else "anon"
-        pid = project_id if project_id is not None else "anon"
-        base_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/{uid}/{pid}/{ver_seg}"
-
-        for fname, content in files.items():
-            site_dir = art_dir / "anon" / (trace_id or "site") / fname.replace('/', '_')
-            site_dir.parent.mkdir(parents=True, exist_ok=True)
-            site_dir.write_text(content, encoding="utf-8")
-
+    idx = 0
+    for fname, content in files.items():
+        idx += 1
+        # 本地落盘(始终进行, 供 srcdoc 兜底 & 后续修改读取上一版)
+        site_dir = art_dir / "anon" / (trace_id or "site") / fname.replace('/', '_')
+        site_dir.parent.mkdir(parents=True, exist_ok=True)
+        site_dir.write_text(content, encoding="utf-8")
+        # 进度帧: 开始上传该文件
+        yield ev("progress", pct=int((idx - 1) / max(total, 1) * 100), stage="cos_upload", file=fname)
+        # 上传 COS(失败不阻断: 降级用本地内容预览)
+        try:
             cos_key = f"{base_key}/{fname}"
             res = cos_upload(str(site_dir), cos_key)
             if res.get("ok") and res.get("url"):
                 result_urls[fname] = res["url"]
+                yield ev("cos_upload", filename=fname, index=idx, total=total, url=res["url"])
             else:
-                # 诊断可见性: 投递失败必须留痕, 否则 preview 空了无从查起(本次踩坑: 缺 cos SDK 被静默吞)
                 GEN_LOG.warning("[deliver] COS 投递未返回 URL trace=%s file=%s cos_key=%s res=%s",
                                 trace_id, fname, cos_key, res)
+        except Exception as e:
+            GEN_LOG.warning("[deliver] COS 上传异常(降级本地预览) trace=%s file=%s: %s", trace_id, fname, e)
+        # 进度帧: 该文件完成
+        yield ev("progress", pct=int(idx / max(total, 1) * 100), stage="cos_upload", file=fname)
 
-    except Exception as e:
-        GEN_LOG.warning("[deliver] 本地落盘/COS 投递异常 trace=%s: %s", trace_id, e)
-    return result_urls
+    yield ev("deliver_done", data={"files": result_urls})
 
 
 # 评分维度中文标签(用于生成结果汇总文案)
@@ -649,9 +691,16 @@ async def generate_stream(
         # 收尾
         yield ev("review", data=review)   # 评审结果(7维+needs_review), 供后置 QC 按需复核
         yield ev("node", stage="previewing")
-        urls = _deliver(html, trace_id, user_id, project_id, version)
+        urls: dict[str, str] = {}
+        async for _d in _deliver(html, trace_id, user_id, project_id, version):
+            if _d.get("event") == "deliver_done":
+                urls = (_d.get("data") or {}).get("files", {}) or {}
+            else:
+                yield _d  # 透传 cos_upload / progress 给前端进度条
         main_url = urls.get('index.html', '')
-        yield ev("preview", url=main_url, fallback="srcdoc" if not main_url else None, files=urls)
+        _index_content = _parse_multi_files(html).get('index.html', '')
+        yield ev("preview", url=main_url, fallback="srcdoc" if not main_url else None,
+                 files=urls, content=_index_content if not main_url else None)
         with suppress(Exception):
             await asyncio.to_thread(save_memory, trace_id or "site", plan.get("title", "建站"), html[:1500], plan.get("steps", []))
         # 文字汇总: 让后端在返回文件的同时, 以文字形式给出本次生成结果说明(前端气泡展示)
@@ -814,10 +863,18 @@ async def generate_stream(
 
         # 4) 预览投递(COS 直链,§10)
         yield ev("node", stage="previewing")
-        urls = _deliver(html, trace_id, user_id, project_id, version)
+        urls = {}
+        async for _d in _deliver(html, trace_id, user_id, project_id, version):
+            if _d.get("event") == "deliver_done":
+                urls = (_d.get("data") or {}).get("files", {}) or {}
+            else:
+                yield _d  # 透传 cos_upload / progress 给前端进度条
         main_url = urls.get('index.html', '')
+        # E(#488): COS 不可用时用本地落盘的 HTML 兜底预览(前端 RightPanel 可 iframe srcdoc 直接渲染)
+        _index_content = _parse_multi_files(html).get('index.html', '')
         GEN_LOG.info("[gen] 预览投递 trace=%s files=%d url=%s", trace_id, len(urls), main_url or "无(srcdoc 兜底)")
-        yield ev("preview", url=main_url, fallback="srcdoc" if not main_url else None, files=urls)
+        yield ev("preview", url=main_url, fallback="srcdoc" if not main_url else None,
+                 files=urls, content=_index_content if not main_url else None)
 
         # ②-a 记忆闭环:生成成功后回写 memory 集合(供未来检索增强)
         with suppress(Exception):

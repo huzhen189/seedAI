@@ -158,6 +158,18 @@ class ArtifactRepo(BaseRepo[Artifact]):
         result = await db.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def exists_repo_for_conversation(
+        self, db: AsyncSession, conv_id: int, repo: str
+    ) -> bool:
+        """D(#486): 上下文闸门用 —— 查本会话是否已落地某类产物(如 repo='site' 的建站产物)。"""
+        stmt = (
+            select(Artifact.id)
+            .where(Artifact.conversation_id == conv_id, Artifact.repo == repo)
+            .limit(1)
+        )
+        result = await db.execute(stmt)
+        return result.first() is not None
+
     async def upsert_by_trace(
         self, db: AsyncSession, trace_id: str, *, project_id: int,
         conversation_id: int, title: str, repo: str, files: dict,

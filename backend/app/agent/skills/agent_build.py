@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import time
+import re
 from collections.abc import AsyncGenerator
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -115,7 +116,11 @@ SYS_REVIEWER = (
     "你是严格的资深前端评审 + 设计总监。检查给定 HTML 是否:① 以 <html 开头且结构基本完整;"
     "② 标签基本闭合;③ 不含明显会白屏的致命错误(eval / 未定义脚本、外部不可达资源);"
     "④ 视觉与交互是否达到『高级感』: 有层次/留白/微交互/缓动,而非平涂色块或简陋排版;"
-    "⑤ 颜色/排版/响应式/可访问性有无问题;⑥ 是否含危险内容/外部不可控脚本(safety)。\\n"
+    "⑤ 颜色/排版/响应式/可访问性有无问题;⑥ 是否含危险内容/外部不可控脚本(safety);"
+    "⑦【交互行为】用户要求的功能(按钮/导航/轮播/表单/弹窗/Tab 等)必须有真实 JS 事件绑定,"
+    "且 DOM 选择器能匹配到元素: 逐项核对每个可见交互控件, 确认存在 addEventListener/onclick="
+    "().querySelector(.+)/getElementById(.+) 之类绑定且 class/id 与 HTML 中一致;"
+    "若页面含『点击 X 跳转/切换/提交』但找不到对应事件或选择器对不上, 视为未实现(不通过)。\\n"
     "输出 JSON(不要代码块围栏):\\n"
     '{"passed": true/false, "comment": "..., 最多60字", '
     '"scores": {"correctness": 1-10, "completeness": 1-10, "readability": 1-10, '
@@ -230,6 +235,22 @@ async def _review(model_id: str, html: str) -> Dict:
                 "scores": {"correctness": 2, "completeness": 5, "readability": 5,
                            "compliance": 5, "efficiency": 5, "craft": 3, "safety": 8},
                 "issues": ["标签未闭合"], "needs_review": True}
+    # C(#487): 静态交互校验(镜像 agent_generate_site) —— 仅「必须 JS 才能工作」的控件
+    # (<button>/表单提交/Tab/轮播/折叠菜单)且缺少事件绑定时才不通过; <a href> 链接与
+    # 文案里的"点击/导航"不需要 JS, 须排除, 否则每个含导航的整站都会被误判拖垮建站耗时。
+    _has_ctrl = bool(re.search(
+        r"<button|<input[^>]*type=[\"']?(?:button|submit|reset)|"
+        r"data-(?:tab|toggle|target|action|accordion|carousel|slide)|"
+        r"class=[\"'][^\"']*(?:hamburger|menu-toggle|dropdown|accordion|carousel|slider|tab)",
+        html, re.IGNORECASE))
+    _has_bind = bool(re.search(r"addEventListener|onclick\s*=|querySelector|getElementById|\.on\w+\s*=", html, re.IGNORECASE) and "<script" in low)
+    if _has_ctrl and not _has_bind:
+        GEN_LOG.warning("[gen] (build) 静态交互校验未通过: 交互控件缺少 JS 事件绑定")
+        return {"passed": False,
+                "comment": "检测到的交互控件(按钮/导航/切换等)缺少 JS 事件绑定, 点击会无反应",
+                "scores": {"correctness": 3, "completeness": 4, "readability": 5,
+                           "compliance": 5, "efficiency": 5, "craft": 4, "safety": 8},
+                "issues": ["交互控件缺少 JS 事件绑定(按钮/导航点击无反应)"], "needs_review": True}
     try:
         t0r = time.monotonic()
         out = await asyncio.to_thread(_chat, model_id, SYS_REVIEWER, [{"role": "user", "content": html[:6000]}])

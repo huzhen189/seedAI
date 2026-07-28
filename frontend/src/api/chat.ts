@@ -49,6 +49,10 @@ export interface ChatCallbacks {
   onQc?: (data: QcResult) => void
   /** L2 精炼结果(v0.9.0): done 前下发的终版润色文本(建站类), 用于覆盖气泡内容 */
   onRefined?: (data: string) => void
+  /** B(#488): COS 上传进度(pct 0~100), 供 exec-head 进度条实时展示「📤 上传中 NN%」 */
+  onProgress?: (data: { pct: number; stage?: string; file?: string }) => void
+  /** B(#488): 单文件 COS 上传完成(filename/url) */
+  onCosUpload?: (data: { filename: string; index?: number; total?: number; url?: string }) => void
   /** SIR 澄清(CLARIFY):意图模糊/缺规格时, 下发动态最少必要追问 + 结构化选项, 用户确认后带 clarified 重发 */
   onClarify?: (data: ClarifyEvent) => void
 }
@@ -139,6 +143,14 @@ export function startChat(opts: StartChatOptions): EventSource {
     const d = safeParse((e as MessageEvent).data)
     const text = typeof d.data === 'string' ? d.data : (e as MessageEvent).data
     opts.cb.onRefined?.(text)
+  })
+  es.addEventListener('progress', (e) => {
+    const d = safeParse((e as MessageEvent).data)
+    opts.cb.onProgress?.({ pct: Number(d.pct) || 0, stage: d.stage, file: d.file })
+  })
+  es.addEventListener('cos_upload', (e) => {
+    const d = safeParse((e as MessageEvent).data)
+    opts.cb.onCosUpload?.({ filename: d.filename, index: d.index, total: d.total, url: d.url })
   })
   es.addEventListener('done', () => {
     console.log('[SSE] 收到 done, 关闭连接')

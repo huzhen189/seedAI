@@ -292,6 +292,7 @@ async def _classify_segment(
     user_id: int | None = None,
     project_id: int | None = None,
     has_requirement_doc: bool = False,
+    has_site_artifact: bool = False,
 ) -> PipelineResult:
     """单意图分类核心(步骤 ①~⑪, 不含多意图拆分)。
 
@@ -349,6 +350,97 @@ async def _classify_segment(
             reason="reset", request_id=req_id,
             evidence={"reset": True},
         )
+
+    # ── [+1] 上下文闸门 D(#486): 已落地建站产物 → 追问直路由 build_modify(网站迭代)。
+    #   用户原话: "html 里按钮点不动/打不开/不工作" 这种对成品的反馈进不了修改流程。
+    #   规则: 命中站点修改词 + 非纯闲聊/非 delete/reset(已被上面短路) → 置信 0.9 直路由。
+    #   明显纯夸赞/无修改意图 → 排除走普通分类(交给 LLM 或 novelty 兜底)。
+    #   拿不准(命中修改词但句子很模糊)→ 不强行路由, 落回下方 LLM 终判。
+    if has_site_artifact:
+        _mod_kw = ("修改", "改一下", "调整", "优化", "换个", "换掉", "换成", "改成",
+                   "加一个", "加个", "去掉", "删掉", "删除", "修复", "修一下", "不能点",
+                   "点不动", "点不了", "无法点击", "打不开", "打不开", "不工作", "没反应",
+                   "失效", "坏了", "错位", "重叠", "样式", "配色", "颜色", "布局", "导航",
+                   "按钮", "链接", "页面", "首页", "排版", "间距", "字体", "动画", "交互",
+                   "响应式", "移动端", "手机", "对齐", "标题", "文案", "图片", "图标")
+        _praise_kw = ("好看", "漂亮", "喜欢", "不错", "厉害", "棒", "完美", "谢谢", "感谢", "赞", "好用", "真棒")
+        _hit_mod = sum(1 for kw in _mod_kw if kw in current_user_msg)
+        _hit_praise = sum(1 for kw in _praise_kw if kw in current_user_msg)
+        _is_obvious_praise = _hit_praise >= 1 and _hit_mod == 0
+        if _hit_mod >= 1 and not _is_obvious_praise:
+            _conf = 0.9 if _hit_mod >= 2 else 0.78
+            _mod_intent = get_intent("build_modify") or {
+                "level1": "build", "level2": "modify", "skill": "agent_build",
+                "id": "build_modify",
+            }
+            logger.info("[级联][%s] 上下文闸门命中: 已落站 + 命中修改词(%d) → 直路由 build_modify conf=%.2f",
+                        req_id, _hit_mod, _conf)
+            reset_slots(conversation_id)
+            await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
+                                    user_id=user_id, raw_input=current_user_msg,
+                                    llm_intent="build/modify", llm_confidence=_conf,
+                                    rules_triggered=["ctx_gate_modify"],
+                                    belief_before=0.0, belief_after=_conf, decision="route",
+                                    latency_ms=(time.time() - t0) * 1000, tokens_used=0,
+                                    specialist_routed=_mod_intent["skill"], outcome="pending",
+                                    extra={"source": "ctx_gate_modify"})
+            await record_intent_classify("route", "ctx_gate_modify", (time.time() - t0) * 1000, confidence=_conf)
+            return _emit_route(
+                _mod_intent, _conf, decision="route",
+                selected_skill=_mod_intent["skill"], industry="other",
+                reason=f"ctx_gate: 已落站产物 + 命中修改词×{_hit_mod}",
+                request_id=req_id,
+                evidence={"ctx_gate_modify": True, "mod_hits": _hit_mod, "site_artifact": True},
+            )
+        elif _is_obvious_praise:
+            logger.info("[级联][%s] 上下文闸门: 仅纯夸赞(无修改词) → 不强制路由, 落回普通分类", req_id)
+
+    # ── [1-β] 建站意图共现启发式(修复白名单短板: 纯子串匹配无法覆盖
+    #    "帮我做一个个人博客网站"/"生成公司官网" 这类泛化表达)。
+    #    规则: 命中「建站动词」且(命中「站点名词」或「网站修饰词」)→ 直路由 build_site。
+    #    排除干扰: 纯"做个/写个 X" 但 X 不是站点(如"做个冷笑话")不触发;
+    #    文档/设计/搜索/评审等技能由各自规则或下方 LLM 终判接手, 此处不抢占。
+    if not is_reset_signal(current_user_msg):
+        _build_verbs = ("帮我建", "帮我生成", "帮我做", "帮我搭", "帮我开发", "帮我弄",
+                        "做一个", "生成一个", "建一个", "搭一个", "开发", "搭建", "生成",
+                        "建站", "做网站", "建网站", "搞个网站", "弄个网站", "给我做", "给我建",
+                        "我想做", "我想要", "想做一个", "需要做一个", "来一个", "做一个网站")
+        # 仅无歧义站点名词触发; "页面/单页/网页" 等留给 build_page / design 各自规则或 LLM。
+        # v3 修正(#18 漏召): 合并 multi_intent._SITE_NOUNS 的「平台类站点语义」扩展
+        # (在线教育/教育平台/旅游平台/旅游小程序 等), 否则"做一个在线教育平台"这类
+        # 不含"网站"字样的建站诉求会漏过直路由、回退到 chat(实测 #18 误路由 agent_chat)。
+        try:
+            from .multi_intent import _SITE_NOUNS as _MI_SITE_NOUNS
+        except Exception:
+            _MI_SITE_NOUNS = ()
+        _site_nouns = ("网站", "官网", "门户网站", "博客", "blog", "主页", "首页", "落地页",
+                       "h5", "小程序官网", "站点", "公司官网", "企业官网", "个人网站",
+                       "电商网站", "商城", "平台官网", "官网页面", "web页面") + tuple(_MI_SITE_NOUNS)
+        _has_verb = any(v in current_user_msg for v in _build_verbs)
+        _has_noun = any(n in current_user_msg for n in _site_nouns)
+        if _has_verb and _has_noun:
+            _site_intent = get_intent("build_site") or {
+                "level1": "build", "level2": "site", "skill": "agent_generate_site", "id": "build_site",
+            }
+            logger.info("[级联][%s] 建站共现启发式命中 → 直路由 build_site conf=0.92 (verb=%s noun=%s)",
+                        req_id, _has_verb, _has_noun)
+            reset_slots(conversation_id)
+            await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
+                                    user_id=user_id, raw_input=current_user_msg,
+                                    llm_intent="build/site", llm_confidence=0.92,
+                                    rules_triggered=["heur_build_site"],
+                                    belief_before=0.0, belief_after=0.92, decision="route",
+                                    latency_ms=(time.time() - t0) * 1000, tokens_used=0,
+                                    specialist_routed=_site_intent["skill"], outcome="pending",
+                                    extra={"source": "heur_build_site"})
+            await record_intent_classify("route", "heur_build_site", (time.time() - t0) * 1000, confidence=0.92)
+            return _emit_route(
+                _site_intent, 0.92, decision="route",
+                selected_skill=_site_intent["skill"], industry="other",
+                reason="建站共现启发式: 动词+站点名词",
+                request_id=req_id,
+                evidence={"heur_build_site": True, "verb": _has_verb, "noun": _has_noun},
+            )
 
     # ── [1] 规则强信号 ──
     rule_hits = match_rules(current_user_msg)
@@ -601,8 +693,9 @@ async def classify_v3(
     user_id: int | None = None,
     project_id: int | None = None,
     has_requirement_doc: bool = False,
+    has_site_artifact: bool = False,
 ) -> PipelineResult:
-    """混合级联意图识别(v1.2.5)。
+    """混合级联意图识别(v1.2.6)。
 
     先单意图分类(_classify_segment), 若 decision==route 且轻量门控命中 ≥2 意图大类,
     再做多意图拆分(A+B 路由: recognize_intents)。
@@ -612,6 +705,7 @@ async def classify_v3(
         conversation_id=conversation_id, context_hint=context_hint,
         project_status=project_status, project_constraints=project_constraints,
         user_id=user_id, project_id=project_id, has_requirement_doc=has_requirement_doc,
+        has_site_artifact=has_site_artifact,
     )
 
     # ── [6] 多意图拆分(A+B 路由: 方案B 混合分层优先, 必要时升级方案A LLM 深拆) ──

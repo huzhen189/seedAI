@@ -82,15 +82,6 @@ function parseContent(c: string): ContentData {
 
 const parsed = computed(() => parseContent(props.content))
 
-// 兼容两种 files 格式: 旧版数组 [{name, size}] / 新版对象 {name: {name, size}}
-const normalizedFiles = computed(() => {
-  const f = (parsed.value as any).files
-  if (!f) return []
-  if (Array.isArray(f)) return f
-  if (typeof f === 'object') return Object.values(f)
-  return []
-})
-
 const isExpandable = computed(() =>
   parsed.value.type === 'plain' && parsed.value.text.length > 2000,
 )
@@ -122,31 +113,9 @@ function fmtTime(t: string): string {
     </div>
 
     <div class="body" :class="{ expanded: expanded }">
-      <!-- 纯文本 / 闲聊 -->
+      <!-- 纯文本 / 闲聊 / 建站文字总结(A#485: 去 site-card 双卡, 只留总结文案) -->
       <MarkdownView v-if="parsed.type === 'plain' && role === 'assistant'" :content="parsed.text" />
       <span v-else-if="parsed.type === 'plain'">{{ parsed.text }}</span>
-      <!-- 建站产物 -->
-      <div v-else-if="parsed.type === 'site'" class="site-card">
-        <div class="site-title">🌐 {{ parsed.title }}</div>
-        <!-- 文字总结(v1.2.2): 持久化, 刷新后也能看到 AI 的反馈说明 -->
-        <div v-if="parsed.summary" class="site-summary">
-          <MarkdownView :content="parsed.summary" />
-        </div>
-        <div class="site-links">
-          <button type="button" class="btn btn-preview" @click="emit('open-file', 'index.html')">🔗 预览</button>
-          <a v-if="parsed.download_url" :href="parsed.download_url" class="btn">📥 下载</a>
-        </div>
-        <div v-if="normalizedFiles.length" class="site-files">
-          <button
-            v-for="f in normalizedFiles"
-            :key="f.name"
-            type="button"
-            class="file-tag"
-            :title="`点击在右侧预览面板查看 ${f.name}`"
-            @click="emit('open-file', f.name)"
-          >{{ f.name }} ({{ (f.size / 1024).toFixed(1) }}KB)</button>
-        </div>
-      </div>
       <!-- 代码产物 -->
       <div v-else-if="parsed.type === 'code'" class="code-card">
         <div class="code-title">📄 {{ parsed.title }}</div>
@@ -285,29 +254,6 @@ function fmtTime(t: string): string {
   border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; background: #fff;
 }
 .time { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 6px; }
-
-/* ---- Site Card ---- */
-.site-card {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  padding: 12px;
-}
-.site-title { font-weight: 600; font-size: 15px; margin-bottom: 8px; }
-.site-links { display: flex; gap: 8px; margin-bottom: 8px; }
-.site-links .btn {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 5px 12px; font-size: 13px; border-radius: 6px;
-  background: var(--brand, #4f46e5); color: #fff; text-decoration: none;
-}
-.site-links .btn:hover { opacity: 0.9; }
-.site-files { display: flex; flex-wrap: wrap; gap: 4px; }
-.file-tag {
-  font-size: 11px; background: #e2e8f0; padding: 2px 6px; border-radius: 4px;
-  color: #475569; border: none; cursor: pointer; font-family: inherit;
-  transition: background .15s, transform .12s;
-}
-.file-tag:hover { background: #c7d2fe; color: #3730a3; transform: translateY(-1px); }
 
 /* ---- Code Card ---- */
 .code-card { background: #1e1e1e; border-radius: 8px; padding: 10px; }

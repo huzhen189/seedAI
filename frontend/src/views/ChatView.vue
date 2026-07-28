@@ -552,6 +552,11 @@ const cosFailedList = computed(() => projectArtifacts.value.filter((a) => a.stat
 const cosUploading = computed(() => cosUploadingList.value.length > 0)
 const cosFailed = computed(() => cosFailedList.value.length > 0)
 
+// B(#488): 生成阶段实时上传进度(0~100), 驱动 exec-head 的「📤 上传中 NN%」进度条
+const cosUploadPct = ref(0)
+const cosUploadFile = ref('')
+const cosUploadingActive = ref(false)
+
 async function retryCosUpload() {
   const pid = projectStore.currentProjectId
   if (pid == null) return
@@ -1091,6 +1096,18 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     onPreview: (d) => {
       if (d.url) previewUrl.value = d.url as string
     },
+    onProgress: (d) => {
+      // B(#488): 实时上传进度 → exec-head 进度条
+      cosUploadPct.value = Math.max(0, Math.min(100, Number(d.pct) || 0))
+      cosUploadFile.value = (d.file as string) || ''
+      cosUploadingActive.value = true
+    },
+    onCosUpload: (d) => {
+      cosUploadFile.value = (d.filename as string) || ''
+      if (typeof d.index === 'number' && typeof d.total === 'number' && d.total > 0) {
+        cosUploadPct.value = Math.round((d.index / d.total) * 100)
+      }
+    },
     onDegraded: () => {
       degraded.value = true
     },
@@ -1108,6 +1125,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       thoughtSteps.value = []
       planNodes.value = []
       planPreview.value = null
+      cosUploadingActive.value = false
+      cosUploadPct.value = 0
       clearActiveGen()
       clearUserStatus()
       clearTrailSnapshot(traceId.value)  // P5: 终止态清理快照, 避免陈旧轨迹复活
@@ -1933,6 +1952,12 @@ watch(pendingRetry, (r) => {
                   <span class="exec-stage">{{ streamingStageLabel }}</span>
                   <div v-if="liveThinkText" class="exec-body">{{ liveThinkText }}</div>
                   <div v-else class="exec-body exec-placeholder">正在分析你的需求…</div>
+                  <!-- B(#488): COS 上传进度条(exec-head 内实时「📤 上传中 NN%」) -->
+                  <div v-if="cosUploadingActive" class="cos-progress">
+                    <span class="cos-icon">📤</span>
+                    <span class="cos-label">正在上传{{ cosUploadFile ? '：' + cosUploadFile : '' }} {{ cosUploadPct }}%</span>
+                    <span class="cos-bar"><i :style="{ width: cosUploadPct + '%' }"></i></span>
+                  </div>
                 </div>
                 <!-- §9: 执行前计划预览卡(含 SOP 角色链路 badge) -->
                 <div v-if="planPreview" class="plan-preview">
@@ -2395,6 +2420,21 @@ class="clarify-confirm"
 .exec-stage {
   font-size: 12px; font-weight: 600; color: var(--brand, #4f46e5);
   vertical-align: middle;
+}
+/* B(#488): COS 上传进度条 */
+.cos-progress {
+  display: flex; align-items: center; gap: 6px; margin-top: 6px;
+  font-size: 11px; color: #475569;
+}
+.cos-icon { flex-shrink: 0; }
+.cos-label { flex-shrink: 0; white-space: nowrap; }
+.cos-bar {
+  flex: 1; height: 6px; background: #dbeafe; border-radius: 3px; overflow: hidden; min-width: 60px;
+}
+.cos-bar > i {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, #4f46e5, #22d3ee);
+  border-radius: 3px; transition: width .3s ease;
 }
 .exec-body {
   margin-top: 6px;

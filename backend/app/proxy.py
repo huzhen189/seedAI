@@ -535,6 +535,7 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
                       files_dict: dict[str, str] | None = None,
                       doc_files: dict[str, dict] | None = None,
                       refined_summary: str = "",
+                      deliver_fallback_content: str | None = None,
                       qc_result: dict | None = None,
                       project_id: int | None = None,
                       requirement_doc: dict | None = None) -> None:
@@ -546,7 +547,7 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
             logger.info("[chat] [8/8] 后台落库 trace=%s attempt=%d", tid, attempt + 1)
             async with _S() as s:
                 await finish_trace(s, tid, terminal_status, max(0, len(assistant_text) // 4))
-                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url, files_dict, refined_summary, terminal_status, doc_files)
+                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url, files_dict, refined_summary, terminal_status, doc_files, deliver_fallback_content)
                 # 后置 QC 三裁判结果落库(幂等 upsert by trace_id)
                 if qc_result is not None:
                     try:
@@ -868,6 +869,7 @@ async def chat(
         files_dict: dict[str, str] = {}  # 多文件产物: {文件名: COS URL} (v1.2.1+)
         doc_files: dict[str, dict] = {}  # 文档产物: {文件名: {name,size,content}} (Fix B #483, doc 技能)
         refined_text: str = ""  # 文字总结: agent 生成完毕后的自然语言反馈(v1.2.2)
+        deliver_fallback_content: str | None = None  # E(#488): COS 不可用时站点 HTML 兜底内容
         qc_result: dict | None = None  # 捕获后置 QC 三裁判聚合结果(供落库 + 前端展示)
         requirement_doc_captured: dict | None = None  # 捕获需求文档(供落库 + 前端重启还原)
         event_seq: int = 0  # 结构化事件序号(供回放重建时间线)
@@ -1015,6 +1017,10 @@ async def chat(
                                             # 多文件: 捕获 AI 产出的完整文件列表(v1.2.1+)
                                             if isinstance(payload_obj.get("files"), dict):
                                                 files_dict = payload_obj["files"]
+                                            # E(#488): COS 不可用时的本地 HTML 兜底内容(供 RightPanel iframe srcdoc)
+                                            _preview_content = payload_obj.get("content")
+                                            if _preview_content and not preview_url:
+                                                _deliver_fallback_content = _preview_content
                                         event_seq += 1
                                         # trace_event 暂存, 由 finally 批量写入
                                         if event == "aborted":
@@ -1031,6 +1037,17 @@ async def chat(
                                         await touch_user_state(user.id, status="unsupported")
                                         await record_unsupported(user.id, user_text)
                                         await record_intent_decision("unsupported")
+                                    elif event in ("cos_upload", "progress") and isinstance(payload_obj, dict):
+                                        # B(#488): COS 上传进度事件透传给前端 exec-head 进度条渲染
+                                        # (progress.pct 实时反映上传中 NN%)
+                                        event_seq += 1
+                                        if event == "cos_upload" and isinstance(payload_obj.get("url"), str) and payload_obj["url"]:
+                                            preview_url = preview_url or payload_obj.get("url")
+                                        logger.info(
+                                            "[chat] ◇ COS事件 trace=%s event=%s file=%s pct=%s",
+                                            tid, event, payload_obj.get("file") or payload_obj.get("filename"),
+                                            payload_obj.get("pct"),
+                                        )
                                     elif event == "checkpoint" and isinstance(payload_obj, dict):
                                         # 断点续跑(§7): 写 Redis(不阻塞 SSE), MySQL 异步同步
                                         stage = payload_obj.get("stage", "?")
@@ -1149,7 +1166,7 @@ async def chat(
                                     frame += f"data: {data}\n\n"
                                     out_buf.append(frame.encode("utf-8"))
                                     # 批量发送: 累计到 SSE_OUT_BATCH 帧, 或命中终止事件, 才一次性 flush
-                                    if len(out_buf) >= SSE_OUT_BATCH or event in ("done", "aborted", "error", "unsupported", "paused"):
+                                    if len(out_buf) >= SSE_OUT_BATCH or event in ("done", "aborted", "error", "unsupported", "paused", "cos_upload", "progress"):
                                         _send_ok = True
                                         for _f in out_buf:
                                             try:
@@ -1231,6 +1248,7 @@ async def chat(
                     files_dict=files_dict,
                     doc_files=doc_files,
                     refined_summary=refined_text,
+                    deliver_fallback_content=deliver_fallback_content,
                     qc_result=qc_result,
                     project_id=project_id,
                     requirement_doc=requirement_doc_captured,
@@ -1524,6 +1542,7 @@ async def _persist_conversation(
     refined_summary: str = "",
     terminal_status: str = "done",
     doc_files: dict[str, dict] | None = None,
+    deliver_fallback_content: str | None = None,
 ) -> None:
     """SSE 结束后落库。build 类消息走 Artifact+结构化 JSON, chat 类存纯文本。"""
     # 归一化: 拆解 {"data":"x"}{"data":"y"}... → "xy..." (兜底防 AI 服务旧格式)
@@ -1551,8 +1570,16 @@ async def _persist_conversation(
         # 多文件产物: 以文件名做 key 存为对象(前端 Object.entries 直接拿文件名, 不是数组下标)
         if files_dict:
             art_files = {fname: {"name": fname, "size": 0, "url": url} for fname, url in files_dict.items()}
+            # E(#488): 个别文件无 COS 直链时, 用本地兜底内容填 content, 保证右侧预览面板可渲染
+            if deliver_fallback_content and "index.html" in art_files and not art_files["index.html"].get("url"):
+                art_files["index.html"]["content"] = deliver_fallback_content
         else:
-            clean_html = _extract_clean_html(assistant_text)
+            # E(#488): 无多文件 dict 时, 优先用本地兜底 HTML 内容(如 COS 不可用的单文件站点),
+            # 否则从 assistant_text 抽取 HTML(COS 不可用时整条 assistant 内容即为站点 HTML)。
+            if deliver_fallback_content:
+                clean_html = deliver_fallback_content
+            else:
+                clean_html = _extract_clean_html(assistant_text)
             art_files = {"index.html": {"name": "index.html", "size": len(clean_html.encode("utf-8")), "content": clean_html}}
         art = await artifact_repo.upsert_by_trace(
             db, trace_id,
@@ -1563,13 +1590,32 @@ async def _persist_conversation(
             files=art_files,  # dict{name → {name, size, url/content}}
             preview_url=preview_url or "",
         )
+        # A(#485): 气泡只渲染「文字总结 + 右侧 artifact-summary-card」, 去掉冗余 site-card。
+        # 这里把建站/代码产物落库为 type=plain(正文=refined 文字总结), 文件仍落 Artifact(repo="site")
+        # 供右侧预览面板展示; 气泡因此不再是一个空壳 site-card + 重复文案。
+        # A(#485): 气泡只渲染「文字总结 + 右侧 artifact-summary-card」, 去掉冗余 site-card。
+        # ⚠️ 关键: bubbles.content 是 MySQL TEXT(≤64KB), 绝不可内联整站 HTML(会溢出报错)。
+        # 文件「内容」只存在 artifacts.files[name].content(JSON 列, 无 64KB 上限), 供右侧面板渲染;
+        # 气泡这里只带文件「元信息」(name/url/size), 不内联 content。
+        _bubble_files = {}
+        if isinstance(art.files, dict):
+            for _fname, _fmeta in art.files.items():
+                if isinstance(_fmeta, dict):
+                    _bubble_files[_fname] = {
+                        "name": _fmeta.get("name", _fname),
+                        "url": _fmeta.get("url") or "",
+                        "size": _fmeta.get("size", 0),
+                    }
+                else:
+                    _bubble_files[_fname] = {"name": _fname, "url": "", "size": 0}
         content_obj = {
-            "type": repo,
+            "type": "plain",
+            "text": refined_summary or "✅ 网站已生成，可在右侧预览面板查看 / 下载。",
             "artifact_id": art.id,
             "title": art.title or "",
             "preview_url": preview_url or "",
             "download_url": preview_url or "",
-            "files": art.files if isinstance(art.files, dict) else [],
+            "files": _bubble_files,
             "summary": refined_summary,  # v1.2.2: 文字总结持久化
         }
         await message_repo.upsert_assistant(db, conv.id, trace_id, json.dumps(content_obj, ensure_ascii=False), model)
