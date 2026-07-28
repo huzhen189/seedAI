@@ -1550,7 +1550,7 @@ async def _persist_conversation(
             db, trace_id,
             project_id=conv.project_id or 0,
             conversation_id=conv.id,
-            title=conv.name or user_text[:20],
+            title=conv.name or (user_text or "")[:20],
             repo=repo,
             files=art_files,  # dict{name → {name, size, url/content}}
             preview_url=preview_url or "",
@@ -1586,7 +1586,7 @@ async def _persist_conversation(
             db, trace_id,
             project_id=conv.project_id or 0,
             conversation_id=conv.id,
-            title=(conv.name or user_text[:20] or "开发文档") + " · 文档",
+            title=(conv.name or (user_text or "")[:20] or "开发文档") + " · 文档",
             repo="doc",
             files=art_files,
             preview_url="",

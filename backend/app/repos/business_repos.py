@@ -169,11 +169,15 @@ class ArtifactRepo(BaseRepo[Artifact]):
         避免 1 次对话产出 N 条相同 artifact。
         """
         existing = await self.get_by_trace(db, trace_id)
+        # name 列 NOT NULL: 取 title > 主文件名 > repo 兜底, 否则 INSERT 报 IntegrityError(1048)
+        _primary = next(iter(files), None) if isinstance(files, dict) and files else None
+        _name = title or _primary or repo or "artifact"
         if existing:
             existing.files = files
             existing.preview_url = preview_url
             existing.download_url = preview_url
             existing.title = title
+            existing.name = _name
             existing.status = "done"
             await db.commit()
             await db.refresh(existing)
@@ -182,6 +186,7 @@ class ArtifactRepo(BaseRepo[Artifact]):
             project_id=project_id,
             conversation_id=conversation_id,
             trace_id=trace_id,
+            name=_name,
             title=title,
             repo=repo,
             files=files,
