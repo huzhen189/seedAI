@@ -153,6 +153,8 @@ const colGrip = ref<HTMLElement | null>(null)
 const gripActive = ref(false)
 let gripStartX = 0
 let gripStartW = 0
+// autoStart 内部建项目时置位, 让 currentProjectId watcher 跳过整段重载(避免清掉乐观消息/进行中 trail)
+let skipProjectWatch = false
 function onGripDown(e: MouseEvent) {
   gripActive.value = true
   gripStartX = e.clientX
@@ -357,6 +359,7 @@ async function doSendClarified(text: string) {
     try {
       const res = await autoStart(text)
       await projectStore.load()
+      skipProjectWatch = true
       projectStore.currentProjectId = res.project.id
       await convStore.loadConversations(res.project.id)
       pid = res.project.id
@@ -1406,6 +1409,9 @@ async function doSend(text: string) {
     try {
       const res = await autoStart(text)
       await projectStore.load()
+      // 置位: 接下来的 currentProjectId 变更是内部 autoStart 触发的, 让 watcher 跳过重载,
+      // 否则 loadConversations 的 switching 分支会把刚乐观推送的用户气泡清空(首条消息闪一下消失)。
+      skipProjectWatch = true
       projectStore.currentProjectId = res.project.id
       pid = res.project.id
       // 直接用 autoStart 返回的会话, 避免重复 create, 也避免 loadConversations 覆盖乐观消息
@@ -1697,6 +1703,10 @@ onUnmounted(() => { teardownScrollLoading() })
 watch(
   () => projectStore.currentProjectId,
   async (id) => {
+    // autoStart 内部建项目: 本轮变更由 doSend/doSendClarified 自行设置好 convStore,
+    // 跳过整段重载, 避免 loadConversations 的 switching 分支清空刚乐观推送的用户气泡,
+    // 也避免 resetGenState 误清掉进行中的 trail-wrap(导致首条消息闪一下才出现)。
+    if (skipProjectWatch) { skipProjectWatch = false; return }
     if (id != null) {
       // 记录旧项目的 active gen(供跨项目判断, 不在本 watch 内 clear——留到 maybeResume 使用)
       const prevAg = getActiveGen()
