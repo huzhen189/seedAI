@@ -42,6 +42,30 @@ const STAGE_LABELS: Record<string, string> = {
   done: '完成 — 全部任务执行完毕',
 }
 
+// 未知工序的中文回退标签(后端可能随时新增节点, 不希望前端显示裸 snake_case)
+const STAGE_FALLBACK: Record<string, string> = {
+  enter_planner_done: '规划完成 — 任务拆解已定稿',
+  resume_coder: '恢复编码 — 从中断点继续生成',
+  resume_reviewer: '恢复评审 — 从中断点继续校验',
+  subtask_start: '子任务启动 — 派发独立 AI 工序',
+  orchestration: '编排总览 — 拆解并调度多道工序',
+  merge: '结果合并 — 汇总各工序产出',
+  refined: '生成摘要 — 整理交付说明',
+  analyzing: '需求分析中 — 解读你的诉求',
+  doc_ready: '需求文档就绪 — 已生成结构化文档',
+  unsupported: '暂不支持 — 请换个说法试试',
+}
+// 兜底: 把未知 snake_case 阶段转成「首字母大写 + 空格」可读标签
+function humanizeStage(stage: string): string {
+  return stage
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .trim()
+}
+function labelFor(stage: string): string {
+  return STAGE_LABELS[stage] || STAGE_FALLBACK[stage] || humanizeStage(stage)
+}
+
 // ---- 本地 UI 状态 ----
 const models = ref<ModelInfo[]>([])
 const model = ref('qwen')
@@ -933,13 +957,19 @@ function resetGenState() {
 }
 
 function upsertStep(stage: string, status: ThoughtStep['status'], customLabel?: string) {
-  const label = customLabel || STAGE_LABELS[stage] || stage
+  const label = customLabel || labelFor(stage)
   const existing = thoughtSteps.value.find((s) => s.stage === stage)
   if (existing) existing.status = status
   else thoughtSteps.value.push({ stage, label, status, think: '' })
 }
 function appendThink(stage: string, content: string) {
-  const step = thoughtSteps.value.find((s) => s.stage === stage)
+  let step = thoughtSteps.value.find((s) => s.stage === stage)
+  // 后端可能在「尚无对应 node」时下发 think(如 doc_write 按章节流式产出的进度反馈),
+  // 此时自动补一个占位步, 确保任何思考反馈都不被丢弃
+  if (!step) {
+    upsertStep(stage, 'active')
+    step = thoughtSteps.value.find((s) => s.stage === stage)
+  }
   if (step) step.think += content
 }
 function findAssistantIdx(): number {
@@ -989,7 +1019,7 @@ const liveThinkText = computed(() => {
   return withThink.length ? withThink[withThink.length - 1].think : ''
 })
 const streamingStageLabel = computed(
-  () => STAGE_LABELS[currentStage.value] || currentStage.value || '思考中',
+  () => labelFor(currentStage.value) || currentStage.value || '思考中',
 )
 
 // 统一的 SSE 事件回调:把 node/think/plan/token 映射到本地状态。

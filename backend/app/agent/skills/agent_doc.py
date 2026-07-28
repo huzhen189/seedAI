@@ -223,9 +223,11 @@ async def generate_doc_skill(
     # 失败优雅降级: 仅跳过大纲, 直接进入正文撰写, 不影响主流程。
     outline = await _gen_outline(model_id, messages)
     if outline:
-        yield ev("think", stage="doc_plan", content=outline)
+        yield ev("think", stage="doc_plan", content="📋 文档大纲（将按此逐章展开）：\n" + outline)
     parts: list[str] = []
     _emit_write = False
+    _seen_headers: set[str] = set()
+    _scanned = 0
     # 主生成: 若有大纲则作为参考骨架, 让正文章节结构与之对齐
     sys_doc = SYS_DOC
     if outline:
@@ -244,6 +246,18 @@ async def generate_doc_skill(
                     _emit_write = True
                 parts.append(text)
                 yield ev("token", data=text)
+                # 实时章节进度: 流式文本里若出现新的二级/三级标题, 作为 think 反馈,
+                # 让前端轨迹实时展示"正在撰写哪一章"(后端每一道工序的可见化)
+                acc = "".join(parts)
+                new_seg = acc[_scanned:]
+                _scanned = len(acc)
+                for line in new_seg.split("\n"):
+                    s = line.strip()
+                    if re.match(r"^#{2,3}\s+\S", s):
+                        if s not in _seen_headers:
+                            _seen_headers.add(s)
+                            yield ev("think", stage="doc_write",
+                                     content="📝 正在撰写：" + s.lstrip("#").strip())
     except ModelUnavailableError as e:
         GEN_LOG.warning("[doc] 模型不可用 trace=%s: %s", trace_id, e)
         yield ev(
@@ -269,6 +283,12 @@ async def generate_doc_skill(
             )
         full_md = await _polish_doc(model_id, outline, raw_md)
         GEN_LOG.info('[doc] 润色后 trace=%s chars=%s', trace_id, len(full_md))
+        # 工序完成反馈: 告知用户校对/润色结果(字数 / 是否拼入大纲), 让轨迹收尾有"已交付"感
+        yield ev(
+            'think', stage='doc_proofread',
+            content=f'✅ 校对完成：全文 {len(full_md)} 字'
+            + ('，已拼入文档大纲并统一格式与衔接。' if outline else '，已统一 Markdown 格式与排版。'),
+        )
         # Fix B (#482): 把完整 Markdown 作为产物文件下发, 供 proxy 落库为 artifact(右侧面板预览/下载)
         # md 也上传 COS(与站点产物一致: 版本化直链, 右侧可下载)
         cos_url = _upload_doc_to_cos(
