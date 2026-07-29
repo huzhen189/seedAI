@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     hy3_api_key_demo: str = ""
     hy3_base_url: str = "https://tokenhub.tencentmaas.com/v1"
     hy3_model: str = "hy3"
-    default_model: str = "qwen"  # user's chosen default (Qwen)
+    default_model: str = "deepseek"  # user's chosen default (DeepSeek, faster)
 
     # ---- conversation / context ----
     chat_recent_redis_ttl: int = 1800       # 30min sliding window for recent context cache

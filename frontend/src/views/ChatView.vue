@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ name: 'ChatView' })
 // ChatView —— 对话主页面(核心组件)。
 // 职责:
 //   1. 组装「项目 → 会话 → 消息」三级数据(经 project / conversation 两个 Pinia store);
@@ -77,7 +78,7 @@ function labelFor(stage: string): string {
 
 // ---- 本地 UI 状态 ----
 const models = ref<ModelInfo[]>([])
-const model = ref('qwen')
+const model = ref('deepseek')
 const input = ref('')
 const generating = ref(false)
 const finished = ref(false)
@@ -782,8 +783,16 @@ const convStore = useConversationStore()
 // 仅当当前会话(被渲染为真实 DOM 的会话)的消息数变化时才可能追底,
 // 避免激活历史折叠会话时其子列表突变误触发当前列表滚动。
 function currentConvHasContent(): boolean {
-  return convStore.currentConvId != null &&
-    allSessions.value.some((s) => s.conv.id === convStore.currentConvId && s.msgs.length > 0)
+  try {
+    const curId = convStore.currentConvId
+    const msgs = convStore.messages
+    if (curId == null || !Array.isArray(msgs)) return false
+    if (msgs.length > 0) return true
+    if (!allSessions.value) return false
+    return allSessions.value.some((s) => s.conv.id === curId && Array.isArray(s.msgs) && s.msgs.length > 0)
+  } catch {
+    return false
+  }
 }
 
 // 新消息/节点步骤等离散出现 → 跟随滚动(用户贴底才跟, 看中间不动)
@@ -795,7 +804,11 @@ watch(
 )
 // 内容持续增量(任意气泡 token 追加 / 长文非 build 意图 / 子任务泳道): content 变化即触发
 watch(
-  () => (currentConvHasContent() ? convStore.messages.map((m) => m.content.length).join(',') : ''),
+  () => {
+    const msgs = convStore.messages
+    if (!currentConvHasContent() || !Array.isArray(msgs)) return ''
+    return msgs.map((m) => (m && m.content ? m.content.length : 0)).join(',')
+  },
   () => {
     if (autoScroll && generating.value) scrollToBottom(false, false)
   },
@@ -804,19 +817,25 @@ watch(
 // 所有会话统一消息流(微信风格: 最老的在上方, 最新的在最下方)
 // 数组顺序: [oldest_session, ..., current_session], 配合 flex-direction: column 渲染
 const allSessions = computed(() => {
+  // #556: 防卫 —— pastSessions / messages 在 store 初始化瞬间可能未就绪(keep-alive 切换或首帧),
+  // 一律回退到空数组, 避免 watcher/computed getter 在读 s.conv / s.msgs 时报 Unhandled error。
+  const pastSessions = Array.isArray(convStore.pastSessions) ? convStore.pastSessions : []
+  const conversations = Array.isArray(convStore.conversations) ? convStore.conversations : []
+  const curId = convStore.currentConvId
+  const curMsgs = Array.isArray(convStore.messages) ? convStore.messages : []
   // 历史会话(折叠):排除「当前会话」自身——当前会话一律走下方 convStore.messages(实时乐观数组)。
   // 旧实现依赖 conversations[0] === currentConvId 才渲染实时消息, 在「打开非最新会话发消息」/
   // autoStart 后会话重排等场景下该假设失效, 导致乐观推送的用户气泡被瞬间摘掉,
   // 直到 onDone 重排会话才随助手回复重新出现(用户气泡闪一下就消失的 Bug)。
-  const past = convStore.pastSessions
-    .map((s) => ({ conv: s.conv, loading: s.loading, msgs: s.messages.length ? s.messages : [] }))
-    .filter((s) => s.conv.id !== convStore.currentConvId)
-  if (convStore.currentConvId != null) {
-    const curConv = convStore.conversations.find((c) => c.id === convStore.currentConvId)
+  const past = pastSessions
+    .map((s) => ({ conv: s.conv, loading: s.loading, msgs: Array.isArray(s.messages) && s.messages.length ? s.messages : [] }))
+    .filter((s) => s.conv && s.conv.id !== curId)
+  if (curId != null) {
+    const curConv = conversations.find((c) => c.id === curId)
     past.unshift({
-      conv: curConv || ({ id: convStore.currentConvId } as any),
+      conv: curConv || ({ id: curId } as any),
       loading: false,
-      msgs: convStore.messages,
+      msgs: curMsgs,
     })
   }
   // 逆转: pastSessions 是降序(新→旧)追加的, 需要反转为升序(旧→新)以符合微信风格

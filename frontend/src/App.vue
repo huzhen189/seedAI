@@ -37,7 +37,13 @@ watch(
     <TopNav />
     <div class="layout">
       <Sidebar v-if="showSidebar" :collapsed="collapsed" @toggle="collapsed = !collapsed" />
-      <main class="main"><RouterView /></main>
+      <main class="main">
+        <RouterView v-slot="{ Component }">
+          <keep-alive include="ChatView">
+            <component :is="Component" />
+          </keep-alive>
+        </RouterView>
+      </main>
     </div>
   </div>
 </template>

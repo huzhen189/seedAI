@@ -613,7 +613,7 @@ async def chat(
     request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
-    model: str = Query("qwen", description="模型 id"),
+    model: str = Query("deepseek", description="模型 id"),
     conversation_id: int = Query(..., description="会话 id,必填(前端先建会话)"),
     trace_id: str | None = Query(None, description="前端生成的链路 id,用于取消/续传"),
     after: str | None = Query(None, description="断点续传:仅回放该 stream id 之后的增量(留空=全量回放)"),
@@ -1169,8 +1169,10 @@ async def chat(
                                         else:
                                             logger.info(
                                                 "[chat] done 被 paused 锁抑制(多意图方案确认仍生效) trace=%s", tid)
-                                    # 仅记录事件元信息(类型/阶段/序号), 不再打印 data 内容, 避免日志量爆炸
-                                    logger.info(
+                                    # 仅记录事件元信息(类型/阶段/序号), 不再打印 data 内容, 避免日志量爆炸。
+                                    # type=token 的帧高频(逐字)产生, 一律跳过打印, 避免日志刷屏。
+                                    if event != "token":
+                                        logger.info(
                                             "[chat] ◇ SSE #%d type=%s stage=%s",
                                             event_seq, event, stage or "-",
                                         )
@@ -1674,8 +1676,17 @@ async def _persist_conversation(
         logger.info("[chat] Artifact 幂等落库 id=%s trace=%s repo=%s preview=%s", art.id, trace_id, repo, preview_url or "(无)")
     else:
         # ---- 闲聊/文档: 纯文本 ----
+        # #551: 失败兜底 —— 若 LLM 未产出 token(assistant_text 为空), 但 emit_llm_failure 已产出
+        # refined_summary(道歉+重试建议文案), 必须把它落库为正式 assistant 消息, 否则用户看到空气泡。
         if assistant_text:
             await message_repo.upsert_assistant(db, conv.id, trace_id, assistant_text, model)
+        elif refined_summary:
+            await message_repo.upsert_assistant(db, conv.id, trace_id, refined_summary, model)
+        elif terminal_status in ("error", "aborted"):
+            # 极端情况: 既无产出也无 refined(兜底中的兜底), 至少留一条可见错误提示, 避免空回复。
+            _err_msg = ("⚠️ 生成失败，请稍后再试一次，或换一个模型。" if terminal_status == "error"
+                        else "⚠️ 已被取消。")
+            await message_repo.upsert_assistant(db, conv.id, trace_id, _err_msg, model)
 
     # Fix B (#483): doc 技能下发的 Markdown 产物 → 额外落 Artifact(repo="doc"),
     # 右侧面板可预览/下载; 气泡仍保留 Markdown 原文(上方 else 分支已存纯文本)。

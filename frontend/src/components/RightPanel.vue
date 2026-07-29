@@ -96,6 +96,37 @@ function selectFile(a: number | string | null, b?: string) {
 // 当前视图模式: 'preview'(预览) | 'code'(源码)
 const currentView = ref<'preview' | 'code'>('preview')
 
+// 需求文档视图模式: 'preview'(渲染) | 'code'(原始 Markdown 源码)
+const reqView = ref<'preview' | 'code'>('preview')
+
+// 需求文档原始 Markdown 源码: 优先 report, 否则把结构化字段拼成可读 Markdown(供"源码"视图展示/复制)
+const reqRawMarkdown = computed(() => {
+  const doc = props.requirementDoc
+  if (!doc) return ''
+  if (doc.report) return doc.report
+  const lines: string[] = []
+  if (doc.brand) {
+    lines.push(`# ${doc.brand.name}`)
+    if (doc.brand.slogan) lines.push(`> ${doc.brand.slogan}`)
+    if (doc.brand.intro) lines.push('', doc.brand.intro)
+  }
+  if (doc.target_user) lines.push('', '## 目标用户', '', doc.target_user)
+  if (Array.isArray(doc.pages) && doc.pages.length) {
+    lines.push('', '## 页面结构', '')
+    for (const p of doc.pages) {
+      lines.push(`### ${p.title}`)
+      if (Array.isArray(p.sections)) {
+        for (const s of p.sections) lines.push(`- ${s.name}: ${(s.content || '').substring(0, 120)}`)
+      }
+    }
+  }
+  if (Array.isArray(doc.features) && doc.features.length) {
+    lines.push('', '## 功能清单', '', doc.features.map((f: string) => `- ${f}`).join('\n'))
+  }
+  if (doc.design_style) lines.push('', '## 设计风格', '', doc.design_style)
+  return lines.join('\n')
+})
+
 // 新产物到来时自动选中最新 HTML 文件并切到预览。
 // 触发条件(a)数量增加 (b)最新条 trace_id 变化(新一轮生成) → 强制切回预览, 不卡在旧代码视图。
 watch(
@@ -296,11 +327,18 @@ defineExpose({ selectFile, reset })
       <!-- ===== 需求文档(特殊视图) ===== -->
       <template v-if="mode === 'requirement'">
         <div class="pv-toolbar">
-          <span class="pv-toolbar-name">📋 {{ requirementDoc?.brand?.name || '需求文档' }}</span>
+          <span class="pv-toolbar-icon">📋</span>
+          <span class="pv-toolbar-name">{{ requirementDoc?.brand?.name || '需求文档' }}</span>
           <span class="pv-toolbar-spacer"></span>
-          <button class="pv-toolbar-btn" title="下载 .md" @click="downloadReqDoc">⬇ 下载</button>
+          <!-- 需求文档同样提供预览/源码双按钮(统一所有类型的查看体验) -->
+          <button class="pv-toolbar-btn" :class="{ active: reqView === 'preview' }" @click="reqView = 'preview'">👁 预览</button>
+          <button class="pv-toolbar-btn" :class="{ active: reqView === 'code' }" @click="reqView = 'code'">&lt;/&gt; 源码</button>
+          <button class="pv-toolbar-btn pv-toolbar-dl" title="下载 .md" @click="downloadReqDoc">⬇ 下载</button>
         </div>
-        <div class="pv-requirement">
+        <div v-if="reqView === 'code'" class="pv-body pv-code">
+          <pre><code>{{ reqRawMarkdown }}</code></pre>
+        </div>
+        <div v-else class="pv-requirement">
           <div v-if="requirementDoc?.report" class="req-report">
             <MarkdownView :content="requirementDoc.report" />
           </div>

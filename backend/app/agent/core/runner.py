@@ -217,6 +217,16 @@ async def run_skill(
         elapsed = (time.time() - t0) * 1000
         logger.error("[Runner] skill=%s 执行异常 耗时=%.0fms 错误=%s: %s",
                     entry.name, elapsed, type(e).__name__, e)
+        # 兜底: 任何 skill 执行失败都产出 refined 终版文案(被前端 onRefined 落库为正式回复,
+        # 用户必见且刷新仍在), 同时 yield error 事件让前端感知失败态(超时/降级提示)。
+        try:
+            from ..skills._llm_fallback import emit_llm_failure
+            async for _ev in emit_llm_failure(model_id, e, skill_name):
+                yield _ev
+        except Exception as _fe:  # noqa: BLE001
+            # 兜底中的兜底: 极端情况下至少给一条 error 提示
+            logger.error("[Runner] 失败兜底事件产出异常(忽略): %s", _fe)
+            yield ev("refined", data=f"😔 抱歉，刚才请求处理时出现问题，没能生成内容。请稍后重试，或换一个模型试试。", agent_id=skill_name)
         yield ev("error", message=f"{type(e).__name__}: {e}")
     elapsed = (time.time() - t0) * 1000
     # ── [出参] 精细日志:事件数 + 文本产出摘要 ──

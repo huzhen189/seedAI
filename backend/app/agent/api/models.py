@@ -70,7 +70,7 @@ class DecisionRequest(BaseModel):
     project_id: int
     user_id: int
     q: str
-    model: str = "qwen"
+    model: str = "deepseek"
     flags: dict[str, bool] = Field(default_factory=dict)   # confirmed / clarified
     context: ContextBundle = Field(default_factory=ContextBundle)
     constraints: dict[str, Any] = Field(default_factory=dict)
@@ -115,7 +115,7 @@ class GenerateReq(BaseModel):
     project_id: int
     user_id: int
     q: str
-    model: str = "qwen"
+    model: str = "deepseek"
     confirmed: bool = False
     clarified: bool = False             # FIXED: declared (was dropped by pydantic)
     token: str = ""

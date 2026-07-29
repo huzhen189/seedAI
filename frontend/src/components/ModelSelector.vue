@@ -11,7 +11,7 @@ defineEmits<{ (e: 'update:model', v: string): void }>()
     :value="model"
     @change="$emit('update:model', ($event.target as HTMLSelectElement).value)"
   >
-    <option v-if="models.length === 0" value="qwen">Qwen(默认)</option>
+    <option v-if="models.length === 0" value="deepseek">DeepSeek(默认)</option>
     <option
       v-for="m in models"
       :key="m.id"
