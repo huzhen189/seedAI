@@ -513,7 +513,17 @@ async def _persist_worker_result(
                 ))
             # assistant 消息(幂等 upsert); 失败/中断且无产出时仍补反馈消息
             if assistant_text.strip():
-                await message_repo.upsert_assistant(s, conv.id, trace_id, assistant_text, model_id)
+                # 防御: Worker 兜底在 publisher 之后跑时, 若 assistant_text 超长(≥64KB, 多为
+                # 建站整站 HTML), 不把整个站点塞进 messages.content(即便已加宽 LONGTEXT 也不该
+                # 覆盖 publisher 已写入的结构化气泡元信息)。仅落一条占位提示, 产物以 Artifact/COS 为准。
+                _head = assistant_text.lstrip().lower()[:200]
+                _is_site = _head.startswith("<!doctype") or "<html" in _head[:32] or "<!--" in _head and "file:" in _head
+                if len(assistant_text) >= 64 * 1024 and _is_site:
+                    await message_repo.upsert_assistant(
+                        s, conv.id, trace_id,
+                        "✅ 网站/代码已生成，可在右侧预览面板查看 / 下载。", model_id)
+                else:
+                    await message_repo.upsert_assistant(s, conv.id, trace_id, assistant_text, model_id)
             elif terminal_status in ("error", "aborted", "unsupported", "paused"):
                 try:
                     existing = await message_repo.get_by_trace(s, trace_id, "assistant")
@@ -1613,7 +1623,17 @@ async def _persist_conversation(
         ))
 
     # assistant 消息: 按内容分两路
-    is_html = assistant_text and ("<html" in assistant_text[:500].lower() or "<!doctype" in assistant_text[:500].lower() or "<!-- FILE:" in assistant_text[:200])
+    # ⚠️ 判定必须宽松 —— 只要疑似站点/代码产物就走 Artifact 分支(生成预览链接 + 大文件不进
+    # messages.content)。漏判会让整站 HTML 掉进纯文本分支写进 64KB 的 messages.content(加宽后
+    # 虽不报错, 但会丢失 Artifact/预览链接)。覆盖: <html / <HTML / <!doctype / <!-- FILE: 各种空白变体。
+    _norm_head = (assistant_text or "").strip()[:2000].lower()
+    is_html = bool(_norm_head) and (
+        "<html" in _norm_head
+        or "<!doctype" in _norm_head
+        or "<!--" in _norm_head and "file:" in _norm_head
+        or assistant_text.lstrip().startswith("<!doctype")
+        or "<svg" in _norm_head[:200]
+    )
     if is_html:
         # ---- 建站/代码生成: 幂等 upsert Artifact(同一 trace 重连/续传/重试只 1 条) ----
         repo = "site"

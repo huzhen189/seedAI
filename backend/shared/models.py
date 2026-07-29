@@ -23,6 +23,26 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
+from sqlalchemy.dialects.mysql import LONGTEXT as _MySQLLongText
+
+
+class LongText(TypeDecorator):
+    """跨方言长文本: MySQL 下映射为 LONGTEXT(4GB), 其它方言(如 SQLite 回落)忽略长度 -> TEXT。
+
+    直接 import mysql 的 LONGTEXT 在 SQLite 下无法编译, 故用 TypeDecorator 按 dialect 动态选择 impl。
+    """
+
+    cache_ok = True
+    impl = Text
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "mysql":
+            return _MySQLLongText()
+        # SQLite / 其它: 无长度 TEXT(无 64KB 上限)
+        return Text()
+
 
 logger = logging.getLogger("shared.models")
 
@@ -115,7 +135,10 @@ class Message(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True, nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)  # user | assistant | system
-    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # ⚠️ 关键: MySQL Text 仅 64KB, 建站/文档内联或大模型长回复会触发 1406 Data too long 导致整轮
+    # 落库失败(连带 Artifact/预览链接全丢)。改 LongText(MySQL=LONGTEXT 4GB), SQLite 回落为无长度 TEXT。
+    # db.py 的 _upgrade_text_columns 会在重启时把已存在的短 TEXT 列就地 ALTER 加宽, 无需 reset_all。
+    content: Mapped[str] = mapped_column(LongText(), nullable=False)
     model_id: Mapped[str | None] = mapped_column(String(48))
     trace_id: Mapped[str | None] = mapped_column(String(64), index=True)
     parent_msg_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"))

@@ -91,6 +91,43 @@ def _add_missing_columns(sync_conn) -> list[str]:
     return added
 
 
+def _upgrade_text_columns(sync_conn) -> list[str]:
+    """把已知需大容量的 TEXT 列就地 ALTER 加宽(MySQL 下 TEXT 仅 64KB, 会触发
+    1406 Data too long 导致整轮落库失败)。仅对 MySQL 生效; SQLite 的 TEXT 本身无限长,
+    跳过(且 SQLite 不支持 ALTER MODIFY 列类型)。
+
+    目标列:
+      - messages.content: 建站/文档内联或长回复会超 64KB, 必须 LONGTEXT。
+    """
+    upg: list[str] = []
+    dialect_name = sync_conn.dialect.name
+    if dialect_name != "mysql":
+        return upg
+    targets = {
+        "messages": [("content", "LONGTEXT")],
+    }
+    inspector = inspect(sync_conn)
+    for tname, cols in targets.items():
+        if not inspector.has_table(tname):
+            continue
+        existing = {c["name"]: c for c in inspector.get_columns(tname)}
+        for col_name, target_type in cols:
+            col = existing.get(col_name)
+            if col is None:
+                continue
+            cur_type = str(col["type"]).upper()
+            # 已是 LONGTEXT/MEDIUMTEXT 则跳过(避免无谓 ALTER)
+            if "LONGTEXT" in cur_type or "MEDIUMTEXT" in cur_type:
+                continue
+            ddl = f"ALTER TABLE `{tname}` MODIFY `{col_name}` {target_type} NOT NULL"
+            try:
+                sync_conn.execute(text(ddl))
+                upg.append(f"{tname}.{col_name} ({cur_type} -> {target_type})")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("升级列 %s.%s 为 %s 失败(已跳过): %s", tname, col_name, target_type, e)
+    return upg
+
+
 async def init_db():
     """安全初始化:补齐缺失列 + 种子用户。
 
@@ -121,6 +158,10 @@ async def init_db():
                 logger.info("数据库 schema 已自动补齐缺失列: %s", ", ".join(added))
             else:
                 logger.debug("数据库 schema 与 model 一致,无缺失列需补齐")
+            # 升级短 TEXT 列(MySQL: messages.content TEXT->LONGTEXT, 防 1406 落库失败)
+            upgraded = await conn.run_sync(_upgrade_text_columns)
+            if upgraded:
+                logger.info("数据库短 TEXT 列已就地加宽: %s", ", ".join(upgraded))
 
     # 第三步:超级管理员种子注入(文档 §2.3)。
     # 首次启动(或任何时候)把 SEED_SUPER_ADMIN 指定的用户名角色置为 super_admin,
