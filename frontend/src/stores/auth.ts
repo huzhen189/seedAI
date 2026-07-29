@@ -34,12 +34,13 @@ export const useAuthStore = defineStore('auth', () => {
     // 刷新能保证彻底清空所有 Pinia store(project/conversation/agent)、
     // 进行中的 EventSource(SSE) 连接与消息缓存,避免切换账号后
     // 仍残留上一个账号的页面/数据(2026-07-29 用户要求)。
-    // 关键: 先等登出请求完整处理(含 Set-Cookie 清 Cookie),再让出当前宏任务,
-    // 确保浏览器已把清 Cookie 落到 Cookie Jar,然后才发起整页刷新;
-    // 否则 location.reload() 可能在 Cookie 落盘前抢先导航,清 Cookie 被丢弃 → 退出无效。
+    // 关键: 必须等浏览器把"清 Cookie 的 Set-Cookie"真正提交到 Cookie Jar 后,
+    // 才能发起整页刷新。单 setTimeout(0) 实测仍会竞态丢失(导航抢在 Cookie 落盘前),
+    // 这里显式延时 120ms 做可靠让位,彻底规避该竞态(刷新本就发生在用户点击之后,
+    // 这点延时无感)。
     await authApi.logout()
     user.value = null
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise<void>((resolve) => setTimeout(resolve, 120))
     if (typeof location !== 'undefined') {
       location.reload()
     }
