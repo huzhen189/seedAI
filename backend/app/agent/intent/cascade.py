@@ -319,7 +319,7 @@ async def _classify_segment(
         _chosen, _cands = _sel
         logger.info("[级联] [0] 命中选项选择 → 短路 skill=%s", _chosen)
         clear_pending_options(conversation_id)
-        reset_slots(conversation_id)
+        reset_slots(conversation_id, user_id, project_id)
         await record_intent_classify("route", "selection", (time.time() - t0) * 1000)
         return _emit_route(
             {"level1": "chat", "level2": "casual"}, 1.0, decision="route",
@@ -331,7 +331,7 @@ async def _classify_segment(
     # ── [+0] 删除操作 → 路由到 agent_delete skill ──
     if is_delete_signal(current_user_msg):
         logger.info("[级联][%s] 删除操作 → 路由 agent_delete %s", req_id, current_user_msg[:40])
-        reset_slots(conversation_id)
+        reset_slots(conversation_id, user_id, project_id)
         await record_intent_classify("route", "delete", (time.time() - t0) * 1000)
         return _emit_route(
             get_intent(_CHAT_CASUAL) or {"level1": "chat", "level2": "casual"}, 0.98, decision="route",
@@ -343,7 +343,7 @@ async def _classify_segment(
     # ── RESET: 用户显式退出建站/澄清 ──
     if is_reset_signal(current_user_msg):
         logger.info("[级联][%s] RESET 信号 → 闲聊", req_id)
-        reset_slots(conversation_id)
+        reset_slots(conversation_id, user_id, project_id)
         await record_intent_classify("route", "reset", (time.time() - t0) * 1000)
         return _emit_route(
             get_intent(_CHAT_CASUAL) or {"level1": "chat", "level2": "casual"}, 0.3,
@@ -376,7 +376,7 @@ async def _classify_segment(
             }
             logger.info("[级联][%s] 上下文闸门命中: 已落站 + 命中修改词(%d) → 直路由 build_modify conf=%.2f",
                         req_id, _hit_mod, _conf)
-            reset_slots(conversation_id)
+            reset_slots(conversation_id, user_id, project_id)
             await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                     user_id=user_id, raw_input=current_user_msg,
                                     llm_intent="build/modify", llm_confidence=_conf,
@@ -402,7 +402,7 @@ async def _classify_segment(
     # 修复: 若上一轮处于 PM 模式(路由到 agent_requirement)且当前仍无需求文档/未落站
     # → 维持 PM 继续采集, 不被 [1-β]/novelty/chat 抢占; 显式建站触发语(_BUILD_TRIGGER)
     # 仍放行直冲生成器(由下游 [10] 门控放行)。
-    _prior = await asyncio.to_thread(load_slots, conversation_id)
+    _prior = await asyncio.to_thread(load_slots, conversation_id, user_id, project_id)
     _prior_was_pm = (
         (_prior.get("intent_id") or "") == "build_requirement"
         or (_prior.get("selected_skill") or "") == "agent_requirement"
@@ -421,7 +421,7 @@ async def _classify_segment(
                 "slots": _prior.get("slots", {}) or {},
                 "clarify_rounds": int(_prior.get("clarify_rounds", 0) or 0),
                 "confidence": 0.8, "selected_skill": "agent_requirement",
-            })
+            }, user_id, project_id)
             await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                     user_id=user_id, raw_input=current_user_msg,
                                     llm_intent="build/requirement", llm_confidence=0.8,
@@ -486,9 +486,9 @@ async def _classify_segment(
                 "intent_id": "build_requirement" if _sel_skill == "agent_requirement" else _site_intent["id"],
                 "slots": {}, "clarify_rounds": 0, "confidence": _conf,
                 "selected_skill": _sel_skill,
-            })
+            }, user_id, project_id)
             if _sel_skill != "agent_requirement":
-                reset_slots(conversation_id)
+                reset_slots(conversation_id, user_id, project_id)
             await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                     user_id=user_id, raw_input=current_user_msg,
                                     llm_intent="build/site", llm_confidence=_conf,
@@ -526,7 +526,7 @@ async def _classify_segment(
         await asyncio.to_thread(save_slots, conversation_id, {
             "intent_id": intent["id"], "slots": {}, "clarify_rounds": 0,
             "confidence": strong_rule.confidence,
-        })
+        }, user_id, project_id)
         await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                 user_id=user_id, raw_input=current_user_msg,
                                 llm_intent=f"{intent['level1']}/{intent['level2']}",
@@ -556,7 +556,7 @@ async def _classify_segment(
         if intent:
             logger.info("[级联] 强规则直路由: 规则=%s → intent=%s/%s (跳过向量/LLM 终判)",
                         strong_rule.rule_id, intent["level1"], intent["level2"])
-            reset_slots(conversation_id)
+            reset_slots(conversation_id, user_id, project_id)
             await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                     user_id=user_id, raw_input=current_user_msg,
                                     llm_intent=f"{intent['level1']}/{intent['level2']}",
@@ -586,7 +586,7 @@ async def _classify_segment(
         logger.warning("[级联] run_safety 异常: %s", e)
     if safety_result.risk_level == "critical":
         logger.warning("[级联][%s] 安全检查→拦截 reason=%s risk=%s", req_id, safety_result.block_reason, safety_result.risk_level)
-        reset_slots(conversation_id)
+        reset_slots(conversation_id, user_id, project_id)
         await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                 user_id=user_id, raw_input=current_user_msg, llm_intent="chat/casual",
                                 llm_confidence=0.0, rules_triggered=["critical_safety"],
@@ -603,7 +603,7 @@ async def _classify_segment(
         )
 
     # ── [9] LLM 有界终判 ──
-    prior = await asyncio.to_thread(load_slots, conversation_id)
+    prior = await asyncio.to_thread(load_slots, conversation_id, user_id, project_id)
     prior_intent_id = prior.get("intent_id", "") or ""
     prior_collected = prior.get("slots", {}) or {}
 
@@ -615,8 +615,8 @@ async def _classify_segment(
         logger.info("[级联] 新奇度兜底: top_score=%.2f < %.2f → 闲聊", top_score, NOVELTY)
         chat_intent = get_intent(_CHAT_CASUAL) or {"level1": "chat", "level2": "casual", "skill": "agent_chat"}
         await asyncio.to_thread(save_slots, conversation_id, {
-            "intent_id": _CHAT_CASUAL, "slots": {}, "clarify_rounds": 0, "confidence": top_score,
-        })
+            "intent_id": _CHAT_CASUAL, "slots": {}, "clarify_rounds": 0,             "confidence": top_score,
+        }, user_id, project_id)
         await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                 user_id=user_id, raw_input=current_user_msg, llm_intent="chat/casual",
                                 llm_confidence=top_score, rules_triggered=[],
@@ -705,7 +705,7 @@ async def _classify_segment(
         "slots": merged,
         "clarify_rounds": new_rounds if decision == "clarify" else 0,
         "confidence": conf,
-    })
+    }, user_id, project_id)
 
     evidence = {
         "rule": [h.rule_id for h in rule_hits],

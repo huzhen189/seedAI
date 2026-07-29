@@ -20,6 +20,7 @@ from sqlalchemy import (
     String,
     Text,
     JSON,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -257,3 +258,32 @@ class UserState(Base):
     pending_decision: Mapped[str | None] = mapped_column(String(30))  # continue_instruction / retry_model / ...
     checkpoint_stage: Mapped[str | None] = mapped_column(String(40))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
+class IntentSlots(Base):
+    """跨轮意图 DST 槽位持久化(每行 = 一个会话的独立状态, #511)。
+
+    设计(#511, 用户 2026-07-29 拍板):
+    - 早期方案把 DST 塞进 per-user 单行 UserState.intent_slots(嵌套 dict), 但 UserState 语义是
+      「用户当前瞬时态」, 与「每会话独立持久态」冲突; 且嵌套 dict 随会话数膨胀、reset_user_state
+      会误清他人 DST。故改为独立表, 每行一个会话。
+    - 业务键 (user_id, project_id, conversation_id) 联合唯一: 切到项目C/会话D 时 load 取到空行,
+      天然不串; 回到 A/B 时原样恢复 PM 粘性(实现跨轮长久保存)。
+    - Redis(intent:slots:{conv_id}) 为热键(零延迟), 本表为冷备份(持久兜底);
+      load miss 时回源本表并回填 Redis。
+    - conversation_id 全局唯一(PK), 故 (user_id, conversation_id) 已能唯一; project_id 入键仅用于
+      贴合「用户∪项目∪会话」心智模型与潜在的多租户隔离, 不影响唯一性。
+    """
+
+    __tablename__ = "intent_slots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    project_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    conversation_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    slots: Mapped[dict] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "project_id", "conversation_id", name="uq_intent_slots_ucp"),
+    )

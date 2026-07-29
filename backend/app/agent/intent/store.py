@@ -2,15 +2,21 @@
 
 设计要点:
 - 多轮一致性靠「显式上下文 + 持久化槽位」, 而非易出 bug 的算术信念融合。
-- 每轮 classify_v3 把 LLM 抽取到的槽位 + 当前意图 + 澄清轮次写入 Redis(无 Redis 走进程内 dict)。
+- 每轮 classify_v3 把 LLM 抽取到的槽位 + 当前意图 + 澄清轮次写入存储。
 - 下游 LLM 终判会读回这些槽位作为『已收集信息』注入, 避免重复追问。
 
-数据 schema(Redis JSON 字符串, key = intent:slots:{conversation_id}):
-  {"intent_id": str, "slots": {key: value}, "clarify_rounds": int,
-   "confidence": float, "updated_at": float}
+数据 schema:
+  Redis 热键(intent:slots:{conversation_id}, JSON 字符串):
+    {"intent_id": str, "slots": {key: value}, "clarify_rounds": int,
+     "confidence": float, "updated_at": float}
+  MySQL 冷备份(intent_slots 表, 每行 = 一个会话):
+    业务键 (user_id, project_id, conversation_id) 联合唯一, 主鍵自增 id;
+    slots 列存上述 Redis 值。切会话天然隔离, reset 仅删当前会话一行。
 
-⚠️ 生产环境必须配置 Redis(_get_redis 返回非 None), 进程内兜底仅用于单实例开发。
-   兜底 dict 已做上限 + TTL 淘汰, 防止长时间运行的进程内存泄露。
+可靠性(#511): Redis 为主(热, 零延迟), MySQL(intent_slots 表)为持久兜底(冷)。
+Redis 重启/丢失时 load 自动从 MySQL 回源并回填 Redis; save 同步写 Redis +
+异步语义落 MySQL(本模块在 asyncio.to_thread 里同步执行, 故用同步引擎)。
+user_id/project_id 为 None 时跳过 MySQL(退化为纯 Redis), 不阻塞主流程。
 """
 
 from __future__ import annotations
@@ -19,7 +25,11 @@ import json
 import logging
 import time
 
-from shared.config import settings  # 同步 Redis 需要 settings.redis_url(与 app/config.py 同路径)
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
+
+from shared.config import settings  # 同步 Redis/Mysql 需要 settings
+from shared.models import IntentSlots
 from ..analytics import _get_redis
 
 
@@ -56,9 +66,109 @@ def _get_sync_redis():
 # 修复: 同步函数须使用同步 Redis 客户端; cascade 已用 asyncio.to_thread 包裹, 阻塞 I/O 不占事件循环。
 
 
+def _get_sync_db():
+    """返回同步 SQLAlchemy 引擎(供本模块在 asyncio.to_thread 同步上下文里落 MySQL 冷备份)。
+
+    db.SessionLocal 是异步引擎(async_sessionmaker), 无法在同步函数内 await;
+    故此处独立建一个 pymysql 同步引擎, 复用 settings.database_url(把 aiomysql 换成 pymysql)。
+    带 pool_pre_ping + pool_recycle 抵御云 MySQL 空闲 NAT 掐断(同 db.py 铁律)。
+    失败降级为 None, 上层跳过 MySQL 冷备份(退化为纯 Redis)。
+    """
+    global _sync_engine
+    if _sync_engine is not None:
+        return _sync_engine if _sync_engine is not False else None
+    try:
+        u = settings.database_url
+        if u.startswith("mysql+aiomysql://"):
+            u = "mysql+pymysql://" + u[len("mysql+aiomysql://"):]
+        elif u.startswith("mysql://"):
+            u = "mysql+pymysql://" + u[len("mysql://"):]
+        elif u.startswith("sqlite+aiosqlite://"):
+            u = "sqlite://" + u[len("sqlite+aiosqlite://"):]
+        _sync_engine = create_engine(
+            u,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            pool_size=5,
+            max_overflow=10,
+            connect_args={"connect_timeout": 5} if "mysql" in u else {},
+        )
+        # 探活一次避免惰性连接掩盖不可用
+        with _sync_engine.connect() as c:
+            c.execute(text("SELECT 1"))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[槽位] 同步 MySQL 引擎不可用, 跳过冷备份: %s", e)
+        _sync_engine = False
+    return _sync_engine if _sync_engine is not False else None
+
+
+def _sync_upsert_slots(user_id: int | None, project_id: int | None, conversation_id: int | None, data: dict) -> None:
+    """冷备份: 按 (user_id, project_id, conversation_id) upsert 一行 IntentSlots。"""
+    eng = _get_sync_db()
+    if eng is None or not user_id or project_id is None or conversation_id is None:
+        return
+    try:
+        with Session(eng) as s:
+            row = (
+                s.query(IntentSlots)
+                .filter_by(user_id=user_id, project_id=project_id, conversation_id=conversation_id)
+                .first()
+            )
+            if row is None:
+                row = IntentSlots(
+                    user_id=user_id, project_id=project_id,
+                    conversation_id=conversation_id, slots=data,
+                )
+                s.add(row)
+            else:
+                row.slots = data
+            s.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[槽位] MySQL upsert 失败(忽略): %s", e)
+
+
+def _sync_get_slots(user_id: int | None, project_id: int | None, conversation_id: int | None) -> dict | None:
+    """冷备份读取: 按 (user_id, project_id, conversation_id) 取回该行 slots; 无则 None。"""
+    eng = _get_sync_db()
+    if eng is None or not user_id or project_id is None or conversation_id is None:
+        return None
+    try:
+        with Session(eng) as s:
+            row = (
+                s.query(IntentSlots)
+                .filter_by(user_id=user_id, project_id=project_id, conversation_id=conversation_id)
+                .first()
+            )
+            if row is not None:
+                return row.slots
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[槽位] MySQL get 失败(忽略): %s", e)
+    return None
+
+
+def _sync_pop_slots(user_id: int | None, project_id: int | None, conversation_id: int | None) -> None:
+    """冷备份清除: 删除 (user_id, project_id, conversation_id) 那一行(仅当前会话)。"""
+    eng = _get_sync_db()
+    if eng is None or not user_id or project_id is None or conversation_id is None:
+        return
+    try:
+        with Session(eng) as s:
+            row = (
+                s.query(IntentSlots)
+                .filter_by(user_id=user_id, project_id=project_id, conversation_id=conversation_id)
+                .first()
+            )
+            if row is not None:
+                s.delete(row)
+                s.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[槽位] MySQL pop 失败(忽略): %s", e)
+
+
 logger = logging.getLogger("ai_service.intent.store")
 
-_sync_redis = None  # 0/None=未初始化; False=不可用; 否则为同步客户端
+_sync_redis = None  # 0/None=未初始化; False=不可用
+_sync_engine = None  # 0/None=未初始化; False=不可用
 
 _KEY_PREFIX = "intent:slots:"
 _EMPTY = {"intent_id": "", "slots": {}, "clarify_rounds": 0, "confidence": 0.0, "updated_at": 0.0}
@@ -84,8 +194,11 @@ def _evict_local() -> None:
             _local.pop(cid, None)
 
 
-def load_slots(conversation_id: int | None) -> dict:
-    """读取会话槽位; 无 conv_id / 无记录 / 异常 / 过期 → 返回空结构。"""
+def load_slots(conversation_id: int | None, user_id: int | None = None, project_id: int | None = None) -> dict:
+    """读取会话槽位; 无 conv_id / 无记录 / 异常 / 过期 → 返回空结构。
+
+    Redis miss 时回源 MySQL 冷备份(intent_slots 表按 user/project/conv 定位)并回填 Redis。
+    """
     if conversation_id is None:
         return dict(_EMPTY)
     try:
@@ -94,6 +207,14 @@ def load_slots(conversation_id: int | None) -> dict:
             raw = r.get(_KEY_PREFIX + str(conversation_id))
             if raw:
                 return json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+            # Redis miss → 回源 MySQL 冷备份(intent_slots 表)
+            mysql_data = _sync_get_slots(user_id, project_id, conversation_id)
+            if mysql_data:
+                try:
+                    r.set(_KEY_PREFIX + str(conversation_id), json.dumps(mysql_data, ensure_ascii=False))
+                except Exception:  # noqa: BLE001
+                    pass
+                return dict(mysql_data)
         else:
             data = _local.get(conversation_id)
             if data is not None and time.time() - data.get("updated_at", 0.0) <= _LOCAL_TTL:
@@ -103,8 +224,8 @@ def load_slots(conversation_id: int | None) -> dict:
     return dict(_EMPTY)
 
 
-def save_slots(conversation_id: int | None, data: dict) -> None:
-    """持久化会话槽位(失败静默)。"""
+def save_slots(conversation_id: int | None, data: dict, user_id: int | None = None, project_id: int | None = None) -> None:
+    """持久化会话槽位(失败静默)。同步写 Redis + 冷备份落 MySQL(intent_slots 表)。"""
     if conversation_id is None:
         return
     data = dict(data)
@@ -118,10 +239,12 @@ def save_slots(conversation_id: int | None, data: dict) -> None:
             _local[conversation_id] = data
     except Exception as e:  # pragma: no cover
         logger.debug("[槽位] 写入失败(忽略): %s", e)
+    # 冷备份到 MySQL intent_slots 表(尽力, 失败忽略)
+    _sync_upsert_slots(user_id, project_id, conversation_id, data)
 
 
-def reset_slots(conversation_id: int | None) -> None:
-    """清空会话槽位(RESET / 退出建站时调用)。"""
+def reset_slots(conversation_id: int | None, user_id: int | None = None, project_id: int | None = None) -> None:
+    """清空会话槽位(RESET / 退出建站时调用)。Redis + MySQL 双清(仅当前会话一行)。"""
     if conversation_id is None:
         return
     try:
@@ -132,3 +255,4 @@ def reset_slots(conversation_id: int | None) -> None:
             _local.pop(conversation_id, None)
     except Exception as e:  # pragma: no cover
         logger.debug("[槽位] 重置失败(忽略): %s", e)
+    _sync_pop_slots(user_id, project_id, conversation_id)
