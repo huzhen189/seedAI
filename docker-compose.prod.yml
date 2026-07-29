@@ -1,0 +1,48 @@
+# SeedAI 生产部署变体(仅 backend + frontend,复用云服已有的外部 MySQL/Redis/Chroma)。
+# 适用场景: CVM(1.12.219.195) 上已独立运行 mysql/redis/chroma,本 compose 不再起这些容器,
+# 否则端口 3306/6379/7000/8000 冲突。
+#
+# 启动(项目根目录):
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# 关键约定:
+#   - backend 服务名必须为 business,因为 frontend 镜像内的 nginx 写死了 upstream business:7101。
+#   - 所有数据服务走 .env.production 里的 1.12.219.195 地址(外部网络可达,无需 seed-net 内网)。
+#   - 安全:compose 暴露 7100/7101;数据库/redis/chroma 端口禁止对公网开放(安全组收紧)。
+
+services:
+  backend:
+    # 服务名 business 才能被 frontend 镜像的 nginx 反代命中
+    container_name: seedai-business
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      # 这些会在容器内覆盖;确保 .env.production 已含 MYSQL_URL/REDIS_URL/CHROMA_URL
+      APP_PORT: 7101
+      # 容器内 artifact 目录, 后端会挂载同名 volume 持久化产物
+      ARTIFACT_DIR: /app/artifacts
+    ports:
+      - "7101:7101"
+    volumes:
+      # 产物落地到命名卷, 容器重建不丢
+      - seedai_artifacts:/app/artifacts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:7101/ready', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  frontend:
+    container_name: seedai-frontend
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "7100:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  seedai_artifacts:
