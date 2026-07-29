@@ -29,6 +29,7 @@ from .metrics import record_request
 from .analytics import record_api_latency, record_api_call
 from .projects import router as projects_router
 from .proxy import router as proxy_router
+from .artifacts_auth import router as artifacts_auth_router
 from .reconciler import start_reconciler
 from .agent.events import to_sse
 from .agent.providers import list_providers
@@ -307,6 +308,7 @@ app.include_router(auth_router)
 app.include_router(proxy_router)
 app.include_router(projects_router)
 app.include_router(admin_router)
+app.include_router(artifacts_auth_router)
 
 
 if __name__ == "__main__":

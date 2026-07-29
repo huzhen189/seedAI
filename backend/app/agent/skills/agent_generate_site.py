@@ -106,6 +106,12 @@ SYS_CODER = (
     "英文 slug 命名(如 index.html、products.html、about.html、contact.html),文件间通过统一顶部导航相互链接,"
     "并保持相同的设计语言与 CSS/JS 引用;首页必须命名为 index.html。文件树会列出全部页面,用户可在右侧面板切换预览。"
     "不要输出 markdown 代码块围栏(```)、不要输出多余解释。\n\n"
+    "【链接与资源硬约束——必须严格遵守】\n"
+    "• 所有站内链接(href)与资源引用(src)必须使用【相对路径】,例如 page.html、styles/style.css、script.js;"
+    "页面之间互相链接就用对方的文件名(about.html、contact.html),不要用带域名的绝对 URL。\n"
+    "• 严禁写出 `/artifacts/...` 开头的本平台内部绝对路径;严禁为站内资源写 `http(s)://本站域名/...` 绝对地址"
+    "(外部 CDN 如 fonts.googleapis.com、cdn.jsdelivr.net 等第三方资源除外,可保留)。\n"
+    "• 违反此约束会导致站内导航在预览中失效(404/跨域),请在生成时务必自查所有 `href`/`src` 均为相对引用。\n\n"
     "【高级视觉与交互硬标准——必须满足】\n"
     "1. 视觉质感: 使用玻璃拟态(glassmorphism)、柔和分层阴影、渐变光晕/微噪点质感、克制留白;"
     "杜绝大色块平涂与廉价渐变。配色须经设计且符合 WCAG AA 对比度。\n"
@@ -348,6 +354,62 @@ def _parse_multi_files(raw: str) -> dict[str, str]:
     return files
 
 
+def _normalize_relative_links(html: str, filenames: "set[str]") -> str:
+    """q-2: 把页面内绝对路径链接/资源重写为相对路径, 把多页跳转钉死。
+
+    问题: Coder 偶尔会写出 `/artifacts/{uid}/{pid}/...` 绝对路径或 `http(s)://` CDN 域的
+    站内资源链接, 经 nginx 同源直出时会导致站内导航/资源 404 或跨域破坏预览。
+    处理:
+      - 剥离本平台 artifacts 绝对前缀 `/artifacts/...` → 相对文件名(站点内互相引用);
+      - 站内 href/src 指向已知生成文件名(index.html/about.html/style.css...)统一相对化;
+      - 真正的外部链接(http/https/mailto/tel/# 锚点)一律保留不动。
+    兜底: 即便模型仍写绝对路径, 落盘后此处强制修正, 保证预览同域 iframe 内跳转正确。
+    """
+    if not html:
+        return html
+    filename_set = {f for f in filenames if f.lower().endswith(('.html', '.css', '.js', '.png', '.jpg', '.jpeg', '.svg', '.webp', '.gif', '.json', '.md', '.txt'))}
+    # 匹配引号内的 src/href 属性值(捕获引号类型)
+    attr_re = re.compile(r'(?P<attr>src|href)\s*=\s*(?P<q>["\'])(?P<val>[^"\']*?)(?P=q)', re.IGNORECASE)
+
+    def _rewrite(m: "re.Match") -> str:
+        attr, q, val = m.group("attr"), m.group("q"), m.group("val")
+        val_stripped = val.strip()
+        # 保留: 锚点 / 协议链接 / 特殊协议 / 数据 URI / 空
+        if (not val_stripped
+                or val_stripped.startswith("#")
+                or val_stripped.startswith("data:")
+                or val_stripped.startswith("mailto:")
+                or val_stripped.startswith("tel:")
+                or val_stripped.startswith("javascript:")
+                or re.match(r"^[a-z][a-z0-9+.-]*://", val_stripped, re.IGNORECASE)):
+            return m.group(0)
+        # 剥离本平台 artifacts 绝对前缀(/artifacts/{uid}/{pid}/... 或 /artifacts/...)
+        norm = val_stripped
+        if norm.startswith("/artifacts/"):
+            norm = norm[len("/artifacts/"):]
+            # 继续去掉可能存在的 uid/pid/ver 段, 只留文件名(站内引用)
+            parts = [p for p in norm.split("/") if p not in ("", ".", "..")]
+            # 找到最后一个与已知文件名匹配处截断, 否则只取末段文件名作相对引用
+            kept = None
+            for i, p in enumerate(parts):
+                if p in filename_set:
+                    kept = "/".join(parts[i:])
+                    break
+            norm = kept if kept is not None else (parts[-1] if parts else norm)
+        # 去掉前导 ./ 与多余绝对根
+        norm = norm.lstrip("/")
+        # 已是站点相对路径(不含 / 到根) -> 直接保留; 否则按文件名相对化
+        if "/" in norm and not norm.split("/", 1)[0].endswith((".html",)):
+            base_name = norm.split("/")[-1]
+            norm = base_name
+        if norm != val_stripped:
+            GEN_LOG.warning("[rel-links] 链接已相对化: %s -> %s", val_stripped, norm)
+            return f"{attr}={q}{norm}{q}"
+        return m.group(0)
+
+    return attr_re.sub(_rewrite, html)
+
+
 async def _deliver(html: str, trace_id: str, user_id: int | None = None,
               project_id: int | None = None, version: int | None = None) -> AsyncGenerator[Dict, None]:
     """P1 改造: 本地优先落盘(不生成时传 COS),逐文件 yield 落盘进度,末帧 yield 相对路径字典。
@@ -366,6 +428,9 @@ async def _deliver(html: str, trace_id: str, user_id: int | None = None,
     from shared.artifacts import site_dir as _site_dir, to_rel_path, rel_path_for
 
     files = _parse_multi_files(html)
+    # q-2: 落盘后统一校验+修正页面内链接为相对路径, 把多页跳转钉死(见 _normalize_relative_links)。
+    files = {f: _normalize_relative_links(c, files.keys()) for f, c in files.items()}
+
     base = _site_dir(user_id, project_id, version)
     base.mkdir(parents=True, exist_ok=True)
 

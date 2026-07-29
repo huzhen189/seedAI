@@ -29,7 +29,7 @@ export default defineConfig({
     // 经 nginx 域名访问, 需在 dev 中间件补一份静态服务, 保证预览同源可加载。
     // 生产由 nginx 处理, 此中间件仅 dev 生效(server.middlewareMode=false 时即为 dev)。
     setupMiddlewares(middlewares, devServer) {
-      middlewares.use('/artifacts', (req, res, next) => {
+      middlewares.use('/artifacts', async (req, res, next) => {
         try {
           const rel = decodeURIComponent((req.url || '').split('?')[0].replace(/^\/+/, ''))
           // 防目录穿越: 仅允许相对 ARTIFACT_DIR 内部路径
@@ -39,6 +39,35 @@ export default defineConfig({
           if (!target.startsWith(root) || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
             res.statusCode = 404
             res.end('Not found')
+            return
+          }
+          // q-0 兜底校验: 直连 vite 时(不经 nginx auth_request)自行调用后端鉴权端点,
+          // 避免软删/回收区/非 owner 私有项目直链越权读取。公开项目/owner 放行, 其余拒。
+          if (!safe.startsWith('.trash/')) {
+            try {
+              const authUrl = (process.env.VITE_API_TARGET || 'http://127.0.0.1:7101') +
+                '/api/artifacts-auth?path=' + encodeURIComponent(safe)
+              const authResp = await fetch(authUrl, {
+                method: 'GET',
+                headers: { Cookie: req.headers.cookie || '' },
+                redirect: 'manual',
+              })
+              if (authResp.status !== 200) {
+                res.statusCode = authResp.status === 401 ? 401 : 403
+                res.setHeader('Content-Type', 'application/json')
+                res.end(JSON.stringify({ detail: 'forbidden' }))
+                return
+              }
+            } catch {
+              // 鉴权端点不可达 → 宁拒勿放(防止 dev 环境绕过), 但允许 .trash 已排除
+              res.statusCode = 403
+              res.end('Auth check failed')
+              return
+            }
+          } else {
+            // 回收区内容不允许经静态直出
+            res.statusCode = 403
+            res.end('Forbidden')
             return
           }
           const ext = path.extname(target).toLowerCase()

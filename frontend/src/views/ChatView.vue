@@ -243,6 +243,67 @@ function industryLabel(ind: string): string {
   }
   return MAP[ind] || ind || '通用'
 }
+
+// q-2: 预设模板卡 —— 一键带结构化需求填充输入框(site 意图)。
+// 点击即把预填文本灌入 input 并聚焦, 用户可微调后发送; 后端仍按正常建站流程生成。
+const SITE_TEMPLATES: { key: string; title: string; icon: string; desc: string; prompt: string }[] = [
+  {
+    key: 'corp',
+    title: '企业官网',
+    icon: '🏢',
+    desc: '品牌展示 / 公司介绍 / 联系方式',
+    prompt: '帮我做一个企业官网，包含首页、关于我们、产品与服务、新闻动态、联系我们 5 个页面。风格专业大气、科技感，主色用深蓝。需要响应式布局，顶部统一导航可在各页面间跳转。',
+  },
+  {
+    key: 'portfolio',
+    title: '个人作品集',
+    icon: '🎨',
+    desc: '设计师 / 摄影师 / 开发者简历',
+    prompt: '帮我做一个个人作品集网站，包含首页（个人简介+精选作品）、作品展示、关于我、联系方式 4 个页面。风格极简有设计感，突出作品图片，支持点击放大查看。',
+  },
+  {
+    key: 'landing',
+    title: '营销落地页',
+    icon: '🚀',
+    desc: '活动推广 / 产品发售 / 收集线索',
+    prompt: '帮我做一个单页营销落地页，用于推广一款新产品。要包含醒目的主视觉 banner、产品卖点、用户评价、价格方案、常见问题、底部立即购买/预约表单，整体转化导向、视觉冲击力强的配色。',
+  },
+  {
+    key: 'ecommerce',
+    title: '电商商城',
+    icon: '🛒',
+    desc: '商品展示 / 购物车 / 下单',
+    prompt: '帮我做一个电商网站，包含首页（banner+商品分类+热销）、商品列表、商品详情、购物车、结算 5 个页面。风格清爽现代，主色橙红，商品卡片网格布局，各页面顶部统一导航。',
+  },
+  {
+    key: 'blog',
+    title: '博客 / 资讯',
+    icon: '📝',
+    desc: '文章列表 / 详情 / 分类',
+    prompt: '帮我做一个博客网站，包含首页（最新文章+分类）、文章列表、文章详情、关于博主 4 个页面。风格清爽阅读友好，正文排版舒适，支持目录与代码高亮。',
+  },
+  {
+    key: 'game',
+    title: '互动小游戏',
+    icon: '🎮',
+    desc: 'HTML5 小游戏 / 互动体验',
+    prompt: '帮我做一个网页互动小游戏（用纯 HTML/CSS/JS 实现，无需后端），要有完整的开始、玩法、得分与结束逻辑，画面生动有趣，键盘或鼠标可操作。',
+  },
+]
+// 仅当用户尚未选中任何项目、且输入框为空时展示模板卡(降低干扰)。
+// 选中项目后即可直接对话建站, 不需要模板引导。
+const showTemplates = computed(() => !projectStore.currentProjectId && !input.value.trim())
+function applyTemplate(t: { prompt: string }) {
+  input.value = t.prompt
+  if (auth.user.value) {
+    // 已登录: 可选直接发送, 这里仅填充并聚焦, 给用户微调空间
+  }
+  // 触发 ChatInput 聚焦(经 v-model 已同步, 再滚动到输入区)
+  nextTick(() => {
+    const el = document.querySelector('.chat-input-area textarea') as HTMLTextAreaElement | null
+    el?.focus()
+  })
+}
 const execElapsedText = computed(() => {
   const s = execElapsed.value
   if (s < 60) return `${s}s`
@@ -2396,6 +2457,23 @@ watch(pendingRetry, (r) => {
             </span>
           </div>
         </div>
+        <!-- q-2: 预设模板卡(无项目 + 空输入时展示, 一键带结构化需求) -->
+        <div v-if="showTemplates" class="tpl-cards">
+          <div class="tpl-cards-head">✨ 选个模板快速开始（点击填入需求，可再微调）</div>
+          <div class="tpl-grid">
+            <button
+              v-for="t in SITE_TEMPLATES"
+              :key="t.key"
+              type="button"
+              class="tpl-card"
+              @click="applyTemplate(t)"
+            >
+              <span class="tpl-icon">{{ t.icon }}</span>
+              <span class="tpl-title">{{ t.title }}</span>
+              <span class="tpl-desc">{{ t.desc }}</span>
+            </button>
+          </div>
+        </div>
         <ChatInput
           v-model:value="input"
           v-model:model="model"
@@ -3236,6 +3314,22 @@ class="clarify-confirm"
 .qbtn { border: none; background: none; cursor: pointer; font-size: 13px; padding: 1px 4px; border-radius: 3px; color: var(--muted); }
 .qbtn:hover { background: #ddd6fe; color: #4f46e5; }
 .qdel:hover { background: #fee2e2; color: #ef4444; }
+
+/* q-2: 预设模板卡 */
+.tpl-cards { margin-bottom: 10px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+.tpl-cards-head { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+.tpl-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+@media (max-width: 720px) { .tpl-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.tpl-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 10px 12px; text-align: left; cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+  transition: transform .2s cubic-bezier(.16,1,.3,1), box-shadow .2s, border-color .2s;
+}
+.tpl-card:hover { transform: translateY(-2px) scale(1.02); border-color: #818cf8; box-shadow: 0 6px 18px rgba(79,70,229,.18); }
+.tpl-icon { font-size: 20px; line-height: 1; }
+.tpl-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.tpl-desc { font-size: 11px; color: var(--muted); }
 
 /* 搜索跳转高亮闪烁 */
 .highlight-flash {

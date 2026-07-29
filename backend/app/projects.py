@@ -31,7 +31,85 @@ from .schemas import (
     SearchItemResp,
 )
 from .security import CurrentUser, get_current_user
+from shared.artifacts import repo_path, trash_dir
 logger = logging.getLogger("business.projects")
+
+
+def _move_artifacts_to_trash(user_id: int, project_id: int) -> bool:
+    """删除项目时把整站产物目录(含 git 仓库)物理移动到回收区。
+
+    - 目标: {ARTIFACT_DIR}/.trash/{project_id}_{ts}/
+    - 失败静默不抛(不影响软删主流程): 仅记日志, 留给后续清理/运维处理。
+    - 回收区目录可整体移回(.trash -> 原 uid/pid 布局)实现"恢复", 见 restore_project。
+    返回 True 表示成功移动, False 表示无产物或移动失败。
+    """
+    import shutil
+
+    src = repo_path(user_id, project_id)
+    if not src.exists():
+        logger.info("删除项目 %s 无本地产物目录, 跳过回收", project_id)
+        return False
+    from datetime import datetime as _dt
+    ts = _dt.utcnow().strftime("%Y%m%d%H%M%S")
+    dest_root = trash_dir()
+    dest = dest_root / f"{project_id}_{ts}" / str(user_id) / str(project_id)
+    try:
+        dest_root.mkdir(parents=True, exist_ok=True)
+        # 目标已存在(极端重名)则追加随机后缀, 避免覆盖
+        if dest.exists():
+            dest = dest.with_name(dest.name + "_" + uuid.uuid4().hex[:6])
+        shutil.move(str(src), str(dest))
+        logger.info("项目 %s 产物已移入回收区: %s", project_id, dest)
+        return True
+    except Exception as e:  # noqa: BLE001 - 回收失败不阻断软删
+        logger.error("项目 %s 产物移入回收区失败(不影响软删): %s", project_id, e)
+        return False
+
+
+def _restore_artifacts_from_trash(user_id: int, project_id: int) -> bool:
+    """恢复项目时把回收区中的产物目录移回原 uid/pid 布局。
+
+    回收时布局: .trash/{project_id}_{ts}/{user_id}/{project_id}/
+    移回目标:   {ARTIFACT_DIR}/{user_id}/{project_id}/
+    - 取该 project 最新的回收条目(按目录名 ts 排序)。
+    - 失败静默不抛(不影响取消软删主流程); 若无回收条目则 no-op 返回 False。
+    """
+    import shutil
+
+    root = trash_dir()
+    if not root.exists():
+        return False
+    # 收集匹配 {project_id}_* 的回收条目
+    entries = sorted(
+        (p for p in root.iterdir()
+         if p.is_dir() and p.name.startswith(f"{project_id}_")),
+        key=lambda p: p.name,
+        reverse=True,  # 最新 ts 在前
+    )
+    if not entries:
+        logger.info("恢复项目 %s 未找到回收区条目, 跳过", project_id)
+        return False
+    src = entries[0] / str(user_id) / str(project_id)
+    if not src.exists():
+        logger.warning("恢复项目 %s 回收条目结构异常(缺 %s), 跳过", project_id, src)
+        return False
+    dest = repo_path(user_id, project_id)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            # 已有产物(异常并存), 不覆盖, 直接放弃本次恢复移动
+            logger.warning("恢复项目 %s 目标已存在产物, 跳过移回", project_id)
+            return False
+        shutil.move(str(src), str(dest))
+        # 若回收条目下已无其他项目目录, 顺手清理空壳 .trash/{project_id}_{ts}
+        parent_entry = src.parent
+        if parent_entry.exists() and not any(parent_entry.iterdir()):
+            parent_entry.rmdir()
+        logger.info("项目 %s 产物已从回收区移回: %s", project_id, dest)
+        return True
+    except Exception as e:  # noqa: BLE001 - 恢复失败不阻断软删取消
+        logger.error("项目 %s 产物从回收区移回失败(不影响恢复): %s", project_id, e)
+        return False
 
 
 def _fix_content(content: str) -> str:
@@ -153,14 +231,38 @@ async def delete_project(
     # 软删除: 仅打 deleted_at 标志, 保留全部关联数据(对话/消息/产物/向量库/统计),
     # 前端与列表查询据此过滤不显示; 同时撤销公开分享, 避免已隐藏项目仍可经分享链接访问。
     # 行保留以维持统计与历史记录的连续性(硬删会影响统计与其他流程)。
+    # 同时把本地产物目录(含 git 仓库)物理移入回收区(.trash), 既不真删(可恢复),
+    # 又能堵住"软删项目仍可被 nginx 同源直链读取"的泄露风险(配合 /api/artifacts-auth)。
     await project_repo.update(
         db, proj,
         deleted_at=datetime.utcnow(),
         is_public=False,
         share_id=None,
     )
+    # 回收失败静默: 不阻断软删主流程
+    _move_artifacts_to_trash(user.id, project_id)
     await cache_invalidate(f"conv:list:{project_id}:*")
     return None
+
+
+@router.post("/projects/{project_id}/restore", response_model=ProjectResp)
+async def restore_project(
+    project_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """取消软删除: 清除 deleted_at 标志, 项目重新出现在列表; 同时把回收区中的产物目录移回原布局(可恢复)。"""
+    proj = await project_repo.get_by(db, id=project_id, user_id=user.id)
+    if proj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    if proj.deleted_at is None:
+        return proj  # 原本未删, 幂等返回
+    # 取消软删(不恢复分享状态——公开分享需用户重新主动开启, 更安全)
+    updated = await project_repo.update(db, proj, deleted_at=None)
+    # 回收区产物移回: 失败静默不阻断主流程
+    _restore_artifacts_from_trash(user.id, project_id)
+    await cache_invalidate(f"conv:list:{project_id}:*")
+    return updated
 
 
 # ---------- 会话 ----------
