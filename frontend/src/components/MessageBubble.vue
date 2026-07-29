@@ -255,13 +255,21 @@ function fmtTime(t: string): string {
 }
 .body { max-height: 50vh; overflow-y: auto; }
 .body.expanded { max-height: none; overflow-y: visible; }
-/* 流式阶段的原始文本: 保留换行、克制样式, 仅作"正在输出"的即时反馈, 不触发 Markdown/高亮 */
+/* 流式阶段的原始文本: 轻量"正在输出"反馈, 不做 Markdown/高亮。
+   限高+弱化, 不喧宾夺主(用户不关心逐字原文, 关心最终富文本); 高度超限可滚动。 */
 .raw-stream {
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 14px;
-  line-height: 1.7;
+  font-size: 13px;
+  line-height: 1.5;
   margin: 0;
+  max-height: 140px;
+  overflow-y: auto;
+  color: #64748b;
+  background: #f8fafc;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  padding: 8px 10px;
 }
 .expand {
   margin-top: 6px; font-size: 12px; color: var(--brand); cursor: pointer;

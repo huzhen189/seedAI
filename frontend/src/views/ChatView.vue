@@ -1011,8 +1011,15 @@ function applyTrailSnapshot(tid: string) {
   // 关页重开后经 resume → loadArtifacts() 重新拉取产物, watch 会自动重启 COS 轮询。
   pendingConfirm.value = snap.pendingConfirm ?? null
   sopCurrentRole.value = snap.sopCurrentRole
-  generating.value = !!snap.generating
-  finished.value = !!snap.finished
+  // 快照恢复: 若项目已有产物落库(说明任务早已跑完), 绝不据旧快照把 generating 顶回 true,
+  // 否则"已完成卡片"与"仍在跑/raw-stream"会同时出现, 状态自相矛盾。无产物才信任快照的 running。
+  if (projectArtifacts.value.length > 0) {
+    generating.value = false
+    finished.value = true
+  } else {
+    generating.value = !!snap.generating
+    finished.value = !!snap.finished
+  }
   // P5 健壮性: 关页重开(新标签)时可能无本地草稿气泡, 保证有宿主 assistant 气泡承载 in-bubble trail
   const live =
     generating.value || planPreview.value || cancelSummary.value ||
@@ -1784,6 +1791,22 @@ async function maybeResume() {
   if (convStore.currentConvId !== us.convId && projectStore.currentProjectId != null) {
     await convStore.loadConversations(projectStore.currentProjectId)
   }
+  // 后端最终核定: 以防 localStorage 残留 running 但任务早已跑完(产物已落库 / trace 已终态)。
+  // 不核实直接 resumeStream 会拉起「死流回放」, 导致刷新后永远显示"还在跑"且 raw-stream 占位卡死。
+  // 后端说已不 running → 清残留态、判完成, 不续播。
+  try {
+    const resp = await fetch(`/api/conversations/${us.convId}/status`)
+    const s = await resp.json()
+    if (s.status !== 'running' || !s.active_trace_id) {
+      clearUserStatus()
+      const aIdx = findAssistantIdx()
+      if (aIdx >= 0 && !convStore.messages[aIdx].content) {
+        // 无正文又无在途流: 不残留空白占位, 直接判完成态
+      }
+      finished.value = true
+      return
+    }
+  } catch { /* 核实失败: 退化为原续接行为, 不阻断 */ }
   resumeStream(us.convId, us.traceId, us.after)
   // P5: 关页后重开, 先按 trace_id 恢复执行轨迹 UI 快照, 等 SSE 续接事件到来后再增量更新
   applyTrailSnapshot(us.traceId)
@@ -2322,8 +2345,10 @@ watch(pendingRetry, (r) => {
           <!-- 当前会话内联执行 UI 已移入宿主 assistant 气泡(见上方 MessageBubble 的 #trail 插槽, P1) -->
         </template>
 
-        <!-- 生成完成的产物清单: 文字反馈 + 点击在右侧预览面板打开 -->
-        <div v-if="finished && artifactLinks.length" class="artifact-summary-card">
+        <!-- 生成完成的产物清单: 文字反馈 + 点击在右侧预览面板打开。
+             关键契约: 仅在 finished && !generating 时显示, 避免与"正在生成"状态叠加
+             (否则用户同时看到『生成完成卡片』和『仍在跑/raw-stream』, 状态自相矛盾)。 -->
+        <div v-if="finished && !generating && artifactLinks.length" class="artifact-summary-card">
           <div class="asc-head">✅ 生成完成 · 共 {{ artifactLinks.length }} 项产物</div>
           <div class="asc-hint">
             点击下方任意文件，即可在右侧预览面板查看（HTML 实时渲染 · 需求文档原文 · 代码高亮）。
