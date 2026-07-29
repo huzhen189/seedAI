@@ -893,10 +893,20 @@ async def worker_loop(concurrency: int = 1):
                     else:
                         logger.warning("[Worker] [3.5] clarified 重发但无 pending_clarify(可能已过期), 退化为普通分类")
 
-                # 意图分类 v2(5模块并行, 35s超时)
+                # 意图分类 v2(分级超时预算)。
+                # 单意图保持 35s; 轻量门控预判为「疑似多意图」时给 180s 预算
+                # —— 多意图需方案A(LLM 深拆)或方案B(逐段 LLM 分类), 在慢模型(qwen)下
+                # 常 >35s, 原硬超时 35s 会降级丢拆分(M1 闲聊+闲聊实测 53s 被掐)。
                 if not _skip_classify:
                     if conversation_id:
                         clear_pending_clarify(conversation_id)  # 新一轮正常分类: 清除陈旧澄清态
+                    _cls_timeout = 35.0
+                    try:
+                        from ..intent.multi_intent import _lightweight_multi_check
+                        if _lightweight_multi_check(messages):
+                            _cls_timeout = 180.0
+                    except Exception:  # 门控异常不影响主流程, 退化为默认预算
+                        pass
                     try:
                         intent = await asyncio.wait_for(
                             detect_intent_v2(messages, model_id,
@@ -907,10 +917,10 @@ async def worker_loop(concurrency: int = 1):
                                              user_id=user_id, project_id=project_id,
                                              has_requirement_doc=has_req_doc,
                                              has_site_artifact=has_site_artifact),
-                            timeout=35.0,
+                            timeout=_cls_timeout,
                         )
                     except asyncio.TimeoutError:
-                        logger.error("[Worker] [3/6] 意图分类超时(35s) → 降级")
+                        logger.error("[Worker] [3/6] 意图分类超时(%.0fs) → 降级", _cls_timeout)
                         intent = {"level1": "learn", "level2": "casual", "confidence": 0.3,
                                   "industry": "other", "checkpoint_relation": "none",
                                   "selected_skill": "agent_chat", "decision": "fallback"}
