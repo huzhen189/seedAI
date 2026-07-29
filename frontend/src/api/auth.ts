@@ -69,16 +69,26 @@ export async function updateMe(p: UpdateMePayload): Promise<AuthUser> {
 }
 
 export async function logout(): Promise<void> {
-  // credentials: 'include' 确保同源下也显式携带 Cookie(删除指令依赖它)
-  await fetch('/auth/logout', { method: 'POST', credentials: 'include' }).catch(
-    () => {},
-  )
+  // credentials: 'include' 确保同源下也显式携带 Cookie(删除指令依赖它)。
+  // 关键: 必须 await 响应体(res.text),强制浏览器把"清 Cookie 的 Set-Cookie"
+  // 完整处理后再返回;否则紧随其后的 location.reload() 可能在 Cookie 落盘前
+  // 就抢先导航,导致清 Cookie 被丢弃 → 点退出刷新后又变回登录态(退出无效)。
+  try {
+    const r = await fetch('/auth/logout', {
+      method: 'POST',
+      credentials: 'include',
+    })
+    await r.text().catch(() => {})
+  } catch {
+    /* 网络失败也继续前端清理,不阻断退出 */
+  }
 }
 
 /** 读取当前登录用户;未登录或出错返回 null(前端据此显示登录层)。 */
 export async function fetchMe(): Promise<AuthUser | null> {
   try {
-    const r = await fetch('/auth/me')
+    // cache:'no-store' 防止刷新后命中 /auth/me 的缓存 200 响应(否则会误判仍登录)
+    const r = await fetch('/auth/me', { cache: 'no-store' })
     if (r.status === 401) return null
     if (!r.ok) return null
     return await r.json()
