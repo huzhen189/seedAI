@@ -200,6 +200,21 @@ async def requirement_agent_handler(
                 for m in messages if m.get("role") == "user"]
     user_input = req_msgs[-1]["content"][:100] if req_msgs else "(无)"
     AGENT_LOG.info("[需求] [2/4] 调用LLM需求分析 model=%s input=%.100s", model_id, user_input)
+
+    # ── 调试透出: 完整打印发送给 LLM 的结构体(排查跨轮上下文是否随请求发出) ──
+    # 实际 request = [{"role":"system","content":full_sys}, *req_msgs]
+    # 注意: 入参 messages 中的 assistant(上一轮PM问题) / rel_ctx(system 语义历史) 被本 skill 的
+    #       user-only 过滤剔除, 跨轮上下文实际仅通过 user 历史消息带入 LLM。
+    AGENT_LOG.info(
+        "[需求] [2/4] 发送LLM结构体 = [system(1) + user(%d)] 共 %d 条; "
+        "assistant/rel_ctx(system) 历史已按 user-only 过滤剔除",
+        len(req_msgs), len(req_msgs) + 1,
+    )
+    # system 全文(用户要求全打)
+    AGENT_LOG.info("[需求] [2/4] [system] ↓↓↓\n%s", full_sys)
+    # 逐条 user 全文(跨轮用户消息即真实带入 LLM 的上下文)
+    for _i, _m in enumerate(req_msgs):
+        AGENT_LOG.info("[需求] [2/4] [user#%d/%d] ↓↓↓\n%s", _i + 1, len(req_msgs), _m["content"])
     # 预思考事件: 长文档生成期间保持 SSE 活跃, 避免前端误判无响应
     yield ev("think", stage="analyst", content="正在为您生成详细的需求文档（产品经理视角）…",
              agent_id="requirement_agent")
