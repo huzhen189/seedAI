@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     ai_service_url: str = "http://localhost:7101"
     business_service_url: str = "http://localhost:7101"
 
+    # ---- runtime/env ----
+    # 运行环境标识: production(正式服务器, 裸跑 systemd) 或 dev/local(默认, 本地开发 docker-compose)。
+    # 由 .env 的 ENV 注入; deployment.py 据此选择 stop/start/scale 的底层实现。
+    env: str = "dev"
+
     # ---- data layer ----
     redis_url: str = "redis://redis:6379/0"
     database_url: str = "sqlite+aiosqlite:///./seedai.db"
@@ -187,11 +192,21 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _check_jwt_secret(self) -> "Settings":
         # refuse to start in production with default secret
-        if self.jwt_secret == "dev-secret-change-me" and os.environ.get("ENV", "") not in ("dev", "local", ""):
+        if self.jwt_secret == "dev-secret-change-me" and self.env not in ("dev", "local", ""):
             raise RuntimeError(
                 "FATAL: JWT_SECRET 仍为默认值,生产环境拒绝启动。请在 .env 中覆盖为随机强值。"
             )
         return self
+
+    @property
+    def is_production(self) -> bool:
+        """正式服务器(production 环境, 裸跑 systemd 形态)。"""
+        return self.env == "production"
+
+    @property
+    def is_dev(self) -> bool:
+        """本地开发(docker-compose 形态, 默认)。"""
+        return not self.is_production
 
 
 settings = Settings()

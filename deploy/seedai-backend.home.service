@@ -1,0 +1,18 @@
+[Unit]
+Description=SeedAI Backend (unified FastAPI process)
+After=network.target mysql.service redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/huzhen/seedai/backend
+Environment=PYTHONPATH=/home/huzhen/seedai/backend
+ExecStartPre=/bin/sleep 3
+ExecStart=/opt/miniconda3/envs/seedai/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 7101
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/huzhen/seedai/logs/backend.log
+StandardError=append:/home/huzhen/seedai/logs/backend.log
+
+[Install]
+WantedBy=multi-user.target
