@@ -28,6 +28,7 @@ import type { Artifact, Message, ModelInfo, OptionEvent, AlternativesEvent, Plan
 import { SOP_ROLES, SKILL_TO_ROLE } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
+  received: '系统已收到你的需求',
   enter_router: '意图路由 — 识别你的需求类型，匹配最合适的处理流程',
   dispatch: '技能调度 — 加载所需的 AI 能力和工具链',
   doc_plan: '规划结构 — 梳理文档大纲与章节安排',
@@ -39,7 +40,12 @@ const STAGE_LABELS: Record<string, string> = {
   enter_reviewer: '评审校验 — 检查生成结果的完整性和正确性',
   previewing: '投递预览 — 将生成产物上传到预览环境',
   preview: '生成预览 — 正在生成可预览的网页',
-  done: '完成 — 全部任务执行完毕',
+  // 用户体感关键工序: 与需求一致的中文分步反馈
+  analyzing: '系统正在分析你的需求',
+  orchestration: '系统正在对你的需求进行拆分',
+  merge: '任务执行完毕，正在进行结果汇总',
+  refined: '已生成结果摘要',
+  done: '任务执行完毕',
 }
 
 // 未知工序的中文回退标签(后端可能随时新增节点, 不希望前端显示裸 snake_case)
@@ -1092,6 +1098,7 @@ const activeTrailKey = computed<string | null>(() => {
     generating.value || planPreview.value || cancelSummary.value ||
     subTasks.value.length || mergeResult.value ||
     cosUploading.value || cosFailed.value || pendingConfirm.value ||
+    degraded.value ||
     (optionsData.value)
   if (!show) return null
   const sessions = allSessions.value
@@ -1218,9 +1225,26 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       generating.value = false
       sending.value = false
       finished.value = true
-      thoughtSteps.value = []
+      // 检测"空结果": done 到达但主气泡无正文、无产物、无子任务产出 → 视为模型超时/兜底。
+      // 置 degraded 并保留轨迹(追加降级警告步), 让用户看到明确反馈而非误以为 bug。
+      const m = convStore.messages[assistantIdx]
+      const hasContent = !!(m && m.content && m.content.trim().length > 0)
+      const hasArtifacts = projectArtifacts.value.length > 0
+      const hasSub = subTasks.value.some((s) => s.status === 'done' && s.result_summary)
+      const emptyResult = !hasContent && !hasArtifacts && !hasSub
+      if (emptyResult) {
+        degraded.value = true
+        // 保留时间线并追加降级警告步, 给出明确可见结论
+        thoughtSteps.value.forEach((s) => { if (s.status === 'active') s.status = 'done' })
+        if (!thoughtSteps.value.some((s) => s.stage === 'degraded_warn')) {
+          thoughtSteps.value.push({ stage: 'degraded_warn', label: '⚠ 模型响应超时，已启用兜底，本次未生成内容', status: 'done', think: '' })
+        }
+      } else {
+        thoughtSteps.value = []
+      }
       planNodes.value = []
       planPreview.value = null
+      cancelSummary.value = null
       cosUploadingActive.value = false
       cosUploadPct.value = 0
       genLoading.value = false
@@ -1582,6 +1606,9 @@ async function doSend(text: string) {
   }
 
   resetGenState()
+  // 系统收到: 发送瞬间立即反馈, 消除"卡死"焦虑(用户体感第一步, 始终完成态)
+  currentStage.value = 'received'
+  upsertStep('received', 'done')
   traceId.value = genTraceId()
   const cid = convStore.currentConvId!
   setActiveGen(cid, traceId.value)
@@ -2052,6 +2079,7 @@ watch(pendingRetry, (r) => {
                 <!-- 合并: 实时阶段头 + 思考(原 live-think 块) 与下方 ThoughtTrail 合成一块连贯执行面板 -->
                 <div v-if="streamingMsgKey === 's' + si + '-' + i" class="exec-head">
                   <div class="exec-row">
+                    <span class="recv-chip">✅ 已收到</span>
                     <span class="exec-pulse"></span>
                     <span class="exec-badge">{{ execIntentLabel || streamingStageLabel }}</span>
                     <span v-if="execIndustry" class="exec-tag">行业·{{ industryLabel(execIndustry) }}</span>
@@ -2061,7 +2089,7 @@ watch(pendingRetry, (r) => {
                     <span class="exec-timer">⏱ {{ execElapsedText }}</span>
                   </div>
                   <div v-if="liveThinkText" class="exec-body">{{ liveThinkText }}</div>
-                  <div v-else class="exec-body exec-placeholder">正在分析你的需求…</div>
+                  <div v-else class="exec-body exec-placeholder">{{ streamingStageLabel }}</div>
                   <!-- B(#488): COS 上传进度条(exec-head 内实时「📤 上传中 NN%」) -->
                   <div v-if="cosUploadingActive" class="cos-progress">
                     <span class="cos-icon">📤</span>
@@ -2593,6 +2621,13 @@ class="clarify-confirm"
   font-size: 12px; font-weight: 700; color: #1e3a8a;
   background: #dbeafe; border: 1px solid #93c5fd; border-radius: 999px;
   padding: 2px 10px; line-height: 1.4;
+}
+/* 系统收到: 发送瞬间即出现, 给用户即时反馈(始终绿色完成态) */
+.recv-chip {
+  font-size: 12px; font-weight: 700; color: #15803d;
+  background: #dcfce7; border: 1px solid #86efac; border-radius: 999px;
+  padding: 2px 10px; line-height: 1.4;
+  display: inline-flex; align-items: center; gap: 3px;
 }
 .exec-tag {
   font-size: 11px; font-weight: 600; color: #475569;

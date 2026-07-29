@@ -28,14 +28,44 @@ const INTENT_COLORS: Record<string, string> = {
 }
 
 const STAGE_LABELS: Record<string, string> = {
+  received: '系统已收到你的需求',
   enter_router: '意图路由 — 识别你的需求类型',
   dispatch: '技能调度 — 加载 AI 能力',
+  analyzing: '系统正在分析你的需求',
+  orchestration: '系统正在对你的需求进行拆分',
   enter_planner: '需求规划 — 拆解任务/制定步骤',
   enter_coder: '代码生成 — 编写构建代码',
   enter_reviewer: '评审校验 — 检查完整性',
   previewing: '投递预览 — 上传预览环境',
   preview: '生成预览 — 产出可预览页面',
-  done: '完成',
+  merge: '任务执行完毕，正在进行结果汇总',
+  done: '任务执行完毕',
+}
+
+// 每个阶段配一个 emoji 图标, 让时间线更直观(对应 ChatView 推送的 stage 名)
+const STEP_ICONS: Record<string, string> = {
+  received: '✅',
+  intent_recognized: '🧠',
+  enter_router: '🧭',
+  dispatch: '⚡',
+  analyzing: '🔍',
+  orchestration: '🧩',
+  doc_plan: '📝',
+  doc_write: '✍️',
+  doc_proofread: '🔧',
+  writing: '✍️',
+  enter_planner: '🧩',
+  enter_coder: '💻',
+  enter_reviewer: '🔎',
+  previewing: '📤',
+  preview: '🌐',
+  merge: '📦',
+  refined: '📋',
+  done: '✅',
+  degraded_warn: '⚠️',
+}
+function iconFor(stage: string): string {
+  return STEP_ICONS[stage] || '•'
 }
 
 function intentLabel(l: { level1: string; level2: string }): string {
@@ -70,7 +100,7 @@ function intentLabel(l: { level1: string; level2: string }): string {
     >
       🧠 已识别: {{ intentLabel(intent) }}
     </div>
-    <div v-if="degraded" class="badge warn">⚠ 主模型不可用,已降级到备用模型</div>
+    <div v-if="degraded" class="badge warn">⚠ 生成异常，已启用兜底方案</div>
 
     <div v-for="(p, i) in plans" :key="'plan-' + i" class="plan-card">
       <div class="plan-head">
@@ -86,13 +116,19 @@ function intentLabel(l: { level1: string; level2: string }): string {
     </div>
 
     <ul class="timeline">
-      <li v-for="s in steps" :key="s.stage" class="step" :class="s.status">
+      <li
+        v-for="s in steps"
+        :key="s.stage"
+        class="step"
+        :class="[s.status, s.stage === 'degraded_warn' ? 'warn' : '']"
+      >
         <span class="dot"></span>
+        <span class="step-icon">{{ iconFor(s.stage) }}</span>
         <div class="step-body">
           <div class="step-label">
             {{ s.label || STAGE_LABELS[s.stage] || s.stage }}
             <span v-if="s.status === 'active'" class="pulse">进行中</span>
-            <span v-else-if="s.status === 'done'" class="ok">✓</span>
+            <span v-else-if="s.status === 'done' && s.stage !== 'degraded_warn'" class="ok">✓</span>
           </div>
           <pre v-if="s.think" class="think">{{ s.think }}</pre>
           <div v-if="s.stage === 'enter_reviewer' && s.comment" class="review">
@@ -163,10 +199,14 @@ function intentLabel(l: { level1: string; level2: string }): string {
 .plan-steps li { font-size: 13px; line-height: 1.5; color: #334155; }
 
 .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.step { display: flex; gap: 10px; align-items: flex-start; position: relative; }
+.step { display: flex; gap: 8px; align-items: flex-start; position: relative; }
 .dot { flex: none; width: 9px; height: 9px; margin-top: 4px; border-radius: 50%; background: var(--border); }
+.step-icon { flex: none; font-size: 15px; line-height: 1; margin-top: 1px; }
 .step.active .dot { background: var(--brand); box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.15); }
 .step.done .dot { background: #22c55e; }
+/* 降级警告步: 橙色高亮, 区别于常规完成态 */
+.step.warn .dot { background: var(--warn); box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.18); }
+.step.warn .step-label { color: var(--warn); font-weight: 700; }
 .step-body { flex: 1; min-width: 0; }
 .step-label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .step.active .step-label { color: var(--brand); }

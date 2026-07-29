@@ -53,12 +53,20 @@ const currentRole = computed(() => {
 const sopChain = computed(() =>
   SOP_ROLES.map((r) => ({ ...r, active: r.key === currentRole.value })),
 )
+
+// 汇总中: 所有子任务已终态(完成/失败/跳过/取消)但合并结果尚未下发
+const merging = computed(() => {
+  if (props.subtasks.length === 0) return false
+  return props.subtasks.every((s) =>
+    s.status === 'done' || s.status === 'failed' || s.status === 'skipped' || s.status === 'cancelled' || s.status === 'blocked',
+  )
+})
 </script>
 
 <template>
   <div class="track">
     <div class="track-head">
-      <span class="track-title">🧩 多意图并行编排</span>
+      <span class="track-title">🧩 系统正在拆分需求</span>
       <span class="strategy" :class="strategy === 'mixed' ? 'strategy-mixed' : 'strategy-parallel'">
         {{ strategy === 'mixed' ? '分层串行 · 层内并行' : '全部并行' }}
       </span>
@@ -71,6 +79,12 @@ const sopChain = computed(() =>
         <span class="sop-node" :class="{ active: r.active }">{{ r.label }}</span>
         <span v-if="i < sopChain.length - 1" class="sop-arrow">→</span>
       </template>
+    </div>
+
+    <!-- 汇总中: 各子任务已收尾, 后端正在合并为最终回复 -->
+    <div v-if="merging" class="merge-banner">
+      <span class="merge-icon">📦</span>
+      <span>任务执行完毕，正在进行结果汇总…</span>
     </div>
 
     <ul class="lanes">
@@ -157,6 +171,14 @@ const sopChain = computed(() =>
 .count { font-size: 12px; color: var(--muted); margin-left: auto; }
 
 .lanes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.merge-banner {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 600; color: #6d28d9;
+  background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 10px;
+  padding: 8px 12px;
+}
+.merge-icon { font-size: 16px; animation: lt-bounce 1.2s ease-in-out infinite; }
+@keyframes lt-bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
 .lane {
   border: 1px solid var(--border);
   border-left: 3px solid var(--border);
