@@ -1,0 +1,9 @@
+# 一次性部署探针/临时脚本(由 Agent 登录 CVM 执行用, 非交付物)
+_probe*.py
+_setup*.py
+_sync*.py
+_build*.py
+_install*.py
+_start*.py
+_verify*.py
+_deploy_configs.py

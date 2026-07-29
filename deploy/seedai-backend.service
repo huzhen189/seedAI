@@ -1,0 +1,20 @@
+[Unit]
+Description=SeedAI Backend (unified FastAPI process)
+After=network.target mysql.service redis.service
+# 本机 mysql/redis 已裸进程运行; 用 network-online 保证可达
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/seedai/backend
+Environment=PYTHONPATH=/opt/seedai/backend
+# .env 由 config.py 自动从仓库根(/opt/seedai/.env)加载, 此处无需重复声明
+ExecStartPre=/bin/sleep 3
+ExecStart=/opt/miniconda3/envs/seedai/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 7101
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/seedai/logs/backend.log
+StandardError=append:/opt/seedai/logs/backend.log
+
+[Install]
+WantedBy=multi-user.target
