@@ -2164,6 +2164,7 @@ watch(pendingRetry, (r) => {
             :my-dims="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].dims : null"
             :my-comment="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].comment : null"
             :can-rate="!!auth.user"
+            :streaming="streamingMsgKey === 's' + si + '-' + i"
             @rate="(p) => m.trace_id && onRate(m.trace_id, p)"
             @open-file="(name) => openArtifact(name, 'file')"
           >

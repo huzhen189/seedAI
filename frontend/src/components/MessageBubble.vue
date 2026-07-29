@@ -19,6 +19,9 @@ const props = withDefaults(
     myComment?: string | null
     /** 是否允许评价(已登录可评) */
     canRate?: boolean
+    /** 是否正在流式生成(逐字 token 推送中)。流式阶段不进 MarkdownView,
+     *  直接渲染原始文本, 避免每 token 整篇重解析+全量语法高亮导致卡死(O(n²))。 */
+    streaming?: boolean
   }>(),
   { qc: null, myRating: null, myDims: null, myComment: null, canRate: true },
 )
@@ -114,7 +117,10 @@ function fmtTime(t: string): string {
 
     <div class="body" :class="{ expanded: expanded }">
       <!-- 纯文本 / 闲聊 / 建站文字总结(A#485: 去 site-card 双卡, 只留总结文案) -->
-      <MarkdownView v-if="parsed.type === 'plain' && role === 'assistant'" :content="parsed.text" />
+      <!-- 流式生成中: 直接渲染原始文本(保留换行), 跳过 MarkdownView 的逐字重解析+高亮(防卡死)。
+           生成完成(streaming=false)后才一次性交给 MarkdownView 渲染, 性能从 O(n²) 降到 O(n)。 -->
+      <div v-if="parsed.type === 'plain' && role === 'assistant' && streaming" class="raw-stream">{{ parsed.text }}</div>
+      <MarkdownView v-else-if="parsed.type === 'plain' && role === 'assistant'" :content="parsed.text" />
       <span v-else-if="parsed.type === 'plain'">{{ parsed.text }}</span>
       <!-- 代码产物 -->
       <div v-else-if="parsed.type === 'code'" class="code-card">
@@ -249,6 +255,14 @@ function fmtTime(t: string): string {
 }
 .body { max-height: 50vh; overflow-y: auto; }
 .body.expanded { max-height: none; overflow-y: visible; }
+/* 流式阶段的原始文本: 保留换行、克制样式, 仅作"正在输出"的即时反馈, 不触发 Markdown/高亮 */
+.raw-stream {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 14px;
+  line-height: 1.7;
+  margin: 0;
+}
 .expand {
   margin-top: 6px; font-size: 12px; color: var(--brand); cursor: pointer;
   border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; background: #fff;

@@ -6,6 +6,8 @@ import hljs from 'highlight.js'
 
 const props = defineProps<{ content: string }>()
 const rendered = ref('')
+// rAF 合帧: 外部仍可能高频更新 content 时(如非流式场景), 把多次变更合并到一帧, 避免每变更全量重渲染。
+let rafId: number | null = null
 
 function normalizeContent(text: string): string {
   // AI 消息可能存为 JSON 碎片: {"data":"a"}{"data":"b"}... 或单层 {"data":"text"}
@@ -49,6 +51,10 @@ function render() {
   nextTick(() => {
     document.querySelectorAll('.md pre code').forEach((el) => {
       try {
+        // 修复 "Element previously highlighted" 警告: 上一轮高亮的 data-highlighted 被 DOMPurify 当
+        // data-* 合法属性保留进 rendered, v-html 重注入后元素仍带属性 → 再次 highlight 触发告警。
+        // 高亮前先清掉该属性, 让 highlight.js 重新着色。
+        ;(el as HTMLElement).removeAttribute('data-highlighted')
         hljs.highlightElement(el as HTMLElement)
       } catch {
         /* ignore */
@@ -58,7 +64,16 @@ function render() {
 }
 
 render()
-watch(() => props.content, render)
+
+function scheduleRender() {
+  if (rafId != null) return
+  rafId = requestAnimationFrame(() => {
+    rafId = null
+    render()
+  })
+}
+
+watch(() => props.content, scheduleRender)
 </script>
 
 <template>
