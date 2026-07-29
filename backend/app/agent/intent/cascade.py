@@ -44,6 +44,7 @@ from .common import (
     normalize_industry,
     _GENERIC_Q,
     _MISSING_Q,
+    _BUILD_TRIGGER,
     _has_conversation_requirement,
     last_user_message,
 )
@@ -395,6 +396,47 @@ async def _classify_segment(
         elif _is_obvious_praise:
             logger.info("[级联][%s] 上下文闸门: 仅纯夸赞(无修改词) → 不强制路由, 落回普通分类", req_id)
 
+    # ── [8.5] PM 粘性(D/#504 修正, 须置于 [1-β] 之前) ──
+    # 失败用例: 小白首问"我想做一个网站"→ PM; 答"个人博客"后第二答"风格简约清新"
+    # 被 [1-β] 漏判(no verb+noun)且 novelty 兜底误路由到 chat_design, PM 链路断裂。
+    # 修复: 若上一轮处于 PM 模式(路由到 agent_requirement)且当前仍无需求文档/未落站
+    # → 维持 PM 继续采集, 不被 [1-β]/novelty/chat 抢占; 显式建站触发语(_BUILD_TRIGGER)
+    # 仍放行直冲生成器(由下游 [10] 门控放行)。
+    _prior = await asyncio.to_thread(load_slots, conversation_id)
+    _prior_was_pm = (
+        (_prior.get("intent_id") or "") == "build_requirement"
+        or (_prior.get("selected_skill") or "") == "agent_requirement"
+    )
+    if _prior_was_pm and not has_requirement_doc and not has_site_artifact:
+        _is_explicit_build = any(t in current_user_msg for t in _BUILD_TRIGGER)
+        if not _is_explicit_build:
+            _pm_intent = get_intent("build_requirement") or {
+                "level1": "build", "level2": "requirement", "skill": "agent_requirement",
+                "id": "build_requirement",
+            }
+            logger.info("[级联][%s] PM 粘性: 上一轮 PM 且仍无需求文档 → 维持 agent_requirement (msg=%.30s)",
+                        req_id, current_user_msg)
+            await asyncio.to_thread(save_slots, conversation_id, {
+                "intent_id": "build_requirement",
+                "slots": _prior.get("slots", {}) or {},
+                "clarify_rounds": int(_prior.get("clarify_rounds", 0) or 0),
+                "confidence": 0.8, "selected_skill": "agent_requirement",
+            })
+            await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
+                                    user_id=user_id, raw_input=current_user_msg,
+                                    llm_intent="build/requirement", llm_confidence=0.8,
+                                    rules_triggered=["pm_sticky"], belief_before=0.0, belief_after=0.8,
+                                    decision="route", latency_ms=(time.time() - t0) * 1000, tokens_used=0,
+                                    specialist_routed="agent_requirement", outcome="pending",
+                                    extra={"source": "pm_sticky"})
+            await record_intent_classify("route", "pm_sticky", (time.time() - t0) * 1000, confidence=0.8)
+            return _emit_route(
+                _pm_intent, 0.8, decision="route",
+                selected_skill="agent_requirement", industry="other",
+                reason="PM 粘性: 维持需求采集(无需求文档)", request_id=req_id,
+                evidence={"pm_sticky": True, "prior_intent": _prior.get("intent_id")},
+            )
+
     # ── [1-β] 建站意图共现启发式(修复白名单短板: 纯子串匹配无法覆盖
     #    "帮我做一个个人博客网站"/"生成公司官网" 这类泛化表达)。
     #    规则: 命中「建站动词」且(命中「站点名词」或「网站修饰词」)→ 直路由 build_site。
@@ -438,7 +480,15 @@ async def _classify_segment(
                 _reason = "建站共现启发式: 动词+站点名词"
                 logger.info("[级联][%s] 建站共现启发式命中 → 直路由 conf=%.2f skill=%s (verb=%s noun=%s)",
                             req_id, _conf, _sel_skill, _has_verb, _has_noun)
-            reset_slots(conversation_id)
+            # 记录 PM 模式(供 PM 粘性 [8.5] 识别续答; 即使走 [1-β] 也持久化,
+            # 否则 prior_intent_id 为空会导致续答漏判)。PM 分支不 reset, 保留标记。
+            await asyncio.to_thread(save_slots, conversation_id, {
+                "intent_id": "build_requirement" if _sel_skill == "agent_requirement" else _site_intent["id"],
+                "slots": {}, "clarify_rounds": 0, "confidence": _conf,
+                "selected_skill": _sel_skill,
+            })
+            if _sel_skill != "agent_requirement":
+                reset_slots(conversation_id)
             await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                     user_id=user_id, raw_input=current_user_msg,
                                     llm_intent="build/site", llm_confidence=_conf,
@@ -556,6 +606,7 @@ async def _classify_segment(
     prior = await asyncio.to_thread(load_slots, conversation_id)
     prior_intent_id = prior.get("intent_id", "") or ""
     prior_collected = prior.get("slots", {}) or {}
+
 
     # ── [7→9] 新奇度兜底(R3 修复: 必须放在 load_slots 之后,
     #    否则跨轮 memory/prior slots 尚未加载就被闲聊短路, 丢失上下文):

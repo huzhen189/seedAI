@@ -19,9 +19,46 @@ import json
 import logging
 import time
 
+from shared.config import settings  # 同步 Redis 需要 settings.redis_url(与 app/config.py 同路径)
 from ..analytics import _get_redis
 
+
+def _get_sync_redis():
+    """返回同步 Redis 客户端(供本模块同步 load/save/reset 使用)。
+
+    analytics._get_redis() 返回 asyncio 客户端, 在同步函数里无法 await,
+    故此处独立建一个 redis-py(同步)连接, 复用同一 redis_url。失败降级为 None,
+    上层走内存兜底。cascade 调用本模块时已用 asyncio.to_thread 包裹, 同步阻塞安全。
+    """
+    global _sync_redis
+    if _sync_redis is not None:
+        return _sync_redis if _sync_redis is not False else None
+    try:
+        import redis as _sync_redis_mod
+        _sync_redis = _sync_redis_mod.from_url(
+            settings.redis_url, decode_responses=True,
+            protocol=2,  # 与 analytics 一致: 强制 RESP2, 避免 HELLO 握手被云 Redis 拒绝
+            socket_connect_timeout=3, socket_timeout=3,
+            health_check_interval=30, socket_keepalive=True,
+        )
+        # 探活一次避免惰性连接掩盖不可用
+        _sync_redis.ping()
+    except Exception as e:  # 缺库/连不上 → 降级内存兜底
+        logger.debug("[槽位] 同步 Redis 不可用, 走内存兜底: %s", e)
+        _sync_redis = False
+    return _sync_redis if _sync_redis is not False else None
+
+
+# ⚠️ 关键修复(D/#504 调试发现): 本模块 load/save/reset_slots 是同步函数,
+# 但 analytics._get_redis() 返回的是 redis.asyncio 异步客户端 —— 在同步函数里
+# 调 r.set/r.get 会返回未被 await 的协程, 写入静默失败, 导致跨轮 DST(意图记忆)
+# 在真实 Redis 环境下完全失效(本地进程内兜底掩盖了该 bug)。
+# 修复: 同步函数须使用同步 Redis 客户端; cascade 已用 asyncio.to_thread 包裹, 阻塞 I/O 不占事件循环。
+
+
 logger = logging.getLogger("ai_service.intent.store")
+
+_sync_redis = None  # 0/None=未初始化; False=不可用; 否则为同步客户端
 
 _KEY_PREFIX = "intent:slots:"
 _EMPTY = {"intent_id": "", "slots": {}, "clarify_rounds": 0, "confidence": 0.0, "updated_at": 0.0}
@@ -52,7 +89,7 @@ def load_slots(conversation_id: int | None) -> dict:
     if conversation_id is None:
         return dict(_EMPTY)
     try:
-        r = _get_redis()
+        r = _get_sync_redis()
         if r is not None:
             raw = r.get(_KEY_PREFIX + str(conversation_id))
             if raw:
@@ -73,7 +110,7 @@ def save_slots(conversation_id: int | None, data: dict) -> None:
     data = dict(data)
     data["updated_at"] = time.time()
     try:
-        r = _get_redis()
+        r = _get_sync_redis()
         if r is not None:
             r.set(_KEY_PREFIX + str(conversation_id), json.dumps(data, ensure_ascii=False))
         else:
@@ -88,7 +125,7 @@ def reset_slots(conversation_id: int | None) -> None:
     if conversation_id is None:
         return
     try:
-        r = _get_redis()
+        r = _get_sync_redis()
         if r is not None:
             r.delete(_KEY_PREFIX + str(conversation_id))
         else:
