@@ -196,6 +196,20 @@ async def requirement_agent_handler(
         project_system_prompt,
     )
 
+    # ── 跨轮上下文增强(#510 折中方案): 仅并入 queue.py [3.6] 注入的 rel_ctx_msg ──
+    # rel_ctx_msg 是 role=system 的「相关历史对话片段」, 原本被本 skill 的 user-only 过滤剔除;
+    # 此处单独识别并并入 full_sys, 使 LLM 看到语义相关的跨轮历史, 且不重放 assistant 问答噪音(控成本)。
+    _rel_ctx = next(
+        (m.get("content", "") for m in messages
+         if m.get("role") == "system" and "相关历史对话片段" in (m.get("content") or "")),
+        "",
+    )
+    if _rel_ctx:
+        full_sys = full_sys + "\n\n" + _rel_ctx
+        AGENT_LOG.info("[需求] [1.5/4] 并入 rel_ctx_msg(跨轮语义历史) 长度=%d", len(_rel_ctx))
+    else:
+        AGENT_LOG.debug("[需求] [1.5/4] 无 rel_ctx_msg 可并入(本轮可能无相关历史)")
+
     req_msgs = [{"role": "user", "content": m.get("content", "")}
                 for m in messages if m.get("role") == "user"]
     user_input = req_msgs[-1]["content"][:100] if req_msgs else "(无)"
@@ -203,12 +217,12 @@ async def requirement_agent_handler(
 
     # ── 调试透出: 完整打印发送给 LLM 的结构体(排查跨轮上下文是否随请求发出) ──
     # 实际 request = [{"role":"system","content":full_sys}, *req_msgs]
-    # 注意: 入参 messages 中的 assistant(上一轮PM问题) / rel_ctx(system 语义历史) 被本 skill 的
-    #       user-only 过滤剔除, 跨轮上下文实际仅通过 user 历史消息带入 LLM。
+    # 说明: rel_ctx_msg(跨轮语义历史) 已并入 full_sys(system); assistant(PM上一轮提问) 仍按
+    #      user-only 过滤剔除。跨轮上下文经 [system(full_sys+rel_ctx) + user历史] 带入 LLM。
     AGENT_LOG.info(
-        "[需求] [2/4] 发送LLM结构体 = [system(1) + user(%d)] 共 %d 条; "
-        "assistant/rel_ctx(system) 历史已按 user-only 过滤剔除",
-        len(req_msgs), len(req_msgs) + 1,
+        "[需求] [2/4] 发送LLM结构体 = [system(1,含rel_ctx=%s) + user(%d)] 共 %d 条; "
+        "assistant 历史按 user-only 过滤剔除",
+        bool(_rel_ctx), len(req_msgs), len(req_msgs) + 1,
     )
     # system 全文(用户要求全打)
     AGENT_LOG.info("[需求] [2/4] [system] ↓↓↓\n%s", full_sys)
