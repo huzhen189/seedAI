@@ -347,9 +347,10 @@ async function doSendClarified(text: string) {
   if (pid == null) {
     try {
       const res = await autoStart(text)
-      await projectStore.load()
+      // 同样修复(#508): 先置位 + 设好 currentProjectId, 再 load(), 避免 load() 自动选旧项目触发 watcher 重载
       skipProjectWatch = true
       projectStore.currentProjectId = res.project.id
+      await projectStore.load()
       await convStore.loadConversations(res.project.id)
       pid = res.project.id
     } catch {
@@ -1466,12 +1467,42 @@ async function doSend(text: string) {
   generating.value = true
   let pid = projectStore.currentProjectId
 
-  // 乐观更新前置: 发送瞬间即把用户气泡 + assistant 占位推入消息流,
-  // 确保 user bubble 常驻可见 —— 不必等 autoStart/create 等后台调用完成
-  // (原先 push 在所有 await 之后, 导致首条消息期间 currentConvId 为 null 且气泡未推,
-  // 用户消息被隐藏, 直到后台返回才出现)。会话 id 未知时先用临时占位 (-1), 拿到后回填。
-  // 提前 push 之前先判定是否需新建会话(基于原始状态; push 之后 messages 永远非空, 无法再用其判断)
-  const needCreate = convStore.currentConvId == null || convStore.messages.length === 0
+  // ── Phase 1: 首条对话无项目时, 先走「创建项目」接口, 建好项目+会话 ──
+  // 关键修复(#508): 必须先把 skipProjectWatch 置位、并把 currentProjectId 设好,
+  // 再 await projectStore.load()。否则 load() 发现 currentProjectId 仍为 null 会【自动选中列表里某个旧项目】,
+  // 触发 currentProjectId watcher 重载并清空消息, 把稍后乐观推送的首条消息覆盖掉。
+  // 乐观推送延后到 Phase 2(项目/会话全部就绪之后), 无论 watcher 怎么抢跑, 最后推上去的消息都不会被清掉。
+  let autoStartedConvId: number | null = null
+  if (pid == null) {
+    try {
+      const res = await autoStart(text)
+      // 先置位 + 设好 currentProjectId, 再 load(): 此时 currentProjectId 已非 null,
+      // load() 不会自动选旧项目; 且本处 currentProjectId 变更被 skipProjectWatch 屏蔽, 不触发重载。
+      skipProjectWatch = true
+      projectStore.currentProjectId = res.project.id
+      await projectStore.load()
+      pid = res.project.id
+      autoStartedConvId = res.conversation.id
+      // 直接用 autoStart 返回的会话, 避免重复 create, 也避免 loadConversations 覆盖乐观消息
+      const conv = res.conversation
+      if (!convStore.conversations.some((c) => c.id === conv.id)) {
+        convStore.conversations.unshift(conv)
+      }
+      convStore.currentConvId = conv.id
+      sessionStorage.setItem('activeConv_' + pid, String(conv.id))
+      await loadArtifacts().catch(() => {})
+    } catch {
+      alert('创建项目失败，请稍后重试')
+      return
+    }
+  }
+
+  // ── Phase 2: 项目/会话已就绪, 再乐观推送用户气泡 + assistant 占位, 发真实对话 ──
+  // 判定是否需新建会话: autoStart 已建好会话则不重复 create;
+  // 该判定必须在 push 之前(推送后 messages 永远非空, 无法再用其判断)。
+  const needCreate =
+    autoStartedConvId == null &&
+    (convStore.currentConvId == null || convStore.messages.length === 0)
   const OPT_CID = -1
   const baseCid = convStore.currentConvId ?? OPT_CID
   convStore.currentConvId = baseCid
@@ -1492,31 +1523,7 @@ async function doSend(text: string) {
     model_id: model.value,
   } as any)
 
-  // 首条对话无项目: 按对话文本自动建项目+会话(后端已同时建好会话)
-  if (pid == null) {
-    try {
-      const res = await autoStart(text)
-      await projectStore.load()
-      // 置位: 接下来的 currentProjectId 变更是内部 autoStart 触发的, 让 watcher 跳过重载,
-      // 否则 loadConversations 的 switching 分支会把刚乐观推送的用户气泡清空(首条消息闪一下消失)。
-      skipProjectWatch = true
-      projectStore.currentProjectId = res.project.id
-      pid = res.project.id
-      // 直接用 autoStart 返回的会话, 避免重复 create, 也避免 loadConversations 覆盖乐观消息
-      const conv = res.conversation
-      if (!convStore.conversations.some((c) => c.id === conv.id)) {
-        convStore.conversations.unshift(conv)
-      }
-      convStore.currentConvId = conv.id
-      for (const m of convStore.messages) {
-        if (m.conversation_id === OPT_CID) m.conversation_id = conv.id
-      }
-      sessionStorage.setItem('activeConv_' + pid, String(conv.id))
-    } catch {
-      alert('创建项目失败，请稍后重试')
-      return
-    }
-  } else if (needCreate) {
+  if (needCreate) {
     // 已有项目、需要新建会话: 乐观气泡已先推入, 传 keepMessages=true 让 create 保留并修正 cid,
     // 否则 create 的网络延迟 + messages.value=[] 会清空气泡。
     if (!convStore.creating) {
