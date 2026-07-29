@@ -700,6 +700,13 @@ async def chat(
     await record_user_active(user.id)  # 统计: DAU(按日去重活跃用户) + 人均生成次数
     await record_model_detail(model, success=True, intent="chat")  # 统计: per-model 成功率/意图分布基线
     await create_trace(db, user.id, conversation_id, tid, model)
+    # 落到 UsageLog 表, 供「AI 生成质量 → 模型用量」报表按模型统计生成次数。
+    # (record_model_usage 仅写 Redis 供 /admin/analytics, 不进 DB, 故此处单独补写 DB。)
+    try:
+        await log_usage(db, user.id, tid, provider=None, model=model,
+                       prompt_tokens=0, completion_tokens=0, cost=0.0)
+    except Exception as _lu:
+        logger.debug("[chat] log_usage 写入失败(忽略): %s", _lu)
     logger.info("[chat] [4/8] 计量已记录 + trace=%s 已创建", tid)
 
     payload = {"model_id": model, "messages": messages, "trace_id": tid,
