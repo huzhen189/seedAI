@@ -20,6 +20,7 @@ from ..events import ev
 from ..intent.common import build_skill_sys
 from ..providers import get_chat_model
 from ..registry import register_skill
+from ._llm_fallback import emit_llm_failure
 logger = logging.getLogger("ai_service.skills.agent_requirement")
 
 AGENT_LOG = logging.getLogger("ai_service.requirement")
@@ -209,10 +210,9 @@ async def requirement_agent_handler(
         resp = await asyncio.to_thread(chat.invoke, [{"role": "system", "content": full_sys}, *req_msgs])
     except Exception as e:
         AGENT_LOG.warning("[需求] [2/4] LLM调用失败/超时: %s", e)
-        yield ev("think", stage="analyst",
-                 content="⚠️ 需求文档生成超时或被中断。您可以稍后重试，或直接用一句话描述需求"
-                         "（如「做一个餐厅官网，要有菜单和在线预订」），我也可以跳过详细文档直接为您生成。",
-                 agent_id="requirement_agent")
+        # 兜底: 既给临时思考提示, 也 yield refined 使道歉文案成为正式落库回复(用户必见, 否则是空气泡)
+        async for _ev in emit_llm_failure(model_id, e, "requirement_agent"):
+            yield _ev
         return
     raw = (resp.content or "").strip()
     AGENT_LOG.info("[需求] [2/4] LLM完成 耗时=%.0fms 输出长度=%d", (time.time() - t0) * 1000, len(raw))

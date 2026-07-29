@@ -170,6 +170,46 @@ async function abortPaused() {
 
 // 意图识别(由 AI intent 事件设置; 控制右侧面板显示)
 const currentIntent = ref<{ level1: string; level2: string }>({ level1: '', level2: '' })
+// exec-head 丰富化: 由 intent 事件携带的展示字段(agent/行业/置信度)
+const execIntentLabel = ref('')
+const execIndustry = ref('')
+const execSkill = ref('')
+const execConfidence = ref<number | null>(null)
+// exec-head 实时计时(从生成开始累计, 增强过程可见性)
+const execStartTs = ref<number | null>(null)
+const execElapsed = ref(0)
+let _execTimer: number | null = null
+function startExecTimer() {
+  execStartTs.value = Date.now()
+  execElapsed.value = 0
+  if (_execTimer == null) {
+    _execTimer = window.setInterval(() => {
+      if (execStartTs.value) execElapsed.value = Math.floor((Date.now() - execStartTs.value) / 1000)
+    }, 500)
+  }
+}
+function stopExecTimer() {
+  execStartTs.value = null
+  execElapsed.value = 0
+  if (_execTimer != null) {
+    clearInterval(_execTimer)
+    _execTimer = null
+  }
+}
+function industryLabel(ind: string): string {
+  const MAP: Record<string, string> = {
+    ecommerce: '电商', restaurant: '餐饮', personal: '个人', corp: '企业',
+    edu: '教育', health: '健康', game: '游戏', travel: '旅游', tech: '科技',
+    media: '媒体', gov: '政务', finance: '金融', other: '通用',
+  }
+  return MAP[ind] || ind || '通用'
+}
+const execElapsedText = computed(() => {
+  const s = execElapsed.value
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  return `${m}m${s % 60}s`
+})
 const rightCollapsed = ref(false)
 // 可拖拽分栏
 const colGrip = ref<HTMLElement | null>(null)
@@ -1184,6 +1224,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       cosUploadingActive.value = false
       cosUploadPct.value = 0
       genLoading.value = false
+      stopExecTimer()
       clearActiveGen()
       clearUserStatus()
       clearTrailSnapshot(traceId.value)  // P5: 终止态清理快照, 避免陈旧轨迹复活
@@ -1203,6 +1244,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       planNodes.value = []
       genLoading.value = false
       errorMsg.value = '已取消'
+      stopExecTimer()
       clearActiveGen()
       clearUserStatus()
       clearTrailSnapshot(traceId.value)
@@ -1215,6 +1257,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     onRetry: (d: RetryEvent) => {
       generating.value = false
       finished.value = true
+      stopExecTimer()
       clearActiveGen()
       pendingRetry.value = {
         suggested: d.suggested || [],
@@ -1223,6 +1266,13 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     },
     onIntent: (d) => {
       currentIntent.value = { level1: d.level1 || '', level2: d.level2 || '' }
+      // exec-head 丰富化: 捕获意图展示字段(agent/行业/置信度)
+      execIntentLabel.value = d.label || (d.level2_label ? `${d.level1_label || ''} · ${d.level2_label}` : '') || ''
+      execIndustry.value = d.industry || ''
+      execSkill.value = d.selected_skill || ''
+      execConfidence.value = typeof d.confidence === 'number' ? d.confidence : null
+      // 每次新生成开始重置计时
+      startExecTimer()
       // 在思考时间线顶部插入意图识别步骤(两级显示)
       const lbl = d.level2_label ? `${d.level1_label || ''} → ${d.level2_label}` : (d.label || '')
       if (lbl) upsertStep('intent_recognized', 'done', lbl)
@@ -1996,8 +2046,15 @@ watch(pendingRetry, (r) => {
               <div class="trail-wrap-inline">
                 <!-- 合并: 实时阶段头 + 思考(原 live-think 块) 与下方 ThoughtTrail 合成一块连贯执行面板 -->
                 <div v-if="streamingMsgKey === 's' + si + '-' + i" class="exec-head">
-                  <span class="exec-pulse"></span>
-                  <span class="exec-stage">{{ streamingStageLabel }}</span>
+                  <div class="exec-row">
+                    <span class="exec-pulse"></span>
+                    <span class="exec-badge">{{ execIntentLabel || streamingStageLabel }}</span>
+                    <span v-if="execIndustry" class="exec-tag">行业·{{ industryLabel(execIndustry) }}</span>
+                    <span v-if="execConfidence != null" class="exec-tag exec-tag--conf">
+                      置信 {{ Math.round(execConfidence * 100) }}%
+                    </span>
+                    <span class="exec-timer">⏱ {{ execElapsedText }}</span>
+                  </div>
                   <div v-if="liveThinkText" class="exec-body">{{ liveThinkText }}</div>
                   <div v-else class="exec-body exec-placeholder">正在分析你的需求…</div>
                   <!-- B(#488): COS 上传进度条(exec-head 内实时「📤 上传中 NN%」) -->
@@ -2523,6 +2580,26 @@ class="clarify-confirm"
   border-radius: 8px;
   padding: 8px 10px;
   margin-bottom: 10px;
+}
+.exec-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+}
+.exec-badge {
+  font-size: 12px; font-weight: 700; color: #1e3a8a;
+  background: #dbeafe; border: 1px solid #93c5fd; border-radius: 999px;
+  padding: 2px 10px; line-height: 1.4;
+}
+.exec-tag {
+  font-size: 11px; font-weight: 600; color: #475569;
+  background: #eef2f7; border: 1px solid #d8dee9; border-radius: 999px;
+  padding: 2px 8px; line-height: 1.4;
+}
+.exec-tag--conf {
+  color: #047857; background: #d1fae5; border-color: #6ee7b7;
+}
+.exec-timer {
+  margin-left: auto; font-size: 11px; font-weight: 600; color: #64748b;
+  font-variant-numeric: tabular-nums;
 }
 .exec-pulse {
   display: inline-block;
