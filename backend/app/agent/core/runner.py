@@ -118,8 +118,9 @@ async def run_skill(
     _ambient: "deque" = _Deque()
     _amb_lock = _th.Lock()
     # scope_id: 每次 run_skill 调用唯一(单意图=0; 多意图子任务=子任务编号哈希), 用线程栈隔离
-    # 并发子任务的工具事件, 避免串味。
-    _scope_id = abs(hash((trace_id, sub_task_id or "0", _ambient))) % (10 ** 9)
+    # 并发子任务的工具事件, 避免串味。注意: _ambient 是 deque(不可哈希), 不能放进 hash(),
+    # 改用 id(_ambient) 保证本次调用作用域唯一。
+    _scope_id = (abs(hash((trace_id, sub_task_id or "0"))) ^ id(_ambient)) % (10 ** 9)
 
     def _sink(evt):
         # 子任务/sub_task_id 隔离: 给每帧打 sub_task_id(单意图为 None, 前端归到主气泡)。

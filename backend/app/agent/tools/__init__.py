@@ -115,7 +115,15 @@ class ToolEventBus:
             return
         sink = self._current_scope(trace_id)
         if sink is None:
-            return  # 无作用域(离线/脚本) → 静默降级
+            # 诊断: 无作用域(离线/脚本 / enter 未生效) → 静默降级, 打 WARNING 暴露
+            with self._lock:
+                _sc = self._scopes.get(trace_id)
+            logger.warning(
+                "[ToolBus] DROP(无作用域) trace=%s event=%s scopes_has_trace=%s stack=%s",
+                trace_id, event.get("event"),
+                bool(_sc), getattr(self._local, "stack", None),
+            )
+            return
         try:
             sink(event)
         except Exception as e:  # noqa: BLE001
