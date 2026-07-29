@@ -1406,8 +1406,8 @@ async def _reconcile_interruption_note(s, conv_id: int, trace_id: str, note: str
         logger.warning("[reconcile] 补中断反馈消息失败 conv=%s trace=%s: %s", conv_id, trace_id, e)
 
 
-async def reconcile_orphaned_runs() -> None:
-    """进程启动对账: 进程被强杀(重启 / 杀端口)时, 在途 Worker 随之死亡,
+async def _reconcile_once() -> None:
+    """孤儿运行对账(单次): 进程被强杀(重启 / 杀端口)时, 在途 Worker 随之死亡,
     留下「孤儿 Trace」—— `Trace.status` 永远停在 'running'(无 Worker 回填 finished_at),
     且 `user_states` 停在 running/paused、Redis 残留 `pause:{tid}` 标志。
 
@@ -1424,6 +1424,8 @@ async def reconcile_orphaned_runs() -> None:
       user_states 重置为 idle(清 active_trace_id/current_stage 等脏值)。
     - 兜底: 清全部 Redis `pause:*` 标志(重启后无活跃 Worker 能兑现暂停语义;
       续跑时 resume 分支会自行 clear_pause 再 set_cancel, 不影响正常续跑)。
+
+    注: 每条 Trace 独立 try/except, 单条失败不影响其余(避免某条缺列/脏数据导致整轮对账中断)。
     """
     # 1) 孤儿 running Trace 对账
     try:
@@ -1436,44 +1438,47 @@ async def reconcile_orphaned_runs() -> None:
                 select(Trace).where(Trace.status == "running")
             )).scalars().all()
             if not rows:
-                logger.info("[reconcile] 无孤儿 running Trace, 跳过")
+                logger.debug("[reconcile] 无孤儿 running Trace, 跳过")
             for t in rows:
-                conv_id = t.conversation_id
-                uid = t.user_id
-                # 判断是否存在可恢复 checkpoint
-                has_ck = False
                 try:
-                    ck = await ck_get(conv_id)
-                    has_ck = bool(ck and ck.get("status") == "paused")
-                except Exception:
+                    conv_id = t.conversation_id
+                    uid = t.user_id
+                    # 判断是否存在可恢复 checkpoint
                     has_ck = False
-                if has_ck:
-                    # 合法暂停 → 不动 Trace; user_states 统一翻 paused 保证前端进续跑横幅
-                    await touch_user_state(
-                        uid,
-                        status="paused",
-                        pause_reason="offline_timeout",
-                        pending_decision="continue_instruction",
-                        active_trace_id=t.trace_id,
-                    )
-                    # 若断连前尚未落任何消息(硬重启杀死在途 Worker), 补一条「可续」反馈
+                    try:
+                        ck = await ck_get(conv_id)
+                        has_ck = bool(ck and ck.get("status") == "paused")
+                    except Exception:
+                        has_ck = False
+                    if has_ck:
+                        # 合法暂停 → 不动 Trace; user_states 统一翻 paused 保证前端进续跑横幅
+                        await touch_user_state(
+                            uid,
+                            status="paused",
+                            pause_reason="offline_timeout",
+                            pending_decision="continue_instruction",
+                            active_trace_id=t.trace_id,
+                        )
+                        # 若断连前尚未落任何消息(硬重启杀死在途 Worker), 补一条「可续」反馈
+                        await _reconcile_interruption_note(
+                            s, conv_id, t.trace_id,
+                            "⚠️ 生成因服务重启中断，已保留断点，可点击「继续」从中断处恢复。")
+                        logger.info("[reconcile] 保留可恢复暂停 trace=%s conv=%s", t.trace_id, conv_id)
+                        continue
+                    # 无 checkpoint → 孤儿, 翻 aborted(回填 finished_at)
+                    # total_tokens 传 0: 真实计费由 tracing.finish_trace 在生成完成时落;
+                    # 孤儿场景没有精确值, 且 finish() 内部已对缺列做 hasattr 防御, 不在此引用 t.total_tokens 以免属性缺失时崩。
+                    await trace_repo.finish(s, t, status="aborted", total_tokens=0)
+                    await reset_user_state(uid)
+                    # 补一条「中断」反馈消息, 让前端重载后看到结果而非静默空白
                     await _reconcile_interruption_note(
                         s, conv_id, t.trace_id,
-                        "⚠️ 生成因服务重启中断，已保留断点，可点击「继续」从中断处恢复。")
-                    logger.info("[reconcile] 保留可恢复暂停 trace=%s conv=%s", t.trace_id, conv_id)
-                    continue
-                # 无 checkpoint → 孤儿, 翻 aborted(回填 finished_at)
-                try:
-                    await trace_repo.finish(s, t, status="aborted", total_tokens=t.total_tokens or 0)
+                        "⚠️ 本次生成因服务重启而中断，未能生成完整结果。你可以重新发起这条对话继续。")
+                    logger.info("[reconcile] 孤儿 Trace 翻 aborted trace=%s conv=%s user=%s",
+                                t.trace_id, conv_id, uid)
                 except Exception as e:  # noqa: BLE001
-                    logger.warning("[reconcile] finish 失败 trace=%s: %s", t.trace_id, e)
-                await reset_user_state(uid)
-                # 补一条「中断」反馈消息, 让前端重载后看到结果而非静默空白
-                await _reconcile_interruption_note(
-                    s, conv_id, t.trace_id,
-                    "⚠️ 本次生成因服务重启而中断，未能生成完整结果。你可以重新发起这条对话继续。")
-                logger.info("[reconcile] 孤儿 Trace 翻 aborted trace=%s conv=%s user=%s",
-                            t.trace_id, conv_id, uid)
+                    logger.warning("[reconcile] 单条处理失败 trace=%s: %s", getattr(t, "trace_id", "?"), e)
+                    continue
     except Exception as e:  # noqa: BLE001
         logger.error("[reconcile] 孤儿运行对账失败: %s", e)
 
@@ -1486,6 +1491,29 @@ async def reconcile_orphaned_runs() -> None:
             logger.info("[reconcile] 清除 %d 个 pause:* 标志", len(keys))
     except Exception as e:  # noqa: BLE001
         logger.warning("[reconcile] 清除 pause:* 失败: %s", e)
+
+
+async def reconcile_orphaned_runs() -> None:
+    """进程启动一次性对账(兼容旧调用点): 直接跑一轮 _reconcile_once()。"""
+    await _reconcile_once()
+
+
+async def run_orphan_reconciler(interval: float = 30.0) -> None:
+    """周期性孤儿对账(后台常驻): 每 interval 秒扫一次 status='running' 的 Trace 并翻终态。
+
+    为什么需要周期跑(用户踩到的 bug 根源):
+    启动时的一次性对账只在进程起来那刻生效。进程存活期间, 任何「Worker 跑完但落库/
+    翻状态失败」的僵尸, 以及「前端刷新时谎报 running → 触发全量回放旧流」的恶性循环,
+    都靠本条周期任务自愈 —— 最多 interval 秒(默认 30s)内把孤儿 Trace 翻 aborted、
+    清 user_states 脏值, 从根上消除「前端刷新反复 replay 死流」。
+    """
+    logger.info("[reconcile] 周期对账已启动 (interval=%.0fs)", interval)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await _reconcile_once()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[reconcile] 周期对账本轮异常(忽略): %s", e)
 
 
 def _normalize_assistant_text(text: str) -> str:

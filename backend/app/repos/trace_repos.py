@@ -25,7 +25,13 @@ class TraceRepo(BaseRepo[Trace]):
         return await self.get_by(db, trace_id=trace_id)
 
     async def finish(self, db: AsyncSession, trace: Trace, status: str, total_tokens: int = 0) -> Trace:
-        return await self.update(db, trace, status=status, total_tokens=total_tokens, finished_at=datetime.utcnow())
+        data: dict = {"status": status, "finished_at": datetime.utcnow()}
+        # 防御性: 仅当模型真有 total_tokens 列才写入, 避免 ORM 缺列时 setattr 抛 AttributeError
+        # (曾因 Trace 模型列名 tokens≠读写方 total_tokens, 导致 reconcile 翻 aborted 整段崩,
+        # 孤儿 Trace 永久卡 running → 前端刷新反复全量回放旧流)。
+        if hasattr(trace, "total_tokens"):
+            data["total_tokens"] = total_tokens
+        return await self.update(db, trace, **data)
 
 
 class TraceEventRepo(BaseRepo[TraceEvent]):

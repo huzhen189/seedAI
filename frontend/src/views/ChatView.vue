@@ -25,7 +25,7 @@ import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
 import type { Artifact, Message, ModelInfo, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent, QcResult, RatingDims, SubTaskView, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, FailedSubTask, CancelSummaryEvent, PlanPreviewEvent } from '../types'
-import { SKILL_TO_ROLE } from '../types'
+import { SKILL_TO_ROLE, SOP_ROLES } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
   received: '系统已收到你的需求',
@@ -96,6 +96,36 @@ const planPreview = ref<PlanPreviewEvent | null>(null)
 const cancelSummary = ref<CancelSummaryEvent | null>(null)
 const sopCurrentRole = ref<string | undefined>(undefined)
 const currentStage = ref('')
+
+// §9: 把 plan-preview 卡渲染成与 SubTaskTrack 同款「单元素子任务泳道」视觉:
+// 数据仍来自 PlanPreviewEvent(标题/备注/SOP 角色), 但额外把「正在执行的意图」灌进一条 lane,
+// 让单意图看起来和多意图的子任务列表风格统一。goal=意图两级标签, role=SOP 当前阶段,
+// status 跟随 generating(running→done)。
+const INTENT_L1_LABELS: Record<string, string> = {
+  learn: '学习理解', code: '编码实战', build: '建站生成', doc: '文档方案', translate: '翻译转换',
+}
+const INTENT_L2_LABELS: Record<string, string> = {
+  explain: '概念解释', debug: '排查报错', compare: '技术对比', casual: '日常闲聊',
+  snippet: '函数片段', component: 'UI组件', fix: '修复Bug', refactor: '重构优化',
+  page: '单页/落地页', site: '完整网站', modify: '修改已有', game: '互动游戏',
+  readme: 'README', tutorial: '教程指南', plan: '方案设计',
+  text: '文本翻译', code_lang: '代码翻译',
+}
+const previewLane = computed(() => {
+  if (!planPreview.value) return null
+  const l1 = currentIntent.value.level1
+  const l2 = currentIntent.value.level2
+  const goal = (l1 && l2)
+    ? `${INTENT_L1_LABELS[l1] || l1} · ${INTENT_L2_LABELS[l2] || l2}`
+    : (execIntentLabel.value || planPreview.value.title || '执行计划')
+  const role = SOP_ROLES.find((r) => r.key === sopCurrentRole.value)
+  return {
+    goal,
+    roleLabel: role ? role.label : '',
+    status: generating.value ? 'running' : 'done',
+  }
+})
+
 const degraded = ref(false)
 const degradedReason = ref<'model_switch' | 'timeout' | 'pm' | null>(null)
 // 真降级时记录实际切换的模型序(原始 → 备用), 供时间线精确展示
@@ -2157,13 +2187,22 @@ watch(pendingRetry, (r) => {
                     <span class="sk sk-3"></span>
                   </div>
                 </div>
-                <!-- §9: 执行前计划预览卡(含 SOP 角色链路 badge) -->
+                <!-- §9: 执行前计划预览卡(与 SubTaskTrack 同款视觉: 头部 + 单条子任务泳道) -->
                 <div v-if="planPreview" class="plan-preview">
                   <div class="pp-head">
                     <span class="pp-icon">🧭</span>
                     <div>
                       <div class="pp-title">{{ planPreview.title || '执行计划' }}</div>
                       <div v-if="planPreview.note" class="pp-note">{{ planPreview.note }}</div>
+                    </div>
+                  </div>
+                  <!-- 正在执行的意图, 渲染成与 SubTaskTrack 同构的一条 lane -->
+                  <div v-if="previewLane" class="lane" :class="previewLane.status">
+                    <div class="lane-top">
+                      <span class="status-icon" :class="previewLane.status">{{ previewLane.status === 'running' ? '⟳' : '✓' }}</span>
+                      <span class="goal" :title="previewLane.goal">{{ previewLane.goal }}</span>
+                      <span v-if="previewLane.roleLabel" class="role-tag">{{ previewLane.roleLabel }}</span>
+                      <span class="status-label" :class="previewLane.status">{{ previewLane.status === 'running' ? '执行中' : '已完成' }}</span>
                     </div>
                   </div>
                 </div>
@@ -2771,18 +2810,51 @@ class="clarify-confirm"
 }
 .cos-retry-btn:hover { background: #fee2e2; }
 
-/* §9: 执行前计划预览卡 + SOP 角色链路 */
+/* §9: 执行前计划预览卡(与 SubTaskTrack 同款视觉) */
 .plan-preview {
-  border: 1px solid var(--brand2, #c7d2fe);
-  background: linear-gradient(180deg, #eef2ff 0%, #fafaff 100%);
-  border-radius: 12px;
-  padding: 12px 14px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, #fbfbff 0%, #ffffff 100%);
+  border-radius: 14px;
+  padding: 14px 16px;
   margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 .pp-head { display: flex; gap: 10px; align-items: flex-start; }
 .pp-icon { font-size: 18px; line-height: 1.2; }
 .pp-title { font-weight: 700; font-size: 14px; color: var(--brand); }
 .pp-note { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+
+/* 单条子任务泳道(复用 SubTaskTrack 的 lane 视觉, 让单/多意图风格统一) */
+.plan-preview .lane {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: #ffffff;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.2s ease;
+}
+.plan-preview .lane.running { border-left-color: var(--brand); box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.08); }
+.plan-preview .lane.done { border-left-color: var(--ok); }
+.lane-top { display: flex; align-items: center; gap: 8px; }
+.status-icon { font-size: 15px; line-height: 1; flex: none; }
+.status-icon.running { animation: spin 1s linear infinite; color: var(--brand); }
+.status-icon.done { color: var(--ok); }
+.plan-preview .goal {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.role-tag { font-size: 11px; font-weight: 600; background: #eef2ff; color: var(--brand); border-radius: 6px; padding: 1px 8px; flex: none; }
+.status-label { font-size: 11px; margin-left: auto; color: var(--muted); }
+.status-label.running { color: var(--brand); font-weight: 600; }
+.status-label.done { color: var(--ok); font-weight: 600; }
 
 /* §6 D: 取消结构化摘要卡 */
 .cancel-summary {

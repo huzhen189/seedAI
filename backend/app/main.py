@@ -82,12 +82,20 @@ async def lifespan(app: FastAPI):
     #    (在途 Worker 已死, 无 checkpoint 可续), 以及 user_states 孤儿 running/paused、
     #    Redis 残留 pause:* 标志。翻 aborted / 清脏值, 否则 /status 与 /my-info 谎报 running,
     #    前端误 resume 已死 Worker。
+    #    启动时先跑一轮(立即清理历史僵尸), 随后挂一个 30s 周期任务持续自愈——
+    #    避免「Worker 跑完但翻状态失败」的僵尸在进程存活期间无限 replay 旧流。
     try:
-        from .proxy import reconcile_orphaned_runs
+        from .proxy import reconcile_orphaned_runs, run_orphan_reconciler
         await reconcile_orphaned_runs()
-        logger.info("[startup] 孤儿运行对账完成")
+        logger.info("[startup] 孤儿运行一次性对账完成")
     except Exception as e:  # noqa: BLE001
-        logger.error("[startup] 孤儿运行对账失败(可忽略, 不阻断启动): %s", e)
+        logger.error("[startup] 孤儿运行一次性对账失败(可忽略, 不阻断启动): %s", e)
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(run_orphan_reconciler(interval=30.0))
+        logger.info("[startup] 孤儿运行周期对账已挂后台(30s)")
+    except Exception as e:  # noqa: BLE001
+        logger.error("[startup] 孤儿运行周期对账启动失败(可忽略): %s", e)
     logger.info("统一应用启动完成(单进程 v2.0)")
     yield
     worker_task.cancel()
