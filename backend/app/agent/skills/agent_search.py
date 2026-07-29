@@ -36,7 +36,7 @@ def _duckduckgo(query: str, max_results: int = 3) -> str:
 
 async def search_agent_handler(
     model_id: str, messages: list, trace_id: str | None = None,
-    is_cancelled=None, **kwargs,
+    is_cancelled=None, rag_context: str = "", **kwargs,
 ) -> AsyncGenerator[Dict, None]:
     AGENT_LOG.info("[search] 联网搜索 trace=%s", trace_id)
     # 取最后一条用户消息作为搜索词
@@ -52,7 +52,10 @@ async def search_agent_handler(
     raw = _duckduckgo(query)
     if not raw:
         raw = "搜索暂无结果, 请换个关键词试试。"
+    # RAG 增强(修复 #V1): 向量召回记忆补充联网搜索上下文
     search_ctx = f"搜索结果:\n{raw}\n\n用户问题: {query}"
+    if rag_context:
+        search_ctx = f"【相关记忆】\n{rag_context}\n\n" + search_ctx
     full = []
     async for chunk, _ in astream_with_fallback(
         model_id, [{"role": "user", "content": search_ctx}], system=SYS_SEARCH

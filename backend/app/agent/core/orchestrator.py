@@ -189,6 +189,17 @@ class Orchestrator:
         success = [r for r in results if r.status == SUB_DONE]
         failed = [r for r in results if r.status != SUB_DONE]
 
+        # 多意图统计(修复 #V3): 编排路径此前不发顶层 intent 事件, 导致拆分意图未计入
+        # /admin/analytics 的意图命中率。此处补发, 由 proxy 订阅端统一记录。
+        try:
+            from ..analytics import record_intent_decision, record_intent_result
+            await record_intent_result("multi", "split", True)
+            await record_intent_decision(
+                "split", skill="orchestrator", risk="low",
+            )
+        except Exception as _ie:  # noqa: BLE001
+            logger.debug("[编排] 意图统计记录失败(忽略): %s", _ie)
+
         merged_text = ""
         try:
             merged_text = await self.merger.merge(

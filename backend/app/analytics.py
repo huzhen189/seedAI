@@ -402,19 +402,56 @@ async def _read_ai_core(r) -> dict:
     return out
 
 
+# ── 安全读取辅助(防止单个键类型不符 WRONGTYPE 拖垮整个统计快照) ──
+async def _safe_keys(r, pattern: str) -> list:
+    """安全扫描键: 扫描异常不中断整体(降级为空列表)。"""
+    try:
+        return await r.keys(pattern)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics: 扫描键 %s 失败, 跳过: %s", pattern, e)
+        return []
+
+
+async def _safe_hgetall(r, key) -> dict:
+    """安全读取 hash: 类型不符(WRONGTYPE)或其它异常时返回 {} 并告警, 不中断快照。"""
+    try:
+        return (await r.hgetall(key)) or {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics: 读取 hash 键 %s 失败(可能类型不符), 跳过: %s", key, e)
+        return {}
+
+
+async def _safe_get(r, key, default=0):
+    """安全读取单值(scalar): 异常时返回 default。"""
+    try:
+        v = await r.get(key)
+        return int(v) if v is not None else default
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics: 读取键 %s 失败, 跳过: %s", key, e)
+        return default
+
+
+async def _safe_zset_pct(r, key) -> dict:
+    """安全读取 zset 分位数: 非 zset(WRONGTYPE)或异常时返回零值, 不中断快照。"""
+    try:
+        return await _zset_percentiles(r, key)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics: 读取 zset 键 %s 失败(可能类型不符), 跳过: %s", key, e)
+        return {"p50": 0, "p90": 0, "p99": 0, "avg": 0, "samples": 0}
+
+
 async def analytics_snapshot() -> dict:
     try:
         r = await get_redis()
-
         # 两级意图统计
-        intent_keys = await r.keys(f"{P_INTENT_TOTAL}:*")
+        intent_keys = await _safe_keys(r, f"{P_INTENT_TOTAL}:*")
         intent_stats: dict = {}
         for k in sorted(intent_keys):
             key = k.decode() if isinstance(k, bytes) else k
             prefix = key.replace(P_INTENT_TOTAL + ":", "")
-            tot = int((await r.get(key)) or 0)
+            tot = await _safe_get(r, key)
             hit_key = key.replace(P_INTENT_TOTAL, P_INTENT_HIT)
-            hit = int((await r.get(hit_key)) or 0)
+            hit = await _safe_get(r, hit_key)
             if tot > 0:
                 intent_stats[prefix] = {"ok": hit, "total": tot, "rate": round(hit / tot, 3)}
 
@@ -449,19 +486,24 @@ async def analytics_snapshot() -> dict:
         # 生成阶段耗时
         gen_stages: dict = {}
         for stage in ("enter_planner", "enter_coder", "enter_reviewer", "previewing"):
-            gen_stages[stage] = await _zset_percentiles(r, f"{P_LATENCY}:gen:{stage}")
+            gen_stages[stage] = await _safe_zset_pct(r, f"{P_LATENCY}:gen:{stage}")
 
         # API 延迟
-        api_keys = await r.keys(f"{P_LATENCY}:api:*")
+        api_keys = await _safe_keys(r, f"{P_LATENCY}:api:*")
         api_latency: dict = {}
         for k in sorted(api_keys):
             path = k.decode() if isinstance(k, bytes) else k
             path = path.replace(f"{P_LATENCY}:api:", "")
             if ":" in path:
                 continue
-            cnt = await r.zcard(k)
+            cnt = 0
+            try:
+                cnt = await r.zcard(k)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("analytics: zcard 键 %s 失败(可能类型不符), 跳过: %s", path, e)
+                continue
             if cnt >= 3:
-                api_latency[path] = await _zset_percentiles(r, k)
+                api_latency[path] = await _safe_zset_pct(r, k)
 
         # 业务接口调用统计(STAT-2): 调用量 / 成功率 / 延迟, 合并自 record_api_call + record_api_latency
         api_calls: dict = {}
@@ -494,18 +536,18 @@ async def analytics_snapshot() -> dict:
         if orch_total > 0:
             strategy_raw = await r.hgetall(f"{P_ORCH}:strategy")
             orchestration["strategy_dist"] = {k: int(v) for k, v in strategy_raw.items()}
-            orchestration["split_count"] = await _zset_percentiles(r, f"{P_ORCH}:split_count")
-            orchestration["success_rate"] = await _zset_percentiles(r, f"{P_ORCH}:success_rate")
-            orchestration["duration_ms"] = await _zset_percentiles(r, f"{P_ORCH}:duration")
+            orchestration["split_count"] = await _safe_zset_pct(r, f"{P_ORCH}:split_count")
+            orchestration["success_rate"] = await _safe_zset_pct(r, f"{P_ORCH}:success_rate")
+            orchestration["duration_ms"] = await _safe_zset_pct(r, f"{P_ORCH}:duration")
             sub_total = int((await r.hget(f"{P_SUB}:total", "count")) or 0)
             sub_status = {k: int(v) for k, v in (await r.hgetall(f"{P_SUB}:status") or {}).items()}
             sub_risk = {k: int(v) for k, v in (await r.hgetall(f"{P_SUB}:risk") or {}).items()}
             sub_skill: dict = {}
-            skill_keys = await r.keys(f"{P_SUB}:skill:*")
+            skill_keys = await _safe_keys(r, f"{P_SUB}:skill:*")
             for sk in skill_keys:
                 sk_name = sk.decode() if isinstance(sk, bytes) else sk
                 sk_name = sk_name.replace(f"{P_SUB}:skill:", "")
-                sh = {kk: int(vv) for kk, vv in (await r.hgetall(sk) or {}).items()}
+                sh = {kk: int(vv) for kk, vv in (await _safe_hgetall(r, sk)).items()}
                 st = sum(sh.values())
                 if st > 0:
                     sub_skill[sk_name] = {

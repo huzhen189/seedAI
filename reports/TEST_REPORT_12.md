@@ -133,9 +133,10 @@
 | 2 | 多意图 | harness `--multi` 跨运行复现"未触发拆分"假阴性（2 秒返回，无 orchestration 事件） | `random.Random(20260729)` 固定种子使 trace_id 每次相同，旧运行 Redis 频道残留 → `stream_exists` 命中 → 代理走"续接已有流"回放旧响应，Worker 根本没跑 | harness 加 `RUN_NONCE=int(time.time())`，所有 trace_id 拼时间戳+随机尾，每次运行拿全新频道 | 复跑 M1/M2/M3 均出现 `orchestration` 事件并真实编排（见 §2.3） |
 | 3 | 多意图 | 自动判定 `fam_ok=False` 使 M1/M2 标 ❌ | `_skill_family` 未覆盖信息检索类，返回原始 `agent_search` 不在文档家族词汇 {chat,build,design,code,doc} | `_skill_family` 加信息检索(search/query/...)→chat 归一，与文档口径及用户"闲聊"语义一致 | M1/M2 家族比对回归一致（见 §2.2） |
 | 4 | M3 | 2 个中风险子任务被判"失败" | `exec_ok`（success==总数）把**风险确认门控 skip** 计为失败；实为 medium-risk 需用户确认的安全机制 | 文档如实记录：2 子任务经确认门控待确认（非崩溃），`merge` 部分交付=True 且产出真实预览 | M3 拆分 4 正确、2 安全执行+2 待确认、done=True、preview 真实（见 §2.3） |
-| V1 | 1（12 轮抽样） | 干净轮**全程无任何向量召回**：未发 `think(stage=rag)`、`hits` 全 0（components/memory/project_memory/user_preferences/error_patterns 均 0），向量库未对 LLM 产生作用 | 生成 skill 调 `build_rag_context` 后未发 rag 阶段事件，或命中未注入上下文；需查 `core/generator` 的 rag 注入路径 | 待查（建议修 #V1 后再跑全 12 轮） | - |
-| V2 | 8（F5 抽样） | F5 刷新续传时回放接口报 `HTTP 400: missing 'q' query param and no history` | 代理 `after` 续接分支未带 `q` 或 history 游标，断线重连接口缺参 | 待查（建议修 #V2 后再跑全 12 轮） | - |
-| V3 | 8（F5 抽样） | 该轮 `/admin/analytics` 返回空（统计未落地），但 round 1 同接口非空 | 疑似中断/错误路径下统计写入被跳过，或并发覆盖 | 待查（建议修 #V3 后再跑全 12 轮） | - |
+| V1 | 1（12 轮抽样） | 干净轮**全程无任何向量召回**：未发 `think(stage=rag)`、`hits` 全 0（components/memory/project_memory/user_preferences/error_patterns 均 0），向量库未对 LLM 产生作用 | `think(stage=rag)` 仅 `agent_build.py` 发出；`agent_chat`/`agent_search` 仅有联网增强、**无向量库 RAG**，检索结果从未进入 LLM 上下文 | **已修复（代码）**：`runner.run_skill` 对 `agent_chat`/`agent_search` 调 `chroma.retrieve_project_memory`/`retrieve_user_preferences`/`retrieve_error_patterns`，拼为 `rag_context` 注入 handler 并 `yield think(stage=rag, hits=...)`；`agent_chat.py`/`agent_search.py` 接收并融合。涉及 `runner.py`/`agent_chat.py`/`agent_search.py`/`chroma.py`。**待用户复跑验证** | 用户复跑 §三 应见 `think(stage=rag)` 且 hits>0 |
+| V2 | 8（F5 抽样） | F5 刷新续传时回放接口报 `HTTP 400: missing 'q' query param and no history` | `proxy.py` 400 守卫在 `resume`/`after` 模式仍强要 `q`；首流过早断开（无 `id:` 帧）致 `after` 缺失 → 命中 400 | **已修复（代码）**：`_append_q` 改 `async`；400 守卫在 `get_queue().stream_exists(tid)` 为真时允许空 messages 回放。涉及 `proxy.py`。**待用户复跑验证** | 用户复跑 F5 中断轮应到达 `done` 无 400 |
+| V3 | 8（F5 抽样） | 该轮 `/admin/analytics` 返回空（统计未落地），但 round 1 同接口非空 | `orchestrator.run_multi` 不发顶层 `intent` 事件 → 多意图拆分不入 `/admin/analytics`；叠加 #V2 的 400 使中断轮流程打断、统计收尾缺失 | **已修复（代码）**：`orchestrator.run_multi` 在 merge 前补发 `record_intent_result("multi","split",True)` + `record_intent_decision("split", skill="orchestrator", risk="low")`；#V2 修好后中断轮亦能正常收尾 `record_skill_outcome`。涉及 `orchestrator.py`/`analytics.py`。**待用户复跑验证** | 用户复跑后 `/admin/analytics` 应见 multi/split 统计非空 |
+| V4 | 多意图 | 多意图合并结果**无段落标题**，多个子任务正文平铺，不够直观 | 合并为**提示词驱动**（`merger.py` 的 `MERGE_SYSTEM` + `_build_merge_prompt`），非代码模板拼接——用户"改提示词"直觉正确 | **已修复（代码/提示词）**：`MERGE_SYSTEM` 新增规则——每个子任务以 `## **<意图标题>**`（二级标题+加粗、含英文转大写）开头，标题下方正文普通不粗；新增 `SKILL_TITLE` 映射（闲聊问答/联网搜索/站点修改/建站生成/设计配色/文档生成/删除操作/解释问答）；`_build_merge_prompt` 与 `_fallback_concat` 同步用 `## **{title}**` 标记，降级也能直观分段。涉及 `merger.py`。**待用户复跑验证** | 用户复跑 M1/M2/M3 应见分段加粗标题 |
 
 ---
 
@@ -147,7 +148,7 @@
 2. **拆分后子任务可靠执行** —— M1 2/2、M2 3/3 全成功；M3 2 低风险子任务真实执行并产出预览，2 中风险子任务被**风险确认门控**安全拦截待用户确认（非崩溃），`done` 正常收口。
 3. **结果完整汇总** —— 三条均出现完整 `orchestration → subtask_start → merge → done` 事件链，`merge` 给出汇总，`done` 收口，M2/M3 产出真实预览。
 
-**已落地的修复**：① 多意图分类分级超时（疑似多意图 180s，否则 35s）根治慢模型超时降级；② harness trace_id 加 `RUN_NONCE` 根治跨运行 stale-channel 回放假阴性；③ `_skill_family` 信息检索归一为 chat，使自动判定与文档口径自洽。
+**已落地的修复**：① 多意图分类分级超时（疑似多意图 180s，否则 35s）根治慢模型超时降级；② harness trace_id 加 `RUN_NONCE` 根治跨运行 stale-channel 回放假阴性；③ `_skill_family` 信息检索归一为 chat，使自动判定与文档口径自洽。**④ #V1 向量召回注入回答链路**（`runner.run_skill` 为 chat/search 注入 chroma RAG + `think(stage=rag)`）；**⑤ #V2 F5 续传 400**（proxy 守卫允许 `stream_exists(tid)` 时空 messages 回放）；**⑥ #V3 多意图统计落地**（`orchestrator.run_multi` 补发 `record_intent_result/decision`）；**⑦ #V4 多意图结果段落标题格式化**（`merger.py` 提示词驱动，加粗二级标题分段）。④-⑦ 均已完成代码改动，**待用户复跑 §三 / §二 验证**。
 
 **遗留风险（非多意图引擎问题）**：M3 基底建站 `auto_start` 仅产出 PRD（`preview=False`），"在真实站点上改"的完整性受限；多意图拆分能力本身已充分验证。建议后续跟进：让 `auto_start` 在基底场景真正生成站点，或 M3 测试直接复用已建站点。
 

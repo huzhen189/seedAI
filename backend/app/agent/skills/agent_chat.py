@@ -67,10 +67,15 @@ async def explain_skill(
     messages: list,
     trace_id: str | None = None,
     level2: str | None = None,
+    rag_context: str = "",
     **kwargs,
 ) -> str:
     sys_prompt = SYS_PROMPTS.get(level2 or "", SYS_DEFAULT)
     SKILL_LOG.info("[chat] 问答开始 trace=%s model=%s level2=%s", trace_id, model_id, level2)
+
+    # RAG 增强(修复 #V1): 把向量召回的项目记忆/用户偏好/错误模式注入回答上下文
+    if rag_context:
+        sys_prompt += "\n\n【相关记忆(来自你的长期知识库, 仅供参考, 请在回答中自然融合)】\n" + rag_context
 
     # 搜索增强: 取最后一条用户消息, 尝试联网搜索, 拼接结果到 system prompt
     user_query = ""

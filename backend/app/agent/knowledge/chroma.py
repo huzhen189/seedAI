@@ -192,20 +192,31 @@ def _upsert(collection: str, ids: list[str], docs: list[str], metas: list[dict])
 # ---- 原有集合(components / memory) ----
 
 def build_rag_context(query: str, project_id: int | None = None,
-                      user_id: int | None = None) -> str:
-    """检索 components + memory + 用户偏好 + 项目记忆 + 错误模式,拼接为 Planner 可用上下文字符串(空则返回 '')。
+                      user_id: int | None = None) -> dict:
+    """检索 components + memory + 用户偏好 + 项目记忆 + 错误模式,拼接为 Planner 可用上下文。
+
+    返回 dict:
+      - "text": 拼接后的上下文字符串(无命中则返回 "")
+      - "hits": 各集合命中条数字典 {components, memory, project_memory,
+                user_preferences, error_patterns}(用于观测向量库是否真实对 LLM 产生作用)
+
     v0.9.0+: user_id 检索 user_preferences(个性化), project_id 检索 project_memory(项目隔离),
     error_patterns 全局检索(错误经验复用)。所有检索优雅降级,失败不阻断生成。"""
     if not _available():
-        return ""
+        return {"text": "", "hits": {}}
     logger.debug("[RAG] build_rag_context 入口 query=%.60s project_id=%s user_id=%s",
                 query, project_id, user_id)
     parts: list[str] = []
+    hits: dict[str, int] = {
+        "components": 0, "memory": 0, "project_memory": 0,
+        "user_preferences": 0, "error_patterns": 0,
+    }
     # ── 组件库参考(全局) ──
     comps = retrieve(query, settings.chroma_collection_components)
     if comps:
         snippets = "\n\n".join(f"- {c['content']}" for c in comps)
         parts.append(f"【组件库参考】\n{snippets}")
+        hits["components"] = len(comps)
         logger.debug("[RAG] components 命中 %d 条(注入 %d 字), top=%.120s",
                     len(comps), len(snippets), comps[0]["content"])
     else:
@@ -221,6 +232,7 @@ def build_rag_context(query: str, project_id: int | None = None,
     if mems:
         snippets = "\n\n".join(f"- {m['content']}" for m in mems)
         parts.append(f"【历史记忆】\n{snippets}")
+        hits["memory"] = len(mems)
         logger.debug("[RAG] memory 命中 %d 条(project_id=%s, 注入 %d 字)",
                     len(mems), project_id, len(snippets))
     else:
@@ -231,6 +243,7 @@ def build_rag_context(query: str, project_id: int | None = None,
         if pmems:
             snippets = "\n\n".join(f"- {p['content']}" for p in pmems)
             parts.append(f"【项目记忆】\n{snippets}")
+            hits["project_memory"] = len(pmems)
             logger.debug("[RAG] project_memory 命中 %d 条(project_id=%s, 注入 %d 字)",
                         len(pmems), project_id, len(snippets))
         else:
@@ -241,6 +254,7 @@ def build_rag_context(query: str, project_id: int | None = None,
         if prefs:
             snippets = "\n\n".join(f"- {p['content']}" for p in prefs)
             parts.append(f"【用户偏好】\n{snippets}")
+            hits["user_preferences"] = len(prefs)
             logger.debug("[RAG] user_preferences 命中 %d 条(user_id=%s, 注入 %d 字)",
                         len(prefs), user_id, len(snippets))
         else:
@@ -250,15 +264,19 @@ def build_rag_context(query: str, project_id: int | None = None,
     if errs:
         snippets = "\n\n".join(f"- {e['content']}" for e in errs)
         parts.append(f"【错误模式经验】\n{snippets}")
+        hits["error_patterns"] = len(errs)
         logger.debug("[RAG] error_patterns 命中 %d 条(注入 %d 字)", len(errs), len(snippets))
     else:
         logger.debug("[RAG] error_patterns 未命中")
     ctx = "\n\n".join(parts)
     if ctx:
-        logger.debug("[RAG] 注入 Planner 上下文总长=%d 字(有增益)", len(ctx))
+        logger.debug("[RAG] 注入 Planner 上下文总长=%d 字(有增益) hits=%s", len(ctx), hits)
     else:
         logger.debug("[RAG] 无 RAG 增益(所有集合均未命中)")
-    return ctx[:_RAG_INJECT_MAX_CHARS] if ctx else ""
+    return {
+        "text": ctx[:_RAG_INJECT_MAX_CHARS] if ctx else "",
+        "hits": hits,
+    }
 
 
 def save_memory(trace_id: str, title: str, content: str,

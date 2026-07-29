@@ -601,14 +601,22 @@ async def generate_stream(
     # ②-a RAG 增强: 需求文本已在上文 first_user_msg 准备好(含对话真实需求),
     #    带超时保护, Chroma 不可达时 5s 后跳过, 不阻塞生成
     rag_ctx = ""
+    rag_hits: dict = {}
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future: Future[str] = pool.submit(build_rag_context, first_user_msg, project_id, user_id)
-            rag_ctx = future.result(timeout=5.0)
+            future: Future[dict] = pool.submit(build_rag_context, first_user_msg, project_id, user_id)
+            _rag = future.result(timeout=5.0)
+            rag_ctx = _rag.get("text", "")
+            rag_hits = _rag.get("hits", {})
     except FutureTimeout:
         GEN_LOG.warning("[gen] RAG 检索超时(>5s), 跳过增强 trace=%s", trace_id)
     except Exception as e:
         GEN_LOG.warning("[gen] RAG 检索失败, 跳过增强 trace=%s: %s", trace_id, e)
+    # 观测性:SSE 反馈本次向量召回情况(服务 P3 向量真实作用 + P4 友好反馈)
+    if rag_hits:
+        _rag_msg = ("📚 向量库召回 → 组件库 {components} / 历史记忆 {memory} / "
+                    "项目记忆 {project_memory} / 用户偏好 {user_preferences} / 错误模式 {error_patterns}").format(**rag_hits)
+        yield ev("think", stage="rag", msg=_rag_msg, hits=rag_hits)
 
     try:
         # 1) Planner

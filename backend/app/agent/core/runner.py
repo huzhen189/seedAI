@@ -15,6 +15,65 @@ from ..registry import SkillRegistry
 logger = logging.getLogger("ai_service.runner")
 
 
+async def _rag_context_for_answer(
+    messages: list, user_id, project_id
+) -> tuple[dict, str]:
+    """为 chat/search 类技能检索向量记忆, 返回 (hits_dict, context_str)。
+
+    向量库真实作用于回答链路(修复 #V1): 让 QA/搜索类技能也能召回
+    项目记忆 / 用户偏好 / 历史错误模式。无命中返回 ({}, "")。
+    检索失败一律降级为空(不影响主流程)。
+    """
+    try:
+        last_user = ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                last_user = (m.get("content") or "")
+                break
+        if not last_user:
+            return {}, ""
+        from ..knowledge.chroma import (
+            retrieve_error_patterns,
+            retrieve_project_memory,
+            retrieve_user_preferences,
+        )
+        hits: dict[str, int] = {}
+        chunks: list[str] = []
+        try:
+            pm = retrieve_project_memory(project_id or 0, last_user, top_k=3)
+            if pm:
+                hits["project_memory"] = len(pm)
+                chunks.append(
+                    "【项目记忆】\n" + "\n".join(f"- {x.get('content', '')[:300]}" for x in pm[:3])
+                )
+        except Exception as _e:  # noqa: BLE001
+            logger.debug("[Runner] 项目记忆检索失败(忽略): %s", _e)
+        try:
+            up = retrieve_user_preferences(user_id or 0, last_user, top_k=3)
+            if up:
+                hits["user_pref"] = len(up)
+                chunks.append(
+                    "【用户偏好】\n" + "\n".join(f"- {x.get('content', '')[:300]}" for x in up[:3])
+                )
+        except Exception as _e:  # noqa: BLE001
+            logger.debug("[Runner] 用户偏好检索失败(忽略): %s", _e)
+        try:
+            ep = retrieve_error_patterns(last_user, top_k=3)
+            if ep:
+                hits["error_pattern"] = len(ep)
+                chunks.append(
+                    "【历史错误模式】\n" + "\n".join(f"- {x.get('content', '')[:300]}" for x in ep[:3])
+                )
+        except Exception as _e:  # noqa: BLE001
+            logger.debug("[Runner] 错误模式检索失败(忽略): %s", _e)
+        if not hits:
+            return {}, ""
+        return hits, "\n\n".join(chunks)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[Runner] RAG 增强失败(忽略): %s", e)
+        return {}, ""
+
+
 async def run_skill(
     skill_name: str,
     model_id: str,
@@ -90,6 +149,19 @@ async def run_skill(
     )
     yield ev("node", stage="dispatch", skill=entry.name, agent_id=skill_name)
 
+    # ── RAG 增强(向量库真实作用于回答, 修复 #V1): chat/search 技能注入向量记忆 ──
+    rag_context = ""
+    rag_hits: dict = {}
+    if entry.name in ("agent_chat", "agent_search"):
+        rag_hits, rag_context = await _rag_context_for_answer(
+            messages, extra_kwargs.get("user_id"), extra_kwargs.get("project_id"))
+        if rag_hits:
+            yield ev(
+                "think", stage="rag", hits=rag_hits,
+                msg=f"向量召回 {sum(rag_hits.values())} 条相关记忆, 注入回答上下文",
+            )
+    rag_kw = {"rag_context": rag_context} if rag_context else {}
+
     # 参数透传(供 handler 按 level2/industry 调整行为)
     level2 = intent_info.get("level2") if intent_info else None
     industry = intent_info.get("industry", "other") if intent_info else "other"
@@ -119,7 +191,7 @@ async def run_skill(
                 intent=intent_val,
                 level2=level2,
                 industry=industry,
-                **extra_kwargs,
+                **extra_kwargs, **rag_kw,
             ):
                 event_cnt += 1
                 if isinstance(item, dict) and "event" in item:
@@ -133,7 +205,7 @@ async def run_skill(
                     yield ev("token", data=item if isinstance(item, str) else str(item))
         else:
             logger.info("[Runner] [2/3] 开始执行 skill=%s (同步)", entry.name)
-            result = await handler(model_id=model_id, messages=messages, trace_id=trace_id)
+            result = await handler(model_id=model_id, messages=messages, trace_id=trace_id, **rag_kw)
             event_cnt += 1
             if isinstance(result, dict) and "event" in result:
                 yield result

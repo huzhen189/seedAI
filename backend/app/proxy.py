@@ -276,7 +276,7 @@ async def _build_messages_from_db(db: AsyncSession, conversation_id: int, reques
             logger.info("[chat] Redis命中 conv=%d cursor=%s cnt=%d TTL已刷新(%ds)",
                        conversation_id, cursor_id or 'latest', len(messages), ttl)
             # C3 修复: 缓存命中仍须补当前 q(缓存只存历史)
-            return _append_q(messages, request)
+            return await _append_q(messages, request)
     except Exception as e:
         logger.warning("[chat] Redis读失败 conv=%d err=%s", conversation_id, e)
 
@@ -314,10 +314,10 @@ async def _build_messages_from_db(db: AsyncSession, conversation_id: int, reques
             logger.warning("[chat] Redis回填失败 conv=%d err=%s", conversation_id, e)
 
     # ── 4) 追加当前输入 ──
-    return _append_q(messages, request)
+    return await _append_q(messages, request)
 
 
-def _append_q(messages: list, request: Request) -> list:
+async def _append_q(messages: list, request: Request) -> list:
     """追加当前用户输入(q)。
 
     缓存命中/未命中两条路径都会走到这里: Redis 缓存只存历史(不含当前 q),
@@ -332,8 +332,17 @@ def _append_q(messages: list, request: Request) -> list:
             messages.append({"role": "user", "content": q})
             logger.info("[chat] 追加当前用户输入 q=%.60s", q)
     if not messages:
-        if resume or request.query_params.get("after"):
-            logger.info("[chat] resume/after 模式: 无历史消息, 允许空 messages 进行流回放")
+        # 续接/回放模式允许空 messages: F5 刷新在生成中途断开时, 若尚未收到任何 id 帧则
+        # after 游标缺失, 但只要存在在途流(stream_exists)就应全量回放, 而非 400(修复 #V2)。
+        _tid = request.query_params.get("trace_id")
+        _replay = bool(resume or request.query_params.get("after"))
+        if not _replay and _tid:
+            try:
+                _replay = await get_queue().stream_exists(_tid)
+            except Exception:
+                _replay = False
+        if _replay:
+            logger.info("[chat] 续接/回放模式: 无历史消息, 允许空 messages 进行流回放 trace=%s", _tid)
         else:
             raise HTTPException(status_code=400, detail="missing 'q' query param and no history")
     logger.info("[chat] 最终消息数=%d", len(messages))

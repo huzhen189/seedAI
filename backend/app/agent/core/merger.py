@@ -25,7 +25,23 @@ MERGE_SYSTEM = (
     "3. 如有失败部分, 明确告知用户哪些未完成及原因\n"
     "4. 保持语气一致、口语自然, 用中文\n"
     "5. 不要重复『子任务1/子任务2』这类机械表述, 用自然段落\n"
+    "6. 每个子任务用小标题开头, 标题格式: '## **<意图标题>**'(二级标题+加粗, 视觉上更大更醒目); "
+    "标题下方用普通正文(不要加粗)给出该意图的结果。\n"
+    "7. 意图标题取自各子任务类别(如 闲聊问答 / 建站生成 / 设计配色 / 联网搜索), 用中文; "
+    "若标题含英文字母请统一转为大写。\n"
 )
+
+# 子任务技能 → 中文意图标题(供合并结果段落标题使用)
+SKILL_TITLE = {
+    "agent_chat": "闲聊问答",
+    "agent_search": "联网搜索",
+    "agent_build": "站点修改",
+    "agent_generate_site": "建站生成",
+    "agent_design": "设计配色",
+    "agent_doc": "文档生成",
+    "agent_delete": "删除操作",
+    "explain": "解释问答",
+}
 
 
 class ResultMerger:
@@ -65,29 +81,36 @@ class ResultMerger:
     def _build_merge_prompt(self, results: list[SubTaskResult], original_query: str) -> str:
         parts = [f"用户原始请求:\n{original_query}\n\n各子任务执行结果:\n"]
         for i, r in enumerate(results, 1):
+            title = SKILL_TITLE.get(r.skill) or (r.skill or f"意图{i}")
             if r.status == SUB_DONE:
                 out = r.output_text[:800] or "(已生成产物)"
                 arts = " / ".join(r.artifacts) if r.artifacts else ""
                 parts.append(
-                    f"[{i}] ✅ {r.goal}\n"
+                    f"[{i}] 标题={title} 目标={r.goal}\n"
                     f"产出: {out}\n"
                     + (f"产物链接: {arts}\n" if arts else "")
                 )
             elif r.status in (SUB_FAILED, SUB_BLOCKED, SUB_SKIPPED):
                 label = "❌ 失败" if r.status == SUB_FAILED else ("⛔ 已拒绝" if r.status == SUB_BLOCKED else "⏸ 已跳过")
-                parts.append(f"[{i}] {label} {r.goal}\n原因: {r.error}\n")
-        parts.append("\n请将以上合并为一段连贯中文回复。")
+                parts.append(f"[{i}] 标题={title} 目标={r.goal}\n原因: {r.error}\n")
+        parts.append(
+            "\n请将以上合并为一段连贯中文回复。每个子任务用小标题 '## **<意图标题>**' 开头(加粗、二级标题), "
+            "标题下方用普通正文给出该意图的结果, 不要加粗正文。"
+        )
         return "\n".join(parts)
 
     def _fallback_concat(self, results: list[SubTaskResult]) -> str:
-        """LLM 不可用时的降级拼接(保证总能交付)。"""
+        """LLM 不可用时的降级拼接(保证总能交付, 段落标题加粗更直观)。"""
         lines = []
         for r in results:
+            title = SKILL_TITLE.get(r.skill) or (r.skill or "意图")
             if r.status == SUB_DONE:
-                lines.append(f"✅ {r.goal}：{r.output_text[:300] or '已完成'}")
+                lines.append(f"## **{title}**")
+                lines.append(r.output_text[:300] or "已完成")
                 if r.artifacts:
                     lines.append(f"   产物: {' / '.join(r.artifacts)}")
             elif r.status in (SUB_FAILED, SUB_BLOCKED, SUB_SKIPPED):
                 label = "❌ 失败" if r.status == SUB_FAILED else ("⛔ 已拒绝" if r.status == SUB_BLOCKED else "⏸ 已跳过")
+                lines.append(f"## **{title}**")
                 lines.append(f"{label} {r.goal}：{r.error}")
         return "\n".join(lines)
