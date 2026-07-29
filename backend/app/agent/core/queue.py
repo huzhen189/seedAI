@@ -49,7 +49,8 @@ logger = logging.getLogger("ai_service.queue")
 
 
 async def _persist_qc_score(trace_id: str, model_id: str | None,
-                            conversation_id: int | None, qc_result: dict) -> None:
+                            conversation_id: int | None, qc_result: dict,
+                            sub_task_id: str | None = None) -> None:
     """补齐 QC 落库断点(v0.8.5 遗留): 每次三裁判评审都写进 qc_scores 表,
     供后台「AI 质量」报表 / 六维雷达图按历史逐条留痕、聚合统计。
 
@@ -63,6 +64,7 @@ async def _persist_qc_score(trace_id: str, model_id: str | None,
         async with SessionLocal() as db:
             await qc_score_repo.upsert(
                 db, trace_id, model_id, conversation_id, qc_result,
+                sub_task_id=sub_task_id,
             )
             await db.commit()
     except Exception as e:  # noqa: BLE001
@@ -167,7 +169,7 @@ async def _qc_fix_loop(
             # 3) 重跑 QC
             try:
                 from ..qc import run_qc
-                from .safety import run_safety
+                from ..intent.safety import run_safety
                 safety_risk = run_safety(review_msgs, project_constraints).risk_level
                 qc2 = await asyncio.wait_for(
                     run_qc(qc_user_text, fixed_code,
@@ -1192,6 +1194,15 @@ async def worker_loop(concurrency: int = 1):
                                 await record_sub_task(skill, st, risk, dur)
                             elif ev_name == "merge":
                                 merge_data = event.get("data") or {}
+                            elif ev_name == "qc":
+                                # 每子任务 QC 落库(带 sub_task_id, 复合键隔离, 不覆盖整体 QC)
+                                _qd = event.get("data") or {}
+                                _sid = _qd.get("sub_task_id")
+                                if _sid:
+                                    asyncio.create_task(
+                                        _persist_qc_score(trace_id, model_id, conversation_id, _qd,
+                                                          sub_task_id=_sid)
+                                    )
                             await q.publish(trace_id, event)
                             event_cnt += 1
                             # ── v4 阶段边界暂停检测(断连即暂停 / 手动停止) ──
@@ -1223,21 +1234,22 @@ async def worker_loop(concurrency: int = 1):
                             )
                         except Exception as oe:  # noqa: BLE001
                             logger.warning("[Worker] 编排统计失败(跳过): %s", oe)
-                        # 后置 QC(合并文本, 按需触发)
-                        # 编排场景: 仅当任一子任务 reviewer 标记 needs_review 才跑单裁判 QC(省 LLM 成本)。
+                        # 后置 QC(合并文本, 全意图覆盖)
+                        # 用户要求: 编排整体也需 QC 打分。此处对合并后的最终回复评分(子任务级评分在
+                        # orchestrator._run_one 内逐子任务完成, 见 per-sub-task QC)。
                         qc_assistant_text = "".join(qc_assistant_buf)
                         qc_result = None
-                        # 决策日志: 编排场景 QC 仅当子任务 reviewer 标 needs_review 才触发
+                        # 决策日志: 编排场景 QC 全意图触发
                         if not qc_assistant_text.strip() or done_event is None:
                             logger.debug("[Worker] [6/6] 编排 QC 跳过 trace=%s (无合并文本或未收到 done)", trace_id)
-                        elif review_needs:
-                            logger.info("[Worker] [6/6] 编排 QC 触发 trace=%s 原因=子任务reviewer待复核", trace_id)
                         else:
-                            logger.debug("[Worker] [6/6] 编排 QC 跳过 trace=%s 原因=无子任务待复核", trace_id)
-                        if qc_assistant_text.strip() and done_event is not None and review_needs:
+                            logger.info("[Worker] [6/6] 编排 QC 触发 trace=%s 原因=全意图覆盖(合并回复评分)", trace_id)
+                        if qc_assistant_text.strip() and done_event is not None:
                             try:
+                                # 反馈节点: 编排整体打分前也提示「系统正在核对本次对话生成质量...」
+                                await q.publish(trace_id, {"event": "node", "data": {"stage": "qc_checking"}})
                                 from ..qc import run_qc
-                                from .safety import run_safety
+                                from ..intent.safety import run_safety
                                 safety_risk = run_safety(messages, project_constraints).risk_level
                                 qc_result = await asyncio.wait_for(
                                     run_qc(qc_user_text, qc_assistant_text,
@@ -1371,25 +1383,22 @@ async def worker_loop(concurrency: int = 1):
                             )
                     except Exception as _hf_e:  # noqa: BLE001
                         logger.debug("[Worker] 单意图交接物捕获失败(忽略): %s", _hf_e)
-                # ── [6/6] 后置 QC 单裁判(按需触发) ──
-                # 生成类技能: 仅当 reviewer 标记 needs_review 才跑单裁判(省 LLM 成本); 闲聊强制兜底。
-                # 闲聊(agent_chat) 无 reviewer, 始终 QC 兜底以保证对话质量 + 支撑低分重答(Phase D)。
+                # ── [6/6] 后置 QC 单裁判(全意图覆盖) ──
+                # 用户要求: 每个意图都要 QC 打分(闲聊/建站/代码/其他), 不再仅限 reviewer 待复核或闲聊兜底。
+                # 只要本轮产生了助手文本且收到 done, 即跑单裁判 QC, 并先下发 qc_checking 反馈节点。
                 qc_assistant_text = "".join(qc_assistant_buf)
                 qc_result = None
-                force_qc = skill_name == "agent_chat"
-                # 决策日志: 明确 QC 是否触发 + 原因(可追溯, 便于复盘「为什么这次没跑三裁判」)
+                # 决策日志: 明确 QC 是否触发 + 原因(可追溯)
                 if not qc_assistant_text.strip() or done_event is None:
                     logger.debug("[Worker] [6/6] QC 跳过 trace=%s (无助手文本或未收到 done)", trace_id)
-                elif review_needs:
-                    logger.info("[Worker] [6/6] QC 触发 trace=%s 原因=reviewer待复核", trace_id)
-                elif force_qc:
-                    logger.info("[Worker] [6/6] QC 触发 trace=%s 原因=闲聊强制兜底", trace_id)
                 else:
-                    logger.debug("[Worker] [6/6] QC 跳过 trace=%s 原因=reviewer已通过(按需不复核)", trace_id)
-                if qc_assistant_text.strip() and done_event is not None and (review_needs or force_qc):
+                    logger.info("[Worker] [6/6] QC 触发 trace=%s 原因=全意图覆盖(有产出即评分)", trace_id)
+                if qc_assistant_text.strip() and done_event is not None:
                     try:
+                        # 反馈节点: 前端据此显示「系统正在核对本次对话生成质量...」(实时推送)
+                        await q.publish(trace_id, {"event": "node", "data": {"stage": "qc_checking"}})
                         from ..qc import run_qc
-                        from .safety import run_safety
+                        from ..intent.safety import run_safety
                         safety_risk = run_safety(messages, project_constraints).risk_level
                         qc_result = await asyncio.wait_for(
                             run_qc(qc_user_text, qc_assistant_text,

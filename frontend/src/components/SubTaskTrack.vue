@@ -138,6 +138,12 @@ const merging = computed(() => {
             @click="emit('confirm', s.id)"
           >确认执行</button>
         </div>
+        <!-- per-sub-task 后置 QC 打分结果(每个子任务独立评分) -->
+        <div v-if="s.qc" class="qc-badge" :class="(s.qc.overall ?? 0) >= 7 ? 'qc-ok' : 'qc-warn'">
+          <span class="qc-icon">⚖️</span>
+          质量分 {{ (s.qc.overall ?? 0).toFixed(1) }}
+          <span v-if="s.qc.needs_review" class="qc-review">需复核</span>
+        </div>
       </li>
     </ul>
   </div>
@@ -292,6 +298,22 @@ const merging = computed(() => {
   transition: background 0.2s ease, transform 0.15s ease;
 }
 .confirm-btn:hover { background: var(--warn); color: #fff; transform: translateY(-1px); }
+
+/* per-sub-task QC 打分徽标 */
+.qc-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 3px 12px;
+  margin-top: 8px;
+}
+.qc-ok { background: #ecfdf5; color: #15803d; border: 1px solid #a7f3d0; }
+.qc-warn { background: #fffbeb; color: var(--warn); border: 1px solid #fde68a; }
+.qc-icon { font-size: 13px; }
+.qc-review { font-size: 11px; font-weight: 600; background: #fef2f2; color: #b91c1c; border-radius: 999px; padding: 1px 7px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 </style>

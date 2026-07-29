@@ -25,7 +25,7 @@ import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
 import type { Artifact, Message, ModelInfo, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent, QcResult, RatingDims, SubTaskView, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, FailedSubTask, CancelSummaryEvent, PlanPreviewEvent } from '../types'
-import { SOP_ROLES, SKILL_TO_ROLE } from '../types'
+import { SKILL_TO_ROLE } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
   received: '系统已收到你的需求',
@@ -45,6 +45,9 @@ const STAGE_LABELS: Record<string, string> = {
   orchestration: '系统正在对你的需求进行拆分',
   merge: '任务执行完毕，正在进行结果汇总',
   refined: '已生成结果摘要',
+  // 后置 QC 实时反馈: 每个意图(含闲聊/子任务)打分前的提示(用户诉求)
+  qc_checking: '系统正在核对本次对话生成质量...',
+  generating: '正在生成回复中',
   done: '任务执行完毕',
 }
 
@@ -88,17 +91,15 @@ const v4Pause = ref<{ tid: string; reason: string; stage: string } | null>(null)
 // 思考时间线(每步一个 agent 节点)+ 计划特殊节点;替代旧版混成一坨的 thinks 字符串。
 const thoughtSteps = ref<ThoughtStep[]>([])
 const planNodes = ref<PlanEvent[]>([])
-// §9: 执行前计划预览(含 SOP 角色链路) + §6 D 取消结构化摘要 + 当前 SOP 阶段
+// §9: 执行前计划预览(头部卡) + §6 D 取消结构化摘要 + 当前 SOP 阶段
 const planPreview = ref<PlanPreviewEvent | null>(null)
 const cancelSummary = ref<CancelSummaryEvent | null>(null)
 const sopCurrentRole = ref<string | undefined>(undefined)
-// §9: SOP 四角色链路(高亮当前阶段)
-const sopChain = computed(() =>
-  SOP_ROLES.map((r) => ({ ...r, active: r.key === sopCurrentRole.value })),
-)
 const currentStage = ref('')
 const degraded = ref(false)
 const degradedReason = ref<'model_switch' | 'timeout' | 'pm' | null>(null)
+// 真降级时记录实际切换的模型序(原始 → 备用), 供时间线精确展示
+const switchModelInfo = ref<string | null>(null)
 const requirementDoc = ref<Record<string, any> | null>(null)
 const previewUrl = ref<string | null>(null)
 const errorMsg = ref('')
@@ -1029,6 +1030,7 @@ function resetGenState() {
   currentStage.value = ''
   degraded.value = false
   degradedReason.value = null
+  switchModelInfo.value = null
   previewUrl.value = null
   // 重置「正在生成」文件占位状态
   genFileName.value = ''
@@ -1062,6 +1064,11 @@ function upsertStep(stage: string, status: ThoughtStep['status'], customLabel?: 
   const existing = thoughtSteps.value.find((s) => s.stage === stage)
   if (existing) existing.status = status
   else thoughtSteps.value.push({ stage, label, status, think: '' })
+  // [DEBUG] 打印 upsertStep 收到的数据及调用后的时间线, 便于排查步骤是否进入
+  const _ts = new Date()
+  const _tsStr = `${_ts.toLocaleTimeString('zh-CN', { hour12: false })}.${String(_ts.getMilliseconds()).padStart(3, '0')}`
+  console.log(`[upsertStep] [${_tsStr}]`, { stage, status, label: customLabel || label, existed: !!existing },
+    '=> timeline:', thoughtSteps.value.map((s) => `${s.stage}:${s.status}`).join(' | '))
 }
 function appendThink(stage: string, content: string) {
   let step = thoughtSteps.value.find((s) => s.stage === stage)
@@ -1101,7 +1108,7 @@ const activeTrailKey = computed<string | null>(() => {
     subTasks.value.length || mergeResult.value ||
     cosUploading.value || cosFailed.value || pendingConfirm.value ||
     degraded.value ||
-    (optionsData.value)
+    (optionsData.value) || thoughtSteps.value.length > 0
   if (!show) return null
   const sessions = allSessions.value
   for (let si = sessions.length - 1; si >= 0; si--) {
@@ -1191,6 +1198,10 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       // 单意图遗留路径(无 sub_task_id): 同原行为
       const m = convStore.messages[assistantIdx]
       if (m) {
+        // 首个 token 亮起「正在生成回复中」步骤(用户诉求: 生成阶段也要有反馈)
+        if (!thoughtSteps.value.some((s) => s.stage === 'generating')) {
+          upsertStep('generating', 'active')
+        }
         m.content += t
         // 每 10 个 token 存一次本地快照(减开销)
         if (m.content.length % 40 === 0) saveDraft(convStore.currentConvId!)
@@ -1216,9 +1227,15 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
         cosUploadPct.value = Math.round((d.index / d.total) * 100)
       }
     },
-    onDegraded: () => {
+    onDegraded: (d) => {
+      // 后端仅在真的降级到非主模型时才发 degraded(携带实际使用模型 model 与原始模型 requested)。
+      // 在此之前视为正常完成, 不应误报"已切换备用"。
       degraded.value = true
       degradedReason.value = 'model_switch'
+      const dd = (d || {}) as Record<string, any>
+      if (dd.model && dd.requested && dd.model !== dd.requested) {
+        switchModelInfo.value = `${dd.requested} → ${dd.model}`
+      }
     },
     onRequirement: (d) => {
       console.log('[SSE] 收到需求文档:', (d.data as any)?.brand?.name)
@@ -1249,7 +1266,8 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
           thoughtSteps.value.push({ stage: 'degraded_warn', label: '⚠ 模型响应超时，本次未能生成内容', status: 'done', think: '' })
         }
       } else {
-        thoughtSteps.value = []
+        // 成功: 保留完整时间线, 供用户复盘每一步(不再清空)
+        thoughtSteps.value.forEach((s) => { if (s.status === 'active') s.status = 'done' })
       }
       planNodes.value = []
       planPreview.value = null
@@ -1306,6 +1324,10 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       execConfidence.value = typeof d.confidence === 'number' ? d.confidence : null
       // 每次新生成开始重置计时
       startExecTimer()
+      // 意图分析步骤收尾: 发送瞬间已以 active 播报, 待 intent 事件到达转正为 done
+      if (thoughtSteps.value.some((s) => s.stage === 'analyzing')) {
+        upsertStep('analyzing', 'done')
+      }
       // 在思考时间线顶部插入意图识别步骤(两级显示)
       const lbl = d.level2_label ? `${d.level1_label || ''} → ${d.level2_label}` : (d.label || '')
       if (lbl) upsertStep('intent_recognized', 'done', lbl)
@@ -1411,7 +1433,13 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       if (us) saveUserStatus({ ...us, after: id })
     },
     onQc: (data: QcResult) => {
-      // 后置 QC 三裁判结果:按当前 trace_id 存入 qcMap, 气泡徽标读取
+      // per-sub-task QC: 带 sub_task_id → 写入对应子任务的 qc 字段(泳道展示 per-sub-task 打分)
+      if (data.sub_task_id) {
+        const st = subTasks.value.find((s) => s.id === data.sub_task_id)
+        if (st) st.qc = data
+        return
+      }
+      // 整体 / 编排 QC: 按当前 trace_id 存入 qcMap, 气泡徽标读取
       if (traceId.value) qcMap[traceId.value] = data
     },
     // ---- 多意图编排事件(P3) ----
@@ -1622,6 +1650,10 @@ async function doSend(text: string) {
   // 系统收到: 发送瞬间立即反馈, 消除"卡死"焦虑(用户体感第一步, 始终完成态)
   currentStage.value = 'received'
   upsertStep('received', 'done')
+  // 发送瞬间即播「正在进行意图分析」(active), 待后端 intent 事件到达再转已识别;
+  // 后端闲聊/casual 路径不会发 analyzing 节点(仅建站/需求类发), 故前端在此统一补齐,
+  // 保证任意意图都有"意图分析"反馈(用户诉求)。
+  upsertStep('analyzing', 'active')
   traceId.value = genTraceId()
   const cid = convStore.currentConvId!
   setActiveGen(cid, traceId.value)
@@ -2134,12 +2166,6 @@ watch(pendingRetry, (r) => {
                       <div v-if="planPreview.note" class="pp-note">{{ planPreview.note }}</div>
                     </div>
                   </div>
-                  <div class="sop-chain">
-                    <template v-for="(r, i) in sopChain" :key="r.key">
-                      <span class="sop-node" :class="{ active: r.active }">{{ r.label }}</span>
-                      <span v-if="i < sopChain.length - 1" class="sop-arrow">→</span>
-                    </template>
-                  </div>
                 </div>
 
                 <!-- §6 D: 取消结构化摘要卡 -->
@@ -2166,6 +2192,7 @@ watch(pendingRetry, (r) => {
                   :plans="planNodes"
                   :degraded="degraded"
                   :degraded-reason="degradedReason"
+                  :switch-model-info="switchModelInfo"
                   :current="currentStage"
                   :intent="currentIntent"
                   :current-role="sopCurrentRole"
@@ -2756,23 +2783,6 @@ class="clarify-confirm"
 .pp-icon { font-size: 18px; line-height: 1.2; }
 .pp-title { font-weight: 700; font-size: 14px; color: var(--brand); }
 .pp-note { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
-.sop-chain { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.sop-node {
-  font-size: 12px;
-  font-weight: 600;
-  border-radius: 999px;
-  padding: 3px 12px;
-  background: #f1f5f9;
-  color: var(--muted);
-  border: 1px solid transparent;
-  transition: all 0.25s ease;
-}
-.sop-node.active {
-  background: var(--brand);
-  color: #fff;
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
-}
-.sop-arrow { color: var(--muted); font-size: 13px; }
 
 /* §6 D: 取消结构化摘要卡 */
 .cancel-summary {

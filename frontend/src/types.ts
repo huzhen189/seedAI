@@ -382,6 +382,8 @@ export interface QcResult {
   needs_review: boolean
   safety_risk: string // low|medium|high|critical
   partial: boolean
+  /** per-sub-task QC 时带子任务 id(整体/编排 QC 为 undefined)。前端据此区分「整体分」与「子任务分」。 */
+  sub_task_id?: string
 }
 
 /** 用户气泡内多维度评价(6 维各 1-10) */
@@ -517,4 +519,6 @@ export interface SubTaskView extends SubTaskMeta {
   fail_reason?: string
   /** 是否可恢复(false=高风险拦截; true=可重试/待确认) */
   recoverable?: boolean
+  /** 该子任务自身的后置 QC 单裁判结果(per-sub-task 打分, v2.3.x) */
+  qc?: QcResult
 }

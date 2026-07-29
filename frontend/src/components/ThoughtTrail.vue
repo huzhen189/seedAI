@@ -9,6 +9,8 @@ const props = defineProps<{
   degraded: boolean
   /** 降级原因: model_switch=主模型切换 / timeout=模型超时未产出 / pm=已路由产品经理 */
   degradedReason?: 'model_switch' | 'timeout' | 'pm' | null
+  /** 真降级时实际切换的模型序(原始 → 备用), 为空表示未降级或信息未知 */
+  switchModelInfo?: string | null
   current: string
   /** 意图识别结果(两级) */
   intent: { level1: string; level2: string }
@@ -34,7 +36,7 @@ const STAGE_LABELS: Record<string, string> = {
   intent_recognized: '已识别意图',
   enter_router: '意图路由 — 识别你的需求类型',
   dispatch: '技能调度 — 加载 AI 能力',
-  analyzing: '系统正在分析你的需求',
+  analyzing: '正在进行意图分析',
   pm_summon: '系统分析到您缺少开发方向，已自动为您召唤产品经理进行分析',
   orchestration: '系统正在对你的需求进行拆分',
   enter_planner: '需求规划 — 拆解任务/制定步骤',
@@ -43,6 +45,8 @@ const STAGE_LABELS: Record<string, string> = {
   previewing: '投递预览 — 上传预览环境',
   preview: '生成预览 — 产出可预览页面',
   merge: '任务执行完毕，正在进行结果汇总',
+  qc_checking: '系统正在核对本次对话生成质量...',
+  generating: '正在生成回复中',
   done: '任务执行完毕',
 }
 
@@ -65,6 +69,8 @@ const STEP_ICONS: Record<string, string> = {
   previewing: '📤',
   preview: '🌐',
   merge: '📦',
+  qc_checking: '⚖️',
+  generating: '💬',
   refined: '📋',
   done: '✅',
   degraded_warn: '⚠️',
@@ -80,7 +86,10 @@ const degradedText = computed(() => {
   if (props.degradedReason === 'pm' || (isPM.value && props.degraded)) {
     return '🧠 系统分析到您缺少开发方向，已自动为您召唤产品经理进行分析'
   }
-  if (props.degradedReason === 'model_switch') return '⚠ 主模型繁忙，已自动切换备用模型继续生成'
+  if (props.degradedReason === 'model_switch') {
+    const info = props.switchModelInfo ? `(${props.switchModelInfo})` : ''
+    return `⚠ 主模型繁忙，已自动切换备用模型继续生成${info}`
+  }
   return '⚠ 模型响应超时，本次未能生成内容'
 })
 

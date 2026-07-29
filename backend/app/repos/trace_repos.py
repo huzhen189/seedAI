@@ -75,9 +75,16 @@ class QcScoreRepo(BaseRepo[QcScore]):
     async def get_by_trace(self, db: AsyncSession, trace_id: str) -> Optional[QcScore]:
         return await self.get_by(db, trace_id=trace_id)
 
+    async def get_by_trace_sub(self, db: AsyncSession, trace_id: str,
+                               sub_task_id: str | None) -> Optional[QcScore]:
+        if sub_task_id is None:
+            return await self.get_by(db, trace_id=trace_id, sub_task_id=None)
+        return await self.get_by(db, trace_id=trace_id, sub_task_id=sub_task_id)
+
     async def upsert(self, db: AsyncSession, trace_id: str, model_id: str | None,
-                     conversation_id: int | None, result: dict) -> QcScore:
-        existing = await self.get_by_trace(db, trace_id)
+                     conversation_id: int | None, result: dict,
+                     sub_task_id: str | None = None) -> QcScore:
+        existing = await self.get_by_trace_sub(db, trace_id, sub_task_id)
         if existing:
             return await self.update(
                 db, existing,
@@ -92,6 +99,7 @@ class QcScoreRepo(BaseRepo[QcScore]):
         return await self.create(
             db,
             trace_id=trace_id,
+            sub_task_id=sub_task_id,
             conversation_id=conversation_id,
             model_id=model_id,
             overall=result.get("overall", 0.0),

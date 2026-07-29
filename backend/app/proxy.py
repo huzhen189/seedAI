@@ -395,7 +395,7 @@ async def get_summary(conversation_id: int) -> str:
                     json={"model": "deepseek-v4-flash",
                           "messages": [{"role":"user","content":
                               f"把对话压缩成 ≤200字 摘要(主题/决策/进度)。\n{raw}"}],
-                          "max_tokens": 200, "temperature": 0.3},
+                          "max_tokens": 200, "temperature": 0.1},
                 )
                 new_summary = resp.json()["choices"][0]["message"]["content"].strip()
             # 写回 Redis
@@ -445,7 +445,7 @@ async def maybe_compress_summary(conversation_id: int, model: str, latest_user: 
                     "https://api.deepseek.com/v1/chat/completions",
                     headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
                     json={"model": "deepseek-v4-flash", "messages": [{"role":"user","content":compress_prompt}],
-                          "max_tokens": 200, "temperature": 0.3},
+                          "max_tokens": 200, "temperature": 0.1},
                 )
                 data = resp.json()
                 new_summary = (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
@@ -958,9 +958,9 @@ async def chat(
 
                     event = None
                     data_parts: list[str] = []
-                    # 批量发送缓冲: 累计 SSE_OUT_BATCH 帧或命中终止事件再一次性 flush,
-                    # 减少网络写次数(对应"多累计一点数据再发")。客户端 EventSource 按空行
-                    # 切分事件, 合并发送对前端透明, 不影响流式展示。
+                    # 批量发送缓冲: 仅对纯 token 帧做合并(SSE_OUT_BATCH 帧), 减少网络写次数;
+                    # 所有状态/控制类帧(node/intent/think/plan/qc/... 非 token)必须每帧立即下发,
+                    # 不等凑批——否则模型思考等待期后状态帧会"一次性蹦出"(见 #530 实时反馈诉求)。
                     out_buf: list[bytes] = []
                     SSE_OUT_BATCH = 8
                     async for raw_line in _sse_lines():
@@ -1179,8 +1179,15 @@ async def chat(
                                         frame += f"event: {event}\n"
                                     frame += f"data: {data}\n\n"
                                     out_buf.append(frame.encode("utf-8"))
-                                    # 批量发送: 累计到 SSE_OUT_BATCH 帧, 或命中终止事件, 才一次性 flush
-                                    if len(out_buf) >= SSE_OUT_BATCH or event in ("done", "aborted", "error", "unsupported", "paused", "cos_upload", "progress"):
+                                    # 流式发送策略:
+                                    #  - 纯 token 帧: 累计到 SSE_OUT_BATCH 帧再一次性 flush(减少网络写, 逐字体验不受影响)
+                                    #  - 非 token 帧(状态/控制类)与终止事件: 立即 flush, 不等待凑批,
+                                    #    确保前端时间线状态(意图分析/路由/生成中...)实时逐步出现
+                                    if event == "token":
+                                        _flush_cond = len(out_buf) >= SSE_OUT_BATCH
+                                    else:
+                                        _flush_cond = True
+                                    if _flush_cond:
                                         _send_ok = True
                                         for _f in out_buf:
                                             try:

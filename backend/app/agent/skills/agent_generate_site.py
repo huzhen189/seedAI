@@ -788,7 +788,7 @@ async def generate_stream(
         user_msgs = user_msgs + list(messages)
         html_parts: list = []
         token_count = 0
-        async for chunk, _ in astream_with_fallback(model_id, user_msgs, system=coder_prompt):
+        async for chunk, mid in astream_with_fallback(model_id, user_msgs, system=coder_prompt):
             if await _cancelled_now(is_cancelled):
                 yield ev("aborted")
                 return
@@ -797,7 +797,8 @@ async def generate_stream(
                 html_parts.append(text)
                 token_count += 1
                 yield ev("token", data=text)
-        yield ev("degraded", model=model_id, requested=model_id)
+        if mid != model_id:
+            yield ev("degraded", model=mid, requested=model_id)
         html = _extract_html("".join(html_parts))
         GEN_LOG.info(
             "[gen] Coder 完成 trace=%s chars=%s chunks=%s model=%s",
@@ -852,7 +853,7 @@ async def generate_stream(
                 }
             ]
             html_parts = []
-            async for chunk, _ in astream_with_fallback(model_id, fix_msgs, system=coder_prompt):
+            async for chunk, mid in astream_with_fallback(model_id, fix_msgs, system=coder_prompt):
                 if await _cancelled_now(is_cancelled):
                     yield ev("aborted")
                     return
@@ -860,7 +861,8 @@ async def generate_stream(
                 if text:
                     html_parts.append(text)
                     yield ev("token", data=text)
-            yield ev("degraded", model=model_id, requested=model_id)
+            if mid != model_id:
+                yield ev("degraded", model=mid, requested=model_id)
             html = _extract_html("".join(html_parts))
 
         # 4) 预览投递(COS 直链,§10)

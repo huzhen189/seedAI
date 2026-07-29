@@ -163,7 +163,11 @@ class Trace(Base):
     model_id: Mapped[str | None] = mapped_column(String(48))
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
     events: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # NB: 原列名为 tokens, 但 finish()/admin.py/tracing.py 均引用 total_tokens(回归 bug:
+    # 列实际缺失导致 reconcile 翻 aborted 崩 AttributeError, 孤儿 Trace 永久卡 running,
+    # 前端刷新反复全量回放旧流)。统一改名为 total_tokens 并 default=0, 重启经
+    # _add_missing_columns 自动 ALTER 补齐(无需 reset_all)。
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # ── C1 补齐(可空, 防御性): 让 trace 起止时间可被记录/统计 ──
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -210,6 +214,7 @@ class QcScore(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    sub_task_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, default=None)
     conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id", ondelete="SET NULL"), index=True)
     model_id: Mapped[str | None] = mapped_column(String(48))
     overall: Mapped[float] = mapped_column(default=0.0)

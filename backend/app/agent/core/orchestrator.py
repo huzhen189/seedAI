@@ -20,6 +20,7 @@ import time
 from typing import Any, Callable, Optional
 
 from ..events import ev
+from ..config import settings
 from ..core.models import (
     RISK_HIGH,
     RISK_MEDIUM,
@@ -153,7 +154,8 @@ class Orchestrator:
                 asyncio.create_task(
                     self._run_one(
                         st, q.put, model_id, messages, trace_id,
-                        is_cancelled, shared_ctx, confirmed_subtasks, **extra_kwargs,
+                        is_cancelled, shared_ctx, confirmed_subtasks,
+                        original_query=original_query, **extra_kwargs,
                     )
                 )
                 for st in layer
@@ -252,6 +254,7 @@ class Orchestrator:
         is_cancelled: Optional[Callable[[], bool]],
         shared_ctx: SharedContext,
         confirmed_subtasks: set[str],
+        original_query: str = "",
         **extra_kwargs,
     ) -> SubTaskResult:
         """执行单个子任务, 事件经 sink 推送, 返回 SubTaskResult。"""
@@ -324,6 +327,30 @@ class Orchestrator:
                     id=st.id, status=SUB_CANCELLED, skill=st.selected_skill, goal=st.goal,
                     error="用户取消", risk_level=st.risk_level, duration_ms=int((time.time() - t0) * 1000),
                 )
+
+            # ── 每子任务后置 QC(用户要求: 每个拆分后的子任务都要打分) ──
+            # 在 subtask_done 前下发给前端: qc_checking 反馈节点(实时) + qc 事件(带 sub_task_id)。
+            sub_text = "".join(out_buf)
+            if sub_text.strip():
+                try:
+                    from ..qc import run_qc
+                    from ..intent.safety import run_safety
+                    proj_constraints = extra_kwargs.get("project_constraints") or []
+                    # 反馈节点: 前端按 sub_task_id 显示「系统正在核对本次子任务生成质量...」
+                    await sink(ev("node", stage="qc_checking", sub_task_id=st.id))
+                    safety_risk = run_safety(enriched, proj_constraints).risk_level
+                    qc_res = await asyncio.wait_for(
+                        run_qc(original_query, sub_text,
+                               project_constraints=proj_constraints,
+                               safety_risk=safety_risk,
+                               model_id=model_id),
+                        timeout=settings.qc_timeout_seconds,
+                    )
+                    qc_res = dict(qc_res)
+                    qc_res["sub_task_id"] = st.id
+                    await sink(ev("qc", data=qc_res))
+                except Exception as _qc_e:  # noqa: BLE001
+                    logger.warning("[编排] 子任务 %s QC 失败(忽略, 不影响交付): %s", st.id, _qc_e)
 
             st.transition(SUB_DONE)
             await sink(ev("subtask_done", sub_task_id=st.id,
