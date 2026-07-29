@@ -300,7 +300,7 @@ class Orchestrator:
             async for item in run_skill(
                 st.selected_skill, model_id, enriched,
                 trace_id=trace_id, is_cancelled=is_cancelled,
-                intent_info=intent_info,
+                intent_info=intent_info, sub_task_id=st.id,
                 requirement_doc=shared_ctx.requirement_doc,
                 project_status=shared_ctx.project_status.get("status", "draft") if isinstance(shared_ctx.project_status, dict) else "draft",
                 conversation_summary=shared_ctx.conversation_summary,

@@ -1,4 +1,4 @@
-import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent, QcResult, RatingDims, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, ClarifyEvent, CancelSummaryEvent, PlanPreviewEvent } from '../types'
+import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent, QcResult, RatingDims, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, ClarifyEvent, CancelSummaryEvent, PlanPreviewEvent, ReasoningEvent, ToolCallEvent, ToolResultEvent } from '../types'
 import { notifyAuthRequired } from '../stores/auth'
 import { post, publicGet, get } from './client'
 
@@ -57,6 +57,12 @@ export interface ChatCallbacks {
   onClarify?: (data: ClarifyEvent) => void
   /** 提前告知正在生成的文件名(跑马灯占位 + loading 骨架屏), 不含文件内容 */
   onGenFile?: (data: { name: string }) => void
+  /** Phase 1: 结构化思考/计划(reasoning 事件), 让前端显示"我在想什么") */
+  onReasoning?: (data: ReasoningEvent) => void
+  /** Phase 1: 工具调用开始(tool_call 事件), 显式透出"我去查/生成了…") */
+  onToolCall?: (data: ToolCallEvent) => void
+  /** Phase 1: 工具调用结果(tool_result 事件, 默认前端折叠) */
+  onToolResult?: (data: ToolResultEvent) => void
 }
 
 export interface StartChatOptions {
@@ -158,6 +164,19 @@ export function startChat(opts: StartChatOptions): EventSource {
     const d = safeParse((e as MessageEvent).data)
     opts.cb.onCosUpload?.({ filename: d.filename, index: d.index, total: d.total, url: d.url })
   })
+  // Phase 1: think→call→observe 循环可见化(reasoning / tool_call / tool_result)
+  es.addEventListener('reasoning', (e) => {
+    const d = safeParse((e as MessageEvent).data) as ReasoningEvent
+    opts.cb.onReasoning?.(d)
+  })
+  es.addEventListener('tool_call', (e) => {
+    const d = safeParse((e as MessageEvent).data) as ToolCallEvent
+    opts.cb.onToolCall?.(d)
+  })
+  es.addEventListener('tool_result', (e) => {
+    const d = safeParse((e as MessageEvent).data) as ToolResultEvent
+    opts.cb.onToolResult?.(d)
+  })
   es.addEventListener('done', () => {
     console.log('[SSE] 收到 done, 关闭连接')
     opts.cb.onDone?.()
@@ -210,7 +229,8 @@ export function startChat(opts: StartChatOptions): EventSource {
     'unsupported', 'block', 'confirm', 'orchestration', 'subtask_start',
     'subtask_done', 'subtask_fail', 'merge', 'cancel_summary', 'plan_preview',
     'paused', 'clarify', 'requirement_doc', 'preview', 'degraded', 'qc',
-    'refined', 'done', 'aborted', 'retry', 'error',
+    'refined', 'reasoning', 'tool_call', 'tool_result',
+    'done', 'aborted', 'retry', 'error',
   ]
   for (const t of TRACKED_TYPES) {
     es.addEventListener(t, (ev) => {

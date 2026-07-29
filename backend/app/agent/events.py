@@ -18,6 +18,9 @@
 - merge     : 结果合并(sub_task_id贯穿的多个子任务结果 → 一段连贯中文回复);含 success_count/fail_count/failed_tasks
 - retry     : 主模型不可用,携带可选替代模型列表(failed/suggested),前端弹框待用户选择后重发
               (替代原自动降级;收到后同 done/error 一样结束 SSE,由前端重新发起请求)
+- reasoning  : 结构化思考/计划/打算调用的动作(非流式;Phase 1 透出"我在想什么"),data 含 text
+- tool_call  : 工具调用开始(显式透出"我去查/生成了…"),data 含 name/args/tool_call_id;非终止
+- tool_result: 工具调用结果(data 含 tool_call_id/name/ok/summary);非终止,默认前端折叠展示
 
 每个事件是一个 dict: {"event": <type>, "data": <payload>};data 可为字符串或 dict,
 经 to_sse() 序列化为 SSE 的 {event, data} 字符串帧。

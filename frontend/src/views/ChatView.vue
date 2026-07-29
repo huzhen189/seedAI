@@ -25,7 +25,7 @@ import { getConversation, listArtifacts, renameProject, patch, autoStart } from 
 import { useAuth } from '../composables/useAuth'
 import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { Artifact, Message, ModelInfo, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent, QcResult, RatingDims, SubTaskView, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, FailedSubTask, CancelSummaryEvent, PlanPreviewEvent } from '../types'
+import type { Artifact, Message, ModelInfo, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent, QcResult, RatingDims, SubTaskView, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, FailedSubTask, CancelSummaryEvent, PlanPreviewEvent, ToolTrailEntry } from '../types'
 import { SKILL_TO_ROLE, SOP_ROLES } from '../types'
 
 const STAGE_LABELS: Record<string, string> = {
@@ -92,6 +92,9 @@ const v4Pause = ref<{ tid: string; reason: string; stage: string } | null>(null)
 // 思考时间线(每步一个 agent 节点)+ 计划特殊节点;替代旧版混成一坨的 thinks 字符串。
 const thoughtSteps = ref<ThoughtStep[]>([])
 const planNodes = ref<PlanEvent[]>([])
+// Phase 1(WorkBuddy 式 think→call→observe): 工具调用可见化视图模型。
+// 含 reasoning / tool_call(pending→done, 折叠结果) 三类, 单意图归一条流, 多意图按 sub_task_id 分泳道。
+const toolTrail = ref<ToolTrailEntry[]>([])
 // §9: 执行前计划预览(头部卡) + §6 D 取消结构化摘要 + 当前 SOP 阶段
 const planPreview = ref<PlanPreviewEvent | null>(null)
 const cancelSummary = ref<CancelSummaryEvent | null>(null)
@@ -1000,6 +1003,7 @@ const TRAIL_KEY = (tid: string) => `seedai:trail:${tid}`
 interface TrailSnapshot {
   convId: number
   thoughtSteps: any[]
+  toolTrail: any[]
   planNodes: any[]
   currentStage: string
   currentIntent: { level1: string; level2: string }
@@ -1026,6 +1030,7 @@ function saveTrailSnapshot() {
   const snap: TrailSnapshot = {
     convId: convStore.currentConvId ?? -1,
     thoughtSteps: thoughtSteps.value,
+    toolTrail: toolTrail.value,
     planNodes: planNodes.value,
     currentStage: currentStage.value,
     currentIntent: currentIntent.value,
@@ -1060,6 +1065,7 @@ function applyTrailSnapshot(tid: string) {
   const snap = loadTrailSnapshot(tid)
   if (!snap) return
   thoughtSteps.value = snap.thoughtSteps || []
+  toolTrail.value = snap.toolTrail || []
   planNodes.value = snap.planNodes || []
   currentStage.value = snap.currentStage || ''
   currentIntent.value = snap.currentIntent || { level1: '', level2: '' }
@@ -1156,6 +1162,8 @@ function resetGenState() {
   finished.value = false
   currentIntent.value = { level1: '', level2: '' }
   pendingRetry.value = null
+  // Phase 1: 重置工具调用可见化流
+  toolTrail.value = []
   // 多意图编排状态(新请求时重置;confirmedSubtaskIds 在 doSend 单独清)
   isMultiIntent.value = false
   subTasks.value = []
@@ -1332,6 +1340,44 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       genFileName.value = (d.name as string) || 'index.html'
       genLoading.value = true
     },
+    // Phase 1: think→call→observe 循环可见化。把 reasoning / tool_call / tool_result
+    // 归一成 toolTrail(单意图即主气泡流; 多意图按 sub_task_id 分泳道)。
+    onReasoning: (d) => {
+      disarmReconnectGuard()
+      if (!d.text) return
+      toolTrail.value.push({ kind: 'reasoning', text: d.text, sub_task_id: d.sub_task_id })
+    },
+    onToolCall: (d) => {
+      disarmReconnectGuard()
+      const id = (d.tool_call_id as string) || `tc_${toolTrail.value.length}`
+      toolTrail.value.push({
+        kind: 'tool',
+        call_id: id,
+        name: (d.name as string) || 'tool',
+        args: (d.args as Record<string, any>) || {},
+        status: 'pending',
+        sub_task_id: d.sub_task_id,
+      })
+    },
+    onToolResult: (d) => {
+      disarmReconnectGuard()
+      const id = (d.tool_call_id as string) || ''
+      // 回粘到最近一个同 call_id(否则按 name 兜底最近待完成项)的工具卡片
+      let idx = -1
+      for (let i = toolTrail.value.length - 1; i >= 0; i--) {
+        const t = toolTrail.value[i]
+        if (t.kind === 'tool' && t.status === 'pending' && (t.call_id === id || !id || t.name === d.name)) {
+          idx = i
+          break
+        }
+      }
+      if (idx >= 0) {
+        const t = toolTrail.value[idx] as Extract<ToolTrailEntry, { kind: 'tool' }>
+        t.status = 'done'
+        t.ok = d.ok
+        t.summary = d.summary
+      }
+    },
     onProgress: (d) => {
       // B(#488): 实时上传进度 → exec-head 进度条
       cosUploadPct.value = Math.max(0, Math.min(100, Number(d.pct) || 0))
@@ -1409,6 +1455,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       generating.value = false
       finished.value = true
       thoughtSteps.value = []
+      toolTrail.value = []
       planNodes.value = []
       genLoading.value = false
       errorMsg.value = '已取消'
@@ -1537,6 +1584,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       generating.value = false
       finished.value = true
       thoughtSteps.value = []
+      toolTrail.value = []
       planNodes.value = []
       errorMsg.value = m
       clearActiveGen()
@@ -2332,6 +2380,7 @@ watch(pendingRetry, (r) => {
                 <ThoughtTrail
                   v-if="!isMultiIntent"
                   :steps="thoughtSteps"
+                  :tool-trail="toolTrail"
                   :plans="planNodes"
                   :degraded="degraded"
                   :degraded-reason="degradedReason"

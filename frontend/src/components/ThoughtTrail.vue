@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { PlanEvent, ThoughtStep } from '../types'
+import type { PlanEvent, ThoughtStep, ToolTrailEntry } from '../types'
 import { SOP_ROLES } from '../types'
 
 const props = defineProps<{
   steps: ThoughtStep[]
+  /** Phase 1: think→call→observe 可见化流(reasoning / tool_call / tool_result) */
+  toolTrail: ToolTrailEntry[]
   plans: PlanEvent[]
   degraded: boolean
   /** 降级原因: model_switch=主模型切换 / timeout=模型超时未产出 / pm=已路由产品经理 */
@@ -17,6 +19,31 @@ const props = defineProps<{
   /** §9: 当前 SOP 阶段(由 ChatView 按运行中的子任务/计划预览传入) */
   currentRole?: string
 }>()
+
+const TOOL_ICONS: Record<string, string> = {
+  web_search: '🔍',
+  cos_upload: '📤',
+  fetch_url: '🌐',
+  rag_retrieve: '🧠',
+  image_generate: '🎨',
+  browser_screenshot: '📸',
+  html_validate: '✅',
+  file_io: '📁',
+}
+function iconForTool(name: string): string {
+  return TOOL_ICONS[name] || '🔧'
+}
+// 工具入参展示: 截断长值, 拼成 key=value 一行(过长折叠由 CSS max-height 处理)
+function argsPreview(args: Record<string, any>): string {
+  if (!args || !Object.keys(args).length) return ''
+  const parts = Object.entries(args).map(([k, v]) => {
+    let s = typeof v === 'string' ? v : JSON.stringify(v)
+    if (s.length > 40) s = s.slice(0, 40) + '…'
+    return `${k}: ${s}`
+  })
+  const joined = parts.join('，')
+  return joined.length > 80 ? joined.slice(0, 80) + '…' : joined
+}
 
 // §9: SOP 四角色进度条(高亮当前阶段)
 const sopChain = computed(() =>
@@ -165,6 +192,38 @@ function intentLabel(l: { level1: string; level2: string }): string {
         </div>
       </li>
     </ul>
+
+    <!-- Phase 1: think→call→observe 循环可见化(WorkBuddy 式) -->
+    <div v-if="toolTrail && toolTrail.length" class="tool-trail">
+      <div
+        v-for="(t, i) in toolTrail"
+        :key="'tt-' + i"
+        class="tt-item"
+        :class="t.kind === 'tool' ? (t.status === 'pending' ? 'pending' : (t.ok ? 'ok' : 'fail')) : 'reasoning'"
+      >
+        <template v-if="t.kind === 'reasoning'">
+          <span class="tt-ico">💡</span>
+          <div class="tt-body">
+            <div class="tt-text">{{ t.text }}</div>
+          </div>
+        </template>
+        <template v-else>
+          <span class="tt-ico">{{ iconForTool(t.name) }}</span>
+          <div class="tt-body">
+            <div class="tt-row">
+              <span class="tt-name">{{ t.name }}</span>
+              <span v-if="t.status === 'pending'" class="tt-spin"><i></i><i></i><i></i></span>
+              <span v-else class="tt-badge" :class="t.ok ? 'ok' : 'fail'">{{ t.ok ? '完成' : '失败' }}</span>
+            </div>
+            <div v-if="argsPreview(t.args)" class="tt-args">{{ argsPreview(t.args) }}</div>
+            <details v-if="t.status === 'done' && t.summary" class="tt-result">
+              <summary>{{ t.ok ? '查看结果' : '查看错误信息' }}</summary>
+              <div class="tt-summary" :class="t.ok ? '' : 'err'">{{ t.summary }}</div>
+            </details>
+          </div>
+        </template>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -255,4 +314,47 @@ function intentLabel(l: { level1: string; level2: string }): string {
 .review .pass { color: #16a34a; font-weight: 700; margin-right: 4px; }
 .review .fail { color: #dc2626; font-weight: 700; margin-right: 4px; }
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* Phase 1: think→call→observe 工具调用可见化(WorkBuddy 式) */
+.tool-trail { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.tt-item {
+  display: flex; gap: 8px; align-items: flex-start;
+  background: #f8fafc; border: 1px solid var(--border);
+  border-radius: 10px; padding: 8px 10px;
+  animation: stepIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.tt-item.reasoning { background: #eef2ff; border-color: #c7d2fe; }
+.tt-ico { flex: none; font-size: 15px; line-height: 1.2; margin-top: 1px; }
+.tt-body { flex: 1; min-width: 0; }
+.tt-text { font-size: 12.5px; line-height: 1.6; color: #4338ca; }
+.tt-row { display: flex; align-items: center; gap: 8px; }
+.tt-name {
+  font-size: 12.5px; font-weight: 600; color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.tt-spin { display: inline-flex; gap: 2px; }
+.tt-spin i { width: 3px; height: 3px; border-radius: 50%; background: var(--brand); opacity: 0.4; animation: typingDot 1.2s infinite; }
+.tt-spin i:nth-child(2) { animation-delay: 0.2s; }
+.tt-spin i:nth-child(3) { animation-delay: 0.4s; }
+.tt-badge {
+  font-size: 11px; font-weight: 600; border-radius: 999px; padding: 1px 8px;
+}
+.tt-badge.ok { background: #dcfce7; color: #16a34a; }
+.tt-badge.fail { background: #fee2e2; color: #dc2626; }
+.tt-args {
+  font-size: 11.5px; color: var(--muted); margin-top: 3px; line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.tt-result { margin-top: 4px; }
+.tt-result summary {
+  font-size: 11.5px; color: var(--brand); cursor: pointer; user-select: none;
+  width: fit-content;
+}
+.tt-result summary:hover { text-decoration: underline; }
+.tt-summary {
+  font-size: 12px; color: #334155; margin-top: 4px; line-height: 1.5;
+  background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
+  white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow: auto;
+}
+.tt-summary.err { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
 </style>

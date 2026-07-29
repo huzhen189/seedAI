@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, Optional
 
 from ..events import ev
 from ..registry import SkillRegistry
+from ..tools import get_tool_bus
 
 
 logger = logging.getLogger("ai_service.runner")
@@ -82,6 +83,7 @@ async def run_skill(
     trace_id: Optional[str] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
     intent_info: Optional[dict] = None,
+    sub_task_id: Optional[str] = None,
     **extra_kwargs,  # 透传: requirement_doc, project_status, conversation_summary 等
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """统一入口:意图 → 分发 → Skill 执行 → done。
@@ -107,6 +109,30 @@ async def run_skill(
         len(messages),
     )
     yield ev("node", stage="enter_router", agent_id=skill_name)
+
+    # ── Phase 1: 注册工具事件总线 sink(trace 级), 让 skill 内部工具调用透出为 SSE ──
+    # 用 deque + lock 承接子线程(sync to_thread)产出的帧, 主循环每轮 drain 一次,
+    # 不依赖生成器 yield(工具可能在 asyncio.to_thread 内同步 emit)。
+    from collections import deque as _Deque
+    import threading as _th
+    _ambient: "deque" = _Deque()
+    _amb_lock = _th.Lock()
+    # scope_id: 每次 run_skill 调用唯一(单意图=0; 多意图子任务=子任务编号哈希), 用线程栈隔离
+    # 并发子任务的工具事件, 避免串味。
+    _scope_id = abs(hash((trace_id, sub_task_id or "0", _ambient))) % (10 ** 9)
+
+    def _sink(evt):
+        # 子任务/sub_task_id 隔离: 给每帧打 sub_task_id(单意图为 None, 前端归到主气泡)。
+        with _amb_lock:
+            if sub_task_id:
+                evt.setdefault("data", {})
+                if isinstance(evt.get("data"), dict) and "sub_task_id" not in evt["data"]:
+                    evt["data"]["sub_task_id"] = sub_task_id
+            _ambient.append(evt)
+
+    _bus = get_tool_bus()
+    if trace_id:
+        _bus.enter(trace_id, _scope_id, _sink)
 
     # 意图信息透传给前端(两级 + 行业)
     if intent_info:
@@ -193,6 +219,13 @@ async def run_skill(
                 industry=industry,
                 **extra_kwargs, **rag_kw,
             ):
+                # Phase 1: 每轮 drain 工具事件总线(子线程 sync 工具产出的 tool_call/tool_result/reasoning)
+                while True:
+                    with _amb_lock:
+                        if not _ambient:
+                            break
+                        amb = _ambient.popleft()
+                    yield amb
                 event_cnt += 1
                 if isinstance(item, dict) and "event" in item:
                     if item.get("event") == "token":
@@ -206,6 +239,13 @@ async def run_skill(
         else:
             logger.info("[Runner] [2/3] 开始执行 skill=%s (同步)", entry.name)
             result = await handler(model_id=model_id, messages=messages, trace_id=trace_id, **rag_kw)
+            # 同步分支也可能经 to_thread 跑 sync 工具 → drain 一次
+            while True:
+                with _amb_lock:
+                    if not _ambient:
+                        break
+                    amb = _ambient.popleft()
+                yield amb
             event_cnt += 1
             if isinstance(result, dict) and "event" in result:
                 yield result
@@ -244,4 +284,13 @@ async def run_skill(
             await record_role_dispatch(role, skill_name, status, elapsed)
     except Exception as _re:  # noqa: BLE001
         logger.debug("[Runner] 角色统计记录失败(忽略): %s", _re)
+    # Phase 1: 兜底 drain 残余工具事件 + 注销作用域(避免泄漏/串味)
+    while True:
+        with _amb_lock:
+            if not _ambient:
+                break
+            amb = _ambient.popleft()
+        yield amb
+    if trace_id:
+        _bus.exit(trace_id, _scope_id)
     yield ev("done")

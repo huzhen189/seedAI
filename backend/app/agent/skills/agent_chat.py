@@ -85,8 +85,20 @@ async def explain_skill(
             break
     if user_query:
         try:
+            from ..tools import emit_reasoning, emit_tool_call, emit_tool_result
             from ..tools.web_search import web_search
+            # Phase 1: 显式透出"思考 + 工具调用"(WorkBuddy 式可见循环)
+            if trace_id:
+                emit_reasoning(trace_id, "检测到实时信息需求, 正在联网搜索最新资料…")
+                tc_id = emit_tool_call(trace_id, "web_search", {"query": user_query[:60], "top_k": 3})
             search_res = await web_search(user_query, top_k=3)
+            if trace_id:
+                ok = bool(search_res.get("ok"))
+                summary = (
+                    f"返回 {len(search_res.get('results') or [])} 条结果"
+                    if ok else f"搜索失败: {str(search_res.get('error', ''))[:80]}"
+                )
+                emit_tool_result(trace_id, tc_id, "web_search", ok, summary)
             if search_res.get("ok") and search_res.get("results"):
                 safe = _sanitize_search(search_res["results"])
                 if safe:

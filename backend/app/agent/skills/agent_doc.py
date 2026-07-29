@@ -99,6 +99,7 @@ def _upload_doc_to_cos(
     与站点产物一致的版本化 key: previews/{user_id}/{project_id}/v{version}/{doc_name}。
     """
     try:
+        from ..tools import emit_tool_call, emit_tool_result
         from ..tools.cos_upload import cos_upload
 
         ver_seg = f"v{version}" if version else (trace_id or "doc")
@@ -110,7 +111,13 @@ def _upload_doc_to_cos(
             tf.write(full_md)
             tmp_path = tf.name
         try:
+            if trace_id:
+                tc_id = emit_tool_call(trace_id, "cos_upload", {"key": cos_key})
             res = cos_upload(tmp_path, cos_key)
+            if trace_id:
+                ok = bool(res.get("ok"))
+                emit_tool_result(trace_id, tc_id, "cos_upload", ok,
+                                 res.get("url") and "已上传预览" or f"上传失败: {str(res.get('error',''))[:80]}")
         finally:
             try:
                 os.remove(tmp_path)

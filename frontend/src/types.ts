@@ -111,6 +111,44 @@ export interface ThoughtStep {
   comment?: string
 }
 
+/** Phase 1(WorkBuddy 式 think→call→observe):工具调用 / 结果 / 思考的前端视图模型。
+ *  与 backend/app/agent/tools/__init__.py 的 emit_* 形状对齐。 */
+export type ToolTrailEntry =
+  | { kind: 'reasoning'; text: string; sub_task_id?: string }
+  | {
+      kind: 'tool'
+      call_id: string
+      name: string
+      /** 工具入参(已截断展示用) */
+      args: Record<string, any>
+      status: 'pending' | 'done'
+      ok?: boolean
+      /** 结果摘要(默认折叠) */
+      summary?: string
+      sub_task_id?: string
+    }
+
+/** reasoning 事件(非流式思考/计划/意图)。 */
+export interface ReasoningEvent {
+  text?: string
+  sub_task_id?: string
+}
+/** tool_call 事件(工具调用开始)。 */
+export interface ToolCallEvent {
+  tool_call_id?: string
+  name?: string
+  args?: Record<string, any> | null
+  sub_task_id?: string
+}
+/** tool_result 事件(工具调用结果)。 */
+export interface ToolResultEvent {
+  tool_call_id?: string
+  name?: string
+  ok?: boolean
+  summary?: string
+  sub_task_id?: string
+}
+
 /** 用户角色(RBAC 三级)。 */
 export type Role = 'user' | 'admin' | 'super_admin'
 export const ROLE_LABELS: Record<Role, string> = {
