@@ -173,7 +173,7 @@ class ArtifactRepo(BaseRepo[Artifact]):
     async def upsert_by_trace(
         self, db: AsyncSession, trace_id: str, *, project_id: int,
         conversation_id: int, title: str, repo: str, files: dict,
-        preview_url: str,
+        preview_url: str = "", preview_path: str | None = None,
     ) -> Artifact:
         """幂等 upsert Artifact(重连/续传/重试防重复落库 → 根治'一口气生成多条')。
 
@@ -188,6 +188,7 @@ class ArtifactRepo(BaseRepo[Artifact]):
             existing.files = files
             existing.preview_url = preview_url
             existing.download_url = preview_url
+            existing.preview_path = preview_path
             existing.title = title
             existing.name = _name
             existing.status = "done"
@@ -204,6 +205,7 @@ class ArtifactRepo(BaseRepo[Artifact]):
             files=files,
             preview_url=preview_url,
             download_url=preview_url,
+            preview_path=preview_path,
             status="done",
         )
         db.add(art)

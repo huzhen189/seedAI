@@ -14,7 +14,6 @@ from __future__ import annotations
 import inspect
 import json
 import logging
-import os
 import time
 import re
 from collections.abc import AsyncGenerator
@@ -287,30 +286,24 @@ async def _review(model_id: str, html: str) -> Dict:
 
 def _deliver(html: str, trace_id: str, user_id: int | None = None,
              project_id: int | None = None, version: int | None = None) -> Optional[str]:
-    """落盘本地产物并上传 COS,返回预览直链(失败返回 None,不阻断主流程)。
+    """P1 改造: 本地优先落盘, 返回相对 ARTIFACT_DIR 的预览路径(不生成时传 COS)。
 
-    COS key 版本化: previews/{user_id}/{project_id}/v{version}/index.html,
-    使每次生成/调整在云存储留痕、不被覆盖(旧版仍可按 artifact 行点选)。
+    - 本地布局: {ARTIFACT_DIR}/{uid}/{pid}/v{ver}/index.html(单文件站点);
+    - 返回相对路径如 `3/5/v2/index.html`, 供 proxy 落库 path + 前端拼 `${origin}/artifacts/{path}`;
+    - COS 上传推迟到 P4 发布接口, 此阶段只存本地。
     """
     try:
-        from ..tools.cos_upload import cos_upload
+        from shared.artifacts import rel_path_for, site_dir as _site_dir
 
-        art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
-        site_dir = art_dir / "anon" / (trace_id or "site")
-        site_dir.mkdir(parents=True, exist_ok=True)
-        idx = site_dir / "index.html"
+        base = _site_dir(user_id, project_id, version)
+        base.mkdir(parents=True, exist_ok=True)
+        idx = base / "index.html"
         idx.write_text(html, encoding="utf-8")
-        # 版本段: 优先用业务下发的语义版本号, 否则降级用 trace_id 保证唯一
-        ver_seg = f"v{version}" if version else (trace_id or "site")
-        uid = user_id if user_id is not None else "anon"
-        pid = project_id if project_id is not None else "anon"
-        cos_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/{uid}/{pid}/{ver_seg}/index.html"
-        res = cos_upload(str(idx), cos_key)
-        if res.get("ok"):
-            return res.get("url")
+        rel = rel_path_for(user_id, project_id, version, "index.html")
+        GEN_LOG.info("[deliver] 本地落盘 trace=%s path=%s", trace_id, rel)
+        return rel
     except Exception:
-        pass
-    return None
+        return None
 
 
 # 评分维度中文标签(用于生成结果汇总文案)
@@ -320,7 +313,7 @@ _SCORE_LABELS = {
 }
 
 
-def _build_generation_summary(plan: dict, review: dict | None, url: str | None,
+def _build_generation_summary(plan: dict, review: dict | None, path: str | None,
                                version: int | None, project_id: int | None,
                                intent: str | None) -> str:
     """组装本次生成的文字汇总(Markdown), 以 '文字 + 文件' 形式随 refined 事件返回前端气泡。"""
@@ -364,9 +357,8 @@ def _build_generation_summary(plan: dict, review: dict | None, url: str | None,
     if comment:
         lines.append(f"\n> 评审备注：{comment}")
     lines.append("\n**交付与查看**")
-    if url:
-        lines.append(f"- 在线预览：{url}")
-    lines.append("- 右侧预览面板可查看/下载；下载文件为本次生成版本（历史版本可按 `vN` 切换）")
+    lines.append("- 右侧预览面板可实时查看/下载；本地预览已就绪（点「部署发布」后可获公开分享直链）")
+    lines.append("- 下载文件为本次生成版本（历史版本可按 `vN` 切换，每次生成自动留存）")
     lines.append("\n如需调整（配色 / 文案 / 某个模块 / 增删页面等），告诉我具体方向，我马上改。")
     return "\n".join(lines)
 
@@ -587,12 +579,12 @@ async def generate_stream(
         # 收尾
         yield ev("review", data=review)   # 评审结果(7维+needs_review), 供后置 QC 按需复核
         yield ev("node", stage="previewing")
-        url = _deliver(html, trace_id, user_id, project_id, version)
-        yield ev("preview", url=url, fallback="srcdoc" if not url else None)
+        path = _deliver(html, trace_id, user_id, project_id, version)
+        yield ev("preview", path=path)
         with suppress(Exception):
             await asyncio.to_thread(save_memory, trace_id or "site", plan.get("title", "建站"), html[:1500], plan.get("steps", []))
         # 文字汇总: 让后端在返回文件的同时, 以文字形式给出本次生成结果说明(前端气泡展示)
-        yield ev("refined", data=_build_generation_summary(plan, review, url, version, project_id, intent))
+        yield ev("refined", data=_build_generation_summary(plan, review, path, version, project_id, intent))
         yield ev("node", stage="done")
         return
 
@@ -749,12 +741,12 @@ async def generate_stream(
                 yield ev("degraded", model=mid, requested=model_id)
             html = _extract_html("".join(html_parts))
 
-        # 4) 预览投递(COS 直链,§10)
+        # 4) 预览投递(P1 本地路径,§10)
         yield ev("review", data=review)   # 评审结果(7维+needs_review), 供后置 QC 按需复核
         yield ev("node", stage="previewing")
-        url = _deliver(html, trace_id, user_id, project_id, version)
-        GEN_LOG.info("[gen] 预览投递 trace=%s url=%s", trace_id, url or "无(srcdoc 兜底)")
-        yield ev("preview", url=url, fallback="srcdoc" if not url else None)
+        path = _deliver(html, trace_id, user_id, project_id, version)
+        GEN_LOG.info("[gen] 预览投递 trace=%s path=%s", trace_id, path or "无")
+        yield ev("preview", path=path)
 
         # ②-a 记忆闭环:生成成功后回写 memory 集合(供未来检索增强)
         with suppress(Exception):

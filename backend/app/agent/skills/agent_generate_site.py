@@ -101,7 +101,10 @@ SYS_CODER = (
     "<!-- FILE: style.css -->\n/* CSS 内容 */\n"
     "<!-- FILE: script.js -->\n// JS 内容\n"
     "主入口 HTML 必须命名为 index.html; CSS/JS 文件按实际用途命名(如 style.css / main.js 等)。"
-    "如果内容较少可全内联在 HTML 中(此时仅输出 index.html 一个文件)。"
+    "如果内容较少可全内联在 HTML 中(此时仅输出 index.html 一个文件)。\n"
+    "【多页面站点】若需求含多个页面(如 首页/产品/关于我们/联系我们),请为每个页面生成独立 HTML 文件,"
+    "英文 slug 命名(如 index.html、products.html、about.html、contact.html),文件间通过统一顶部导航相互链接,"
+    "并保持相同的设计语言与 CSS/JS 引用;首页必须命名为 index.html。文件树会列出全部页面,用户可在右侧面板切换预览。"
     "不要输出 markdown 代码块围栏(```)、不要输出多余解释。\n\n"
     "【高级视觉与交互硬标准——必须满足】\n"
     "1. 视觉质感: 使用玻璃拟态(glassmorphism)、柔和分层阴影、渐变光晕/微噪点质感、克制留白;"
@@ -347,53 +350,45 @@ def _parse_multi_files(raw: str) -> dict[str, str]:
 
 async def _deliver(html: str, trace_id: str, user_id: int | None = None,
               project_id: int | None = None, version: int | None = None) -> AsyncGenerator[Dict, None]:
-    """落盘本地产物并上传 COS,逐文件 yield 上传进度事件,末帧 yield 汇总直链。
+    """P1 改造: 本地优先落盘(不生成时传 COS),逐文件 yield 落盘进度,末帧 yield 相对路径字典。
 
     事件协议(供 proxy / 前端 exec-head 消费):
-      ev("cos_upload", filename=..., index=..., total=..., url=...)        # 单文件上传完成
-      ev("progress", pct=N, stage="cos_upload", file=...)                  # 上传中(预留进度)
-      ev("deliver_done", data={"files": {fname: url}})                     # 全部完成
+      ev("disk_save", filename=..., index=..., total=..., path=...)        # 单文件落盘完成
+      ev("progress", pct=N, stage="disk_save", file=...)                   # 落盘中(预留进度)
+      ev("deliver_done", data={"files": {fname: rel_path}})                # 全部完成
 
-    COS key 版本化: previews/{user_id}/{project_id}/v{version}/{filename},
-    使每次生成/调整在云存储留痕、不被覆盖(旧版仍可按 artifact 行点选)。
+    本地布局: {ARTIFACT_DIR}/{uid}/{pid}/v{ver}/{fname} —— 与 nginx /artifacts/ 静态直出对齐。
+    COS 上传推迟到「部署发布」(独立 P4 的 POST /api/deploy), 此阶段只存本地路径。
+    相对路径(相对 ARTIFACT_DIR)同时供:
+      - proxy 落库 Artifact.files[fname].path;
+      - 前端拼 `${location.origin}/artifacts/{path}` 同源预览(零超长内容下发)。
     """
-    from ..tools.cos_upload import cos_upload
+    from shared.artifacts import site_dir as _site_dir, to_rel_path, rel_path_for
 
     files = _parse_multi_files(html)
-    # 优先按本地落盘生成预览(即便 COS 不可用, 前端也可 iframe 内联 srcdoc 兜底)
-    art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
-    ver_seg = f"v{version}" if version else (trace_id or "site")
-    uid = user_id if user_id is not None else "anon"
-    pid = project_id if project_id is not None else "anon"
-    base_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/{uid}/{pid}/{ver_seg}"
+    base = _site_dir(user_id, project_id, version)
+    base.mkdir(parents=True, exist_ok=True)
 
     total = len(files)
-    result_urls: dict[str, str] = {}
+    result_paths: dict[str, str] = {}
     idx = 0
     for fname, content in files.items():
         idx += 1
-        # 本地落盘(始终进行, 供 srcdoc 兜底 & 后续修改读取上一版)
-        site_dir = art_dir / "anon" / (trace_id or "site") / fname.replace('/', '_')
-        site_dir.parent.mkdir(parents=True, exist_ok=True)
-        site_dir.write_text(content, encoding="utf-8")
-        # 进度帧: 开始上传该文件
-        yield ev("progress", pct=int((idx - 1) / max(total, 1) * 100), stage="cos_upload", file=fname)
-        # 上传 COS(失败不阻断: 降级用本地内容预览)
-        try:
-            cos_key = f"{base_key}/{fname}"
-            res = cos_upload(str(site_dir), cos_key)
-            if res.get("ok") and res.get("url"):
-                result_urls[fname] = res["url"]
-                yield ev("cos_upload", filename=fname, index=idx, total=total, url=res["url"])
-            else:
-                GEN_LOG.warning("[deliver] COS 投递未返回 URL trace=%s file=%s cos_key=%s res=%s",
-                                trace_id, fname, cos_key, res)
-        except Exception as e:
-            GEN_LOG.warning("[deliver] COS 上传异常(降级本地预览) trace=%s file=%s: %s", trace_id, fname, e)
-        # 进度帧: 该文件完成
-        yield ev("progress", pct=int(idx / max(total, 1) * 100), stage="cos_upload", file=fname)
+        safe = fname.replace('/', '_')
+        # 本地落盘(始终进行): {uid}/{pid}/v{ver}/{fname}
+        dst = base / safe
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(content, encoding="utf-8")
+        rel = rel_path_for(user_id, project_id, version, safe)
+        result_paths[fname] = rel
+        # 进度帧: 落盘完成(仍兼容前端原有的 disk_save 渲染)
+        yield ev("progress", pct=int(idx / max(total, 1) * 100), stage="disk_save", file=fname)
+        yield ev("disk_save", filename=fname, index=idx, total=total, path=rel,
+                 url=f"/artifacts/{to_rel_path(dst)}")
 
-    yield ev("deliver_done", data={"files": result_urls})
+    GEN_LOG.info("[deliver] 本地落盘完成 trace=%s ver=%s files=%d dir=%s",
+                 trace_id, version, len(result_paths), str(base))
+    yield ev("deliver_done", data={"files": result_paths})
 
 
 # 评分维度中文标签(用于生成结果汇总文案)
@@ -403,7 +398,7 @@ _SCORE_LABELS = {
 }
 
 
-def _build_generation_summary(plan: dict, review: dict | None, url: str | None,
+def _build_generation_summary(plan: dict, review: dict | None, path: str | None,
                                version: int | None, project_id: int | None,
                                intent: str | None) -> str:
     """组装本次生成的文字汇总(Markdown), 以 '文字 + 文件' 形式随 refined 事件返回前端气泡。"""
@@ -447,9 +442,8 @@ def _build_generation_summary(plan: dict, review: dict | None, url: str | None,
     if comment:
         lines.append(f"\n> 评审备注：{comment}")
     lines.append("\n**交付与查看**")
-    if url:
-        lines.append(f"- 在线预览：{url}")
-    lines.append("- 右侧预览面板可查看/下载；下载文件为本次生成版本（历史版本可按 `vN` 切换）")
+    lines.append("- 右侧预览面板可实时查看/下载；本地预览已就绪（点「部署发布」后可获公开分享直链）")
+    lines.append("- 下载文件为本次生成版本（历史版本可按 `vN` 切换，每次生成自动留存）")
     lines.append("\n如需调整（配色 / 文案 / 某个模块 / 增删页面等），告诉我具体方向，我马上改。")
     return "\n".join(lines)
 
@@ -696,20 +690,19 @@ async def generate_stream(
         # 收尾
         yield ev("review", data=review)   # 评审结果(7维+needs_review), 供后置 QC 按需复核
         yield ev("node", stage="previewing")
-        urls: dict[str, str] = {}
+        paths: dict[str, str] = {}
         async for _d in _deliver(html, trace_id, user_id, project_id, version):
             if _d.get("event") == "deliver_done":
-                urls = (_d.get("data") or {}).get("files", {}) or {}
+                paths = (_d.get("data") or {}).get("files", {}) or {}
             else:
-                yield _d  # 透传 cos_upload / progress 给前端进度条
-        main_url = urls.get('index.html', '')
-        _index_content = _parse_multi_files(html).get('index.html', '')
-        yield ev("preview", url=main_url, fallback="srcdoc" if not main_url else None,
-                 files=urls, content=_index_content if not main_url else None)
+                yield _d  # 透传 disk_save / progress 给前端进度条
+        main_path = paths.get('index.html', '')
+        # P1: 本地预览走 path(前端拼 ${origin}/artifacts/{path}), 不再下发 srcdoc 兜底内容。
+        yield ev("preview", path=main_path, files=paths)
         with suppress(Exception):
             await asyncio.to_thread(save_memory, trace_id or "site", plan.get("title", "建站"), html[:1500], plan.get("steps", []))
         # 文字汇总: 让后端在返回文件的同时, 以文字形式给出本次生成结果说明(前端气泡展示)
-        yield ev("refined", data=_build_generation_summary(plan, review, main_url, version, project_id, intent))
+        yield ev("refined", data=_build_generation_summary(plan, review, main_path, version, project_id, intent))
         yield ev("node", stage="done")
         return
 
@@ -865,20 +858,18 @@ async def generate_stream(
                 yield ev("degraded", model=mid, requested=model_id)
             html = _extract_html("".join(html_parts))
 
-        # 4) 预览投递(COS 直链,§10)
+        # 4) 预览投递(P1 本地路径,§10)
         yield ev("node", stage="previewing")
-        urls = {}
+        paths = {}
         async for _d in _deliver(html, trace_id, user_id, project_id, version):
             if _d.get("event") == "deliver_done":
-                urls = (_d.get("data") or {}).get("files", {}) or {}
+                paths = (_d.get("data") or {}).get("files", {}) or {}
             else:
-                yield _d  # 透传 cos_upload / progress 给前端进度条
-        main_url = urls.get('index.html', '')
-        # E(#488): COS 不可用时用本地落盘的 HTML 兜底预览(前端 RightPanel 可 iframe srcdoc 直接渲染)
-        _index_content = _parse_multi_files(html).get('index.html', '')
-        GEN_LOG.info("[gen] 预览投递 trace=%s files=%d url=%s", trace_id, len(urls), main_url or "无(srcdoc 兜底)")
-        yield ev("preview", url=main_url, fallback="srcdoc" if not main_url else None,
-                 files=urls, content=_index_content if not main_url else None)
+                yield _d  # 透传 disk_save / progress 给前端进度条
+        main_path = paths.get('index.html', '')
+        # P1: 本地预览走 path(前端拼 ${origin}/artifacts/{path}), 不再下发 srcdoc 兜底内容。
+        GEN_LOG.info("[gen] 预览投递 trace=%s files=%d path=%s", trace_id, len(paths), main_path or "无")
+        yield ev("preview", path=main_path, files=paths)
 
         # ②-a 记忆闭环:生成成功后回写 memory 集合(供未来检索增强)
         with suppress(Exception):
@@ -891,7 +882,7 @@ async def generate_stream(
             )
 
         # 文字汇总: 让后端在返回文件的同时, 以文字形式给出本次生成结果说明(前端气泡展示)
-        yield ev("refined", data=_build_generation_summary(plan, review, main_url, version, project_id, intent))
+        yield ev("refined", data=_build_generation_summary(plan, review, main_path, version, project_id, intent))
 
         yield ev("node", stage="done")
         GEN_LOG.info("[gen] 完成 trace=%s html=%schars", trace_id, len(html))

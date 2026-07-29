@@ -317,7 +317,10 @@ export interface Artifact {
   title?: string
   trace_id?: string
   repo?: string        // site | code | image | doc
-  files?: Record<string, { name: string; size: number; url?: string }>
+  // P1: 文件元数据只存本地相对路径(path, 相对 ARTIFACT_DIR), 不再内联内容/直链。
+  // 前端据 `${location.origin}/artifacts/${path}` 同源拉取预览(nginx 静态直出)。
+  // url 仅在发布(P4)回填 COS 直链后才有意义; path 始终是本地预览依据。
+  files?: Record<string, { name: string; size: number; path?: string; url?: string; content?: string }>
   preview_url?: string
   download_url?: string
   status?: string      // uploading | done | failed

@@ -7,6 +7,7 @@
   2. FLUSHDB 清空 Redis
   3. 清空 Chroma **运行数据**集合(用户/项目运行时数据), **保留配置/知识类集合**(规则/意图/组件库等)
   3.5 清空项目内全部 *.log 日志文件(运行日志, 重置时不保留), 含 logs/ 下的运行时观测 jsonl(如 intent_observations.jsonl)
+  3.6 清空本地产物目录 artifacts/(P1 本地优先: 站点文件落本地而非库内, 重置需一并清掉, 避免陈旧版本串台)
   4. 重建表 + 补齐缺失列
   5. 自动创建默认超管用户: huzhen / huzhen189 / 超级管理员
   6. 提示重启两个后端服务
@@ -157,6 +158,29 @@ async def reset() -> None:
         print(f"  >> 已清空 {_log_deleted} 个日志文件(*.log + logs/ 下 *.jsonl)")
     except Exception as e:
         print(f"  >> 日志清理失败(可忽略): {e}")
+
+    # 2.8) 清空本地产物目录 artifacts/(P1 本地优先落盘, 重置需一并清理)。
+    #      用 settings.artifact_dir(同运行期绝对路径), 仅删除其内容(各 {uid}/{pid}/{vN} 子目录),
+    #      保留根目录本身(以及 .gitkeep 等), 避免路径不存在导致运行期 mkdir 失败。
+    try:
+        from shared.artifacts import get_artifact_dir
+
+        _art_root = get_artifact_dir()
+        _art_cleared = 0
+        if _art_root.exists():
+            for _child in _art_root.iterdir():
+                try:
+                    if _child.is_dir():
+                        import shutil
+                        shutil.rmtree(_child)
+                    else:
+                        _child.unlink()
+                    _art_cleared += 1
+                except Exception:
+                    pass
+        print(f"  >> 已清空本地产物目录 artifacts/ (根={_art_root}, 清理 {_art_cleared} 项)")
+    except Exception as e:
+        print(f"  >> 产物目录清理失败(可忽略): {e}")
 
     # 3) 重建表
     from app.models import Base  # noqa: E402

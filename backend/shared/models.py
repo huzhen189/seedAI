@@ -164,7 +164,10 @@ class Artifact(Base):
     repo: Mapped[str | None] = mapped_column(String(32), default="site")
     preview_url: Mapped[str | None] = mapped_column(String(512))
     download_url: Mapped[str | None] = mapped_column(String(512))
-    files: Mapped[dict | None] = mapped_column(JSON)  # dict{name -> {name, size, url/content}}
+    # P1: 本地产物相对 ARTIFACT_DIR 的预览路径(本地优先; 发布后回填 preview_url 走 COS 直链)。
+    #     为 null 表示历史数据(走兼容), 新链路始终写入(前端拼 `${origin}/artifacts/{preview_path}`)。
+    preview_path: Mapped[str | None] = mapped_column(String(512))
+    files: Mapped[dict | None] = mapped_column(JSON)  # dict{name -> {name, size, path/url/content}}
     status: Mapped[str | None] = mapped_column(String(32), default="done")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 

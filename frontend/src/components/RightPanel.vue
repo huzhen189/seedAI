@@ -4,12 +4,19 @@ import type { Artifact } from '../types'
 import MarkdownView from './MarkdownView.vue'
 
 const props = defineProps<{
-  artifacts: Artifact[]          // 生成的文件(COS/本地)
+  artifacts: Artifact[]          // 生成的文件(本地 path / 发布后 COS url)
   generating: boolean
-  previewUrl: string | null       // COS直链
   projectId: number | null
   requirementDoc: Record<string, any> | null  // 需求文档
 }>()
+
+// P1: 本地产物路径(相对 ARTIFACT_DIR) → 同源可访问 URL(nginx /artifacts/ 静态直出)。
+// 发布(P4)回填 COS 直链后, url 优先取直链。
+function artifactPreviewUrl(path: string | undefined, directUrl: string | undefined): string {
+  if (directUrl) return directUrl
+  if (path) return `${location.origin}/artifacts/${path.replace(/^\/+/, '')}`
+  return ''
+}
 
 const emit = defineEmits<{ refresh: [] }>()
 
@@ -194,7 +201,7 @@ function downloadCurrentFile() {
 
 // 所有产物文件展平为统一列表(带 artifactId + 版本序号, 用于精确点选历史版本)
 const allFiles = computed(() => {
-  const list: { name: string; size: number; url: string; content?: string; artifact: Artifact; artifactId: number; version: number }[] = []
+  const list: { name: string; size: number; url: string; content?: string; path?: string; artifact: Artifact; artifactId: number; version: number }[] = []
   props.artifacts.forEach((a, idx) => {
     if (!a.files) return
     const version = idx + 1
@@ -202,10 +209,13 @@ const allFiles = computed(() => {
       ? (a.files as any[]).map((f: any, i: number) => [f.name || `v${i + 1}`, f])
       : Object.entries(a.files)
     entries.forEach(([name, info]) => {
+      const p = (info as any).path as string | undefined
+      const u = (info as any).url as string | undefined
       list.push({
         name: (info as any).name || name,
         size: (info as any).size || 0,
-        url: (info as any).url || '',
+        path: p,
+        url: artifactPreviewUrl(p, u),
         content: (info as any).content || '',
         artifact: a,
         artifactId: a.id,
@@ -392,7 +402,7 @@ defineExpose({ selectFile, reset })
 
         <!-- 内容体: 根据 currentView 切换预览/源码 -->
         <template v-if="currentView === 'preview'">
-          <!-- HTML 预览: 有 COS 直链用 src(纯净), 无直链才用内联 content(srcdoc)。二选一, 绝不混传 -->
+          <!-- HTML 预览: 优先本地产物同源直出(src=origin/artifacts/{path});无 path 时(老数据)才退回内联 content(srcdoc) -->
           <iframe
             v-if="currentFileIsHTML && currentFile.url"
             class="pv-frame"
@@ -407,11 +417,11 @@ defineExpose({ selectFile, reset })
             sandbox="allow-scripts allow-forms"
             title="preview"
           ></iframe>
-          <!-- Markdown 预览 -->
+          <!-- Markdown 预览(优先内联 content, 否则按 url 拉取本地产物) -->
           <div v-else-if="currentFileIsMD" class="pv-md-body">
             <MarkdownView :content="mdContent" />
           </div>
-          <!-- 图片预览 -->
+          <!-- 图片预览(同源 path 直出) -->
           <div v-else-if="currentFileIsImage" class="pv-body pv-image">
             <img :src="currentFile.url" :alt="currentFile.name" />
           </div>

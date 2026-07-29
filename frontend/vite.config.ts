@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import dns from 'node:dns'
+import fs from 'node:fs'
+import path from 'node:path'
 
 // 强制 Node.js DNS 解析优先返回 IPv4。否则 localhost 可能被解析为 ::1,
 // 代理连接 uvicorn(仅监听 IPv4 0.0.0.0)时触发 ECONNREFUSED ::1:7101。
@@ -23,6 +25,47 @@ export default defineConfig({
     // Vite 5.4+ 默认拦截非 localhost 的 Host 头(防 DNS 重绑定),
     // 本地 dev 用自定义域名访问需关闭该检查(仅本地开发,生产走 nginx 不受影响)。
     allowedHosts: true,
+    // P1: 本地产物静态直出。nginx 已配 /artifacts/ alias, 但若用户直连 vite(:7100) 而非
+    // 经 nginx 域名访问, 需在 dev 中间件补一份静态服务, 保证预览同源可加载。
+    // 生产由 nginx 处理, 此中间件仅 dev 生效(server.middlewareMode=false 时即为 dev)。
+    setupMiddlewares(middlewares, devServer) {
+      middlewares.use('/artifacts', (req, res, next) => {
+        try {
+          const rel = decodeURIComponent((req.url || '').split('?')[0].replace(/^\/+/, ''))
+          // 防目录穿越: 仅允许相对 ARTIFACT_DIR 内部路径
+          const safe = path.normalize(rel).replace(/^(\.\.(\/|\\|$))+/, '')
+          const root = path.resolve(__dirname, '..', 'artifacts')
+          const target = path.resolve(root, safe)
+          if (!target.startsWith(root) || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
+            res.statusCode = 404
+            res.end('Not found')
+            return
+          }
+          const ext = path.extname(target).toLowerCase()
+          const mime: Record<string, string> = {
+            '.html': 'text/html; charset=utf-8',
+            '.css': 'text/css; charset=utf-8',
+            '.js': 'text/javascript; charset=utf-8',
+            '.json': 'application/json; charset=utf-8',
+            '.svg': 'image/svg+xml',
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp',
+            '.md': 'text/markdown; charset=utf-8',
+            '.txt': 'text/plain; charset=utf-8',
+          }
+          res.setHeader('Content-Type', mime[ext] || 'application/octet-stream')
+          res.setHeader('Cache-Control', 'public, max-age=3600')
+          fs.createReadStream(target).pipe(res)
+        } catch {
+          res.statusCode = 500
+          res.end('Error')
+        }
+      })
+      return middlewares
+    },
     proxy: {
       '/api': {
         // 默认指向业务服务(7101);使用 127.0.0.1 而非 localhost,避免 Node.js DNS

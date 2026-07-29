@@ -71,16 +71,21 @@ async def _persist_qc_score(trace_id: str, model_id: str | None,
         logger.warning("[Worker] QC 落库失败(跳过, 不影响主链路) trace=%s: %s", trace_id, e)
 
 
-async def _commit_after_done(trace_id: str, skill_name: str, user_text: str) -> None:
+async def _commit_after_done(trace_id: str, skill_name: str, user_text: str,
+                            uid: int | None = None, pid: int | None = None,
+                            version: int | None = None) -> None:
     """§8: 每轮生成(up to done)完成后,把站点目录就地提交为一次 git 版本。
 
     仅对产出站点/代码的 skill 提交(generate_site / write_code / orchestrator),
     explain 等纯文本 skill 不生成站点,跳过。
+    P1: 仓库根 = {ARTIFACT_DIR}/{uid}/{pid},新版本打 tag v{version}。
     失败仅告警(版本控制故障不能阻断主链路,与 QC 同策略)。
     """
     if skill_name in ("agent_build", "agent_generate_site", "orchestrator"):
         try:
-            await asyncio.to_thread(commit_site_for_trace, trace_id, skill_name, user_text)
+            await asyncio.to_thread(
+                commit_site_for_trace, trace_id, skill_name, user_text, uid, pid, version
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("[Worker] §8 git 提交失败(跳过) trace=%s: %s", trace_id, e)
 
@@ -118,13 +123,10 @@ async def _qc_fix_loop(
     from ..skills.agent_review import agent_review_handler
     from ..tools.cos_upload import cos_upload
     from ..skills.agent_generate_site import _parse_multi_files
+    from shared.artifacts import site_dir as _site_dir, cos_key_for
 
-    art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
-    ver_seg = f"v{version}" if version else (trace_id or "site")
-    uid = user_id if user_id is not None else "anon"
-    pid = project_id if project_id is not None else "anon"
-    base_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/{uid}/{pid}/{ver_seg}"
-    site_root = art_dir / "anon" / (trace_id or "site")
+    # P1: 本地改写目录 = {ARTIFACT_DIR}/{uid}/{pid}/v{ver}(与 generate_site 同树)
+    site_root = _site_dir(user_id, project_id, version)
 
     current = qc_assistant_text
     final_result: Optional[dict] = None
@@ -159,9 +161,9 @@ async def _qc_fix_loop(
                     fpath.parent.mkdir(parents=True, exist_ok=True)
                     fpath.write_text(content, encoding="utf-8")
                     try:
-                        cos_upload(str(fpath), f"{base_key}/{fname}")
+                        cos_upload(str(fpath), cos_key_for(user_id, project_id, version, fname))
                     except Exception as ce:  # noqa: BLE001
-                        logger.debug("[质量闭环] COS 重传失败(忽略) %s: %s", f"{base_key}/{fname}", ce)
+                        logger.debug("[质量闭环] COS 重传失败(忽略) %s: %s", cos_key_for(user_id, project_id, version, fname), ce)
             except Exception as we:  # noqa: BLE001
                 logger.warning("[质量闭环] 写盘失败(忽略本轮) trace=%s: %s", trace_id, we)
             fix_applied = True
@@ -283,8 +285,10 @@ async def _index_project_code(trace_id: str, project_id: int | None, skill_name:
         import re
         from pathlib import Path
         from ..knowledge.chroma import upsert_project_code
-        art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
-        site_dir = art_dir / "anon" / (trace_id or "site")
+        from shared.artifacts import site_dir as _site_dir
+        # P1: 索引最新版本目录 {ARTIFACT_DIR}/{uid}/{pid}/v{ver}(避免历史版本重复入 Chroma)
+        site_dir = _site_dir(project_id if project_id is not None else user_id,
+                             project_id, version)
         if not site_dir.exists():
             return
         for f in site_dir.rglob("*"):
@@ -1268,7 +1272,7 @@ async def worker_loop(concurrency: int = 1):
                         if done_event is not None:
                             await q.publish(trace_id, done_event)
                         logger.info("[Worker] [6/6] 编排执行完毕 trace=%s 共%d事件", trace_id, event_cnt)
-                        await _commit_after_done(trace_id, "orchestrator", user_text)
+                        await _commit_after_done(trace_id, "orchestrator", user_text, user_id, project_id, version)
                         continue
 
                 # 5) 正常路由 / fallback / 已确认 / 已选项 → 直接执行
@@ -1543,7 +1547,7 @@ async def worker_loop(concurrency: int = 1):
                 except Exception as _gse:  # noqa: BLE001
                     logger.debug("[Worker] gen_stage 统计失败(忽略): %s", _gse)
                 try:
-                    await _commit_after_done(trace_id, skill_name, qc_user_text)
+                    await _commit_after_done(trace_id, skill_name, qc_user_text, user_id, project_id, version)
                 except Exception:
                     pass  # chat类skill无qc_user_text,跳过
             except Exception as e:

@@ -1,5 +1,10 @@
 """§8: 基于 Git 的站点版本控制 + COS(本地优先, COS 优雅降级)。
 
+P1 改造: 仓库粒度从 `anon/<trace>` 改为 `artifacts/{uid}/{pid}`(一个站点一仓)。
+  - 多版本同仓, `git tag v{ver}` 为每次生成快照; 回滚 `git checkout vN` 一步到位;
+  - 落盘目录 = 仓库根(同树),generate_site._deliver 已写 `{uid}/{pid}/v{ver}/{fname}`;
+  - commit 消息含 skill + 用户诉求; tag 名沿用语义版本号 v{ver}(与 Artifact.version 对齐)。
+
 设计要点(已与用户逐项确认):
   1. 每轮 agent turn 自动 commit —— 历史最细,精确到每次小改;
   2. 允许实验分支 exp/<name> —— create_branch / checkout 支持自由探索;
@@ -7,14 +12,7 @@
   4. 开启 LFS —— 大二进制(图片/字体)走 git-lfs,本地若无 lfs CLI 则降级为普通文件;
   5. 本地工作树全按需从 COS 恢复 —— restore_from_cos 拉 bundle 后克隆回本地。
 
-框架选型: subprocess + git CLI + asyncio.to_thread。
-  - git 是 IO 密集型,to_thread 不阻塞事件循环(与 P0-1 的 langchain offload 同思路);
-  - 不引入 GitPython(部署多一个 C 依赖),git CLI 普遍自带,本地/容器一致;
-  - 所有外部调用(cwd=repo)经 _run 统一封装,失败返回结构化结果,绝不抛未捕获异常。
-
-工作树位置: 复用 generate_site 的落盘目录 `ARTIFACT_DIR/anon/<trace_id>`,
-即"仓库根 = 站点目录"。这样无需拷贝,每轮生成完就地 commit,回滚也是原地 checkout。
-(若后期改为 `data/sites/<pid>/` 布局,只需改 _repo_path 一处。)
+框架选型: subprocess + git CLI + asyncio.to_thread(不阻塞事件循环)。
 """
 
 from __future__ import annotations
@@ -27,20 +25,18 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from ..config import settings
+from shared.artifacts import repo_path as _repo_path_shared, get_artifact_dir
 
 
 logger = logging.getLogger("ai_service.git_site")
 
-# 默认 artifact 目录(与 generate_site._deliver / cos_upload 配置同源)
-ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
-# 版本仓库统一根(与生成物同树,但按 trace 隔离)
-GIT_ROOT = ARTIFACT_DIR / "anon"
+# 默认 artifact 目录(与 generate_site._deliver 同源)
+ARTIFACT_DIR = get_artifact_dir()
 
 
-def _repo_path(trace_id: str) -> Path:
-    """站点目录即 git 仓库根(anon/<trace_id>)。"""
-    return GIT_ROOT / (trace_id or "site")
+def _repo_path(uid: int | None, pid: int | None) -> Path:
+    """站点 git 仓库根 = {ARTIFACT_DIR}/{uid}/{pid}(一个站点一仓, P1 改造)。"""
+    return _repo_path_shared(uid, pid)
 
 
 def _run(repo: Path, *args: str) -> dict:
@@ -275,24 +271,34 @@ def restore_from_cos(cos_key: str, dest: Optional[Path] = None) -> dict:
         return {"ok": False, "skipped": False, "err": f"{type(e).__name__}: {e}"}
 
 
-def commit_site_for_trace(trace_id: str, skill_name: str, user_prompt: str = "") -> dict:
+def commit_site_for_trace(trace_id: str, skill_name: str, user_prompt: str = "",
+                           uid: int | None = None, pid: int | None = None,
+                           version: int | None = None) -> dict:
     """Worker 在每轮生成完成后调用的便捷入口(同步,由 asyncio.to_thread 包裹)。
 
-    - 站点目录 = 仓库根;
+    P1: 仓库根 = {ARTIFACT_DIR}/{uid}/{pid}(一个站点一仓); 新版本 commit 后打 `git tag v{version}` 快照。
     - commit message 含 skill 与用户诉求截断,便于回看"这次改了啥";
     - 完成后顺带 bundle 上传 COS(失败仅告警,不阻断)。
     """
-    repo = _repo_path(trace_id)
+    repo = _repo_path(uid, pid)
     if not repo.exists():
         return {"committed": False, "sha": None, "err": f"站点目录尚不存在: {repo}"}
     prompt_snip = (user_prompt or "").replace("\n", " ").strip()[:80]
     msg = f"{skill_name}: {prompt_snip}" if prompt_snip else f"{skill_name}: auto-commit"
     c = commit(repo, msg)
     if c.get("committed"):
-        logger.info("[git_site] trace=%s 已提交 %s (%s)", trace_id, c.get("sha", "")[:8], skill_name)
+        logger.info("[git_site] uid=%s pid=%s 已提交 %s (%s)", uid, pid, c.get("sha", "")[:8], skill_name)
+        # P1: 新版本 commit 后打 tag v{version} 固定快照(语义版本, 与 Artifact.version 对齐)
+        if version is not None:
+            _tag = f"v{version}"
+            t = _run(repo, "tag", "-f", _tag)
+            if t["ok"]:
+                logger.info("[git_site] 打标签 %s (uid=%s pid=%s)", _tag, uid, pid)
+            else:
+                logger.warning("[git_site] 打标签 %s 失败(忽略): %s", _tag, t.get("err"))
         # 发布态: 把 bundle 推 COS(优雅跳过)
         bundle_to_cos(repo)
     else:
         # 无变更 / 失败: 仅记录,不报错
-        logger.debug("[git_site] trace=%s commit 跳过: %s", trace_id, c.get("err") or c.get("reason"))
+        logger.debug("[git_site] uid=%s pid=%s commit 跳过: %s", uid, pid, c.get("err") or c.get("reason"))
     return c

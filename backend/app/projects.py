@@ -551,15 +551,30 @@ async def retry_upload(
     results = []
     art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
     for art in artifacts:
-        if not art.trace_id:
+        # P1: 优先按 preview_path 定位本地产物(相对 ARTIFACT_DIR), 兼容旧 anon/<trace> 布局
+        if art.preview_path:
+            idx = art_dir / art.preview_path
+        elif art.trace_id:
+            idx = art_dir / "anon" / art.trace_id / "index.html"
+        else:
+            results.append({"id": art.id, "ok": False, "error": "无可用本地路径"})
             continue
-        idx = art_dir / "anon" / art.trace_id / "index.html"
         if not idx.exists():
             results.append({"id": art.id, "ok": False, "error": "本地产物文件不存在"})
             continue
         try:
             from ..agent.tools.cos_upload import cos_upload
-            cos_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/anon/{art.trace_id}/index.html"
+            from shared.artifacts import cos_key_for, to_rel_path
+            # COS key 与本地相对路径同规则(previews 前缀), 发布即直传同 key
+            if art.preview_path:
+                cos_key = "previews/" + art.preview_path
+            elif art.trace_id:
+                cos_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/anon/{art.trace_id}/index.html"
+            else:
+                cos_key = ""
+            if not cos_key:
+                results.append({"id": art.id, "ok": False, "error": "无可用 COS key"})
+                continue
             res = cos_upload(str(idx), cos_key)
             if res.get("ok"):
                 art.preview_url = res["url"]

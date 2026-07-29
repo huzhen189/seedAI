@@ -144,7 +144,18 @@ class Settings(BaseSettings):
     cos_preview_domain: str = "https://seedhtml-1252059540.cos.ap-guangzhou.myqcloud.com"
     cos_base_path: str = "previews"
     cos_ttl_days: int = 0
+    # 本地产物根目录(与 backend 平级; .env 以绝对路径覆盖, 消除 cwd 相对歧义)。
+    # 默认回退为仓库根下的 artifacts/, 避免 .env 缺失时崩; nginx 直接静态托管该目录。
     artifact_dir: str = "./artifacts"
+
+    @model_validator(mode="after")
+    def _abs_artifact_dir(self) -> "Settings":
+        p = Path(self.artifact_dir)
+        if not p.is_absolute():
+            # 相对路径一律按仓库根解析(backend/shared/config.py → 上两级 = repo root)
+            p = (_PROJECT_ROOT / self.artifact_dir).resolve()
+        self.artifact_dir = str(p)
+        return self
 
     # ---- 检索 / 搜索 ----
     tavily_api_key: str = ""

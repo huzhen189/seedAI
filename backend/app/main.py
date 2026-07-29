@@ -222,7 +222,11 @@ async def cancel(req: Request):
 
 @app.post("/retry-upload")
 async def retry_upload(req: Request):
-    """业务端触发: 对本地暂存的产物重新上传 COS, 返回线上 URL。"""
+    """业务端触发: 对本地暂存的产物重新上传 COS, 返回线上 URL。
+
+    P1: 本地路径改用 {uid}/{pid}/v{ver}/index.html(与 generate_site 同树);
+    trace_id 仍作为兼容回退(无 uid/pid/ver 时使用 anon/<trace>)。
+    """
     import os
     from pathlib import Path
 
@@ -231,22 +235,35 @@ async def retry_upload(req: Request):
     except Exception:
         body = {}
     trace_id = body.get("trace_id")
-    if not trace_id:
-        return {"ok": False, "error": "missing trace_id"}
-    art_dir = Path(os.getenv("ARTIFACT_DIR", "./artifacts"))
-    idx = art_dir / "anon" / trace_id / "index.html"
-    if not idx.exists():
-        return {"ok": False, "error": f"本地文件不存在: {idx}"}
+    uid = body.get("user_id")
+    pid = body.get("project_id")
+    ver = body.get("version")
+    from shared.artifacts import site_dir, rel_path_for
+
+    if uid is not None and pid is not None:
+        src = site_dir(uid, pid, ver) / "index.html"
+    elif trace_id:
+        src = Path(os.getenv("ARTIFACT_DIR", "./artifacts")) / "anon" / trace_id / "index.html"
+    else:
+        return {"ok": False, "error": "missing trace_id or (user_id+project_id)"}
+    if not src.exists():
+        return {"ok": False, "error": f"本地文件不存在: {src}"}
     try:
         from .agent.tools.cos_upload import cos_upload
-        cos_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/anon/{trace_id}/index.html"
-        res = cos_upload(str(idx), cos_key)
+        from shared.artifacts import cos_key_for
+
+        # 优先按 {uid}/{pid}/v{ver} 求 COS key; 兼容回退走 anon/<trace>
+        if uid is not None and pid is not None:
+            cos_key = cos_key_for(uid, pid, ver, "index.html")
+        else:
+            cos_key = f"{os.getenv('COS_BASE_PATH', 'previews').strip('/')}/anon/{trace_id}/index.html"
+        res = cos_upload(str(src), cos_key)
         if res.get("ok"):
-            logger.info("[retry-upload] 上传成功 trace=%s url=%s", trace_id, res["url"])
+            logger.info("[retry-upload] 上传成功 %s url=%s", cos_key, res["url"])
             return {"ok": True, "url": res["url"]}
         return {"ok": False, "error": res.get("error", "COS 上传失败")}
     except Exception as e:
-        logger.error("[retry-upload] 异常 trace=%s: %s", trace_id, e)
+        logger.error("[retry-upload] 异常 %s: %s", src, e)
         return {"ok": False, "error": str(e)}
 
 

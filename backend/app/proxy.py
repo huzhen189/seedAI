@@ -550,7 +550,7 @@ async def _persist_worker_result(
 
 async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
                       terminal_status: str, user_text: str, assistant_text: str,
-                      preview_url: str | None = None,
+                      preview_path: str | None = None,
                       files_dict: dict[str, str] | None = None,
                       doc_files: dict[str, dict] | None = None,
                       refined_summary: str = "",
@@ -566,7 +566,7 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
             logger.info("[chat] [8/8] 后台落库 trace=%s attempt=%d", tid, attempt + 1)
             async with _S() as s:
                 await finish_trace(s, tid, terminal_status, max(0, len(assistant_text) // 4))
-                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_url, files_dict, refined_summary, terminal_status, doc_files, deliver_fallback_content)
+                await _persist_conversation(s, user_id, conversation_id, model, user_text, assistant_text, tid, preview_path, files_dict, refined_summary, terminal_status, doc_files, deliver_fallback_content)
                 # 后置 QC 结果落库 MySQL qc_scores(幂等 upsert by trace_id);
                 # 不再写入 Redis 统计(无性能考量), 后台「系统分析」QC 面板改读该表。
                 if qc_result is not None:
@@ -611,7 +611,7 @@ async def _do_persist(user_id: int, conversation_id: int, tid: str, model: str,
             "terminal_status": terminal_status,
             "user_text": user_text,
             "assistant_text": assistant_text,
-            "preview_url": preview_url,
+            "preview_path": preview_path,
             "failed_at": datetime.utcnow().isoformat(),
         })
     except Exception:
@@ -890,11 +890,11 @@ async def chat(
                 return 1
 
         assistant_parts: list[str] = []
-        preview_url: str | None = None  # 捕获预览直链(供分享「复制预览链接」使用)
-        files_dict: dict[str, str] = {}  # 多文件产物: {文件名: COS URL} (v1.2.1+)
+        preview_path: str | None = None  # P1: 捕获本地产物预览路径(相对 ARTIFACT_DIR, 供前端拼 ${origin}/artifacts/{path})
+        files_dict: dict[str, str] = {}  # 多文件产物: {文件名: 相对路径} (P1: 存本地路径, 不再 COS URL)
         doc_files: dict[str, dict] = {}  # 文档产物: {文件名: {name,size,content}} (Fix B #483, doc 技能)
         refined_text: str = ""  # 文字总结: agent 生成完毕后的自然语言反馈(v1.2.2)
-        deliver_fallback_content: str | None = None  # E(#488): COS 不可用时站点 HTML 兜底内容
+        deliver_fallback_content: str | None = None  # E(#488): COS 不可用时站点 HTML 兜底内容(新链路极少触发)
         qc_result: dict | None = None  # 捕获后置 QC 三裁判聚合结果(供落库 + 前端展示)
         requirement_doc_captured: dict | None = None  # 捕获需求文档(供落库 + 前端重启还原)
         event_seq: int = 0  # 结构化事件序号(供回放重建时间线)
@@ -1015,8 +1015,11 @@ async def chat(
                                                 # v4: 阶段推进 → 实时记录当前 stage 到 user_states
                                                 await touch_user_state(user.id, status="running", current_stage=stage)
                                         if event == "node" and isinstance(payload_obj, dict):
-                                            if payload_obj.get("stage") == "preview" and payload_obj.get("url"):
-                                                preview_url = payload_obj["url"]
+                                            # 兼容旧 node(stage=preview) 形态; 现代 preview 事件已在上方专用分支处理。
+                                            if payload_obj.get("stage") == "preview":
+                                                _np = payload_obj.get("path") or payload_obj.get("url")
+                                                if _np:
+                                                    preview_path = preview_path or _np
                                                 await cache_set(f"site_generated:{conversation_id}", "1", ttl=86400)
                                             # Fix B (#483): doc 技能下发的 Markdown 文件产物 → 供右侧面板预览/下载
                                             # ev() 把 data 关键字参数包成 payload 的嵌套 data 子键:
@@ -1036,10 +1039,13 @@ async def chat(
                                                         _dentry["url"] = _durl
                                                     doc_files[_dname] = _dentry
                                                     logger.info("[chat] 捕获 doc 产物 trace=%s name=%s cos=%s", tid, _dname, bool(_durl))
-                                        if event == "preview" and isinstance(payload_obj, dict) and payload_obj.get("url"):
-                                            preview_url = payload_obj["url"]
+                                        if event == "preview" and isinstance(payload_obj, dict):
+                                            # P1: preview 事件带 path(相对 ARTIFACT_DIR) 与主文件相对路径
+                                            _pp = payload_obj.get("path")
+                                            if _pp:
+                                                preview_path = _pp
                                             await cache_set(f"site_generated:{conversation_id}", "1", ttl=86400)
-                                            # 多文件: 捕获 AI 产出的完整文件列表(v1.2.1+)
+                                            # 多文件: 捕获 AI 产出的完整文件列表(v1.2.1+, P1 改为相对路径)
                                             if isinstance(payload_obj.get("files"), dict):
                                                 files_dict = payload_obj["files"]
                                             # 注: 不再捕获 preview 的 HTML content 作为兜底推送(用户不关心生成中的文件内容, 也不下发)
@@ -1060,14 +1066,14 @@ async def chat(
                                         await touch_user_state(user.id, status="unsupported")
                                         await record_unsupported(user.id, user_text)
                                         await record_intent_decision("unsupported")
-                                    elif event in ("cos_upload", "progress") and isinstance(payload_obj, dict):
-                                        # B(#488): COS 上传进度事件透传给前端 exec-head 进度条渲染
-                                        # (progress.pct 实时反映上传中 NN%)
+                                    elif event in ("disk_save", "progress") and isinstance(payload_obj, dict):
+                                        # P1: 本地落盘进度事件透传给前端 exec-head 进度条渲染
+                                        # (progress.pct 实时反映落盘中 NN%)；disk_save 含 path 便于前端预热
                                         event_seq += 1
-                                        if event == "cos_upload" and isinstance(payload_obj.get("url"), str) and payload_obj["url"]:
-                                            preview_url = preview_url or payload_obj.get("url")
+                                        if event == "disk_save" and isinstance(payload_obj.get("path"), str) and payload_obj["path"]:
+                                            preview_path = preview_path or payload_obj.get("path")
                                         logger.info(
-                                            "[chat] ◇ COS事件 trace=%s event=%s file=%s pct=%s",
+                                            "[chat] ◇ 落盘事件 trace=%s event=%s file=%s pct=%s",
                                             tid, event, payload_obj.get("file") or payload_obj.get("filename"),
                                             payload_obj.get("pct"),
                                         )
@@ -1252,9 +1258,9 @@ async def chat(
             assistant_full_text = "".join(assistant_parts)
             approx_tokens = max(0, len(assistant_full_text) // 4)
             logger.info(
-                "[chat] [7/8] 流结束 trace=%s 状态=%s events=%d tokens≈%d preview=%s output=%d字符",
+                "[chat] [7/8] 流结束 trace=%s 状态=%s events=%d tokens≈%d preview_path=%s output=%d字符",
                 tid, terminal_status, sum(event_counts.values()),
-                approx_tokens, bool(preview_url), len(assistant_full_text),
+                approx_tokens, bool(preview_path), len(assistant_full_text),
             )
             # 不再打印完整响应内容(量大), 仅记录字符数已在上方流结束日志中体现
             # 事件分布
@@ -1276,7 +1282,7 @@ async def chat(
                     terminal_status=terminal_status,
                     user_text=user_text,
                     assistant_text=assistant_full_text,
-                    preview_url=preview_url,
+                    preview_path=preview_path,
                     files_dict=files_dict,
                     doc_files=doc_files,
                     refined_summary=refined_text,
@@ -1597,18 +1603,23 @@ async def _persist_conversation(
     user_text: str,
     assistant_text: str,
     trace_id: str,
-    preview_url: str | None = None,
+    preview_path: str | None = None,
     files_dict: dict[str, str] | None = None,
     refined_summary: str = "",
     terminal_status: str = "done",
     doc_files: dict[str, dict] | None = None,
     deliver_fallback_content: str | None = None,
 ) -> None:
-    """SSE 结束后落库。build 类消息走 Artifact+结构化 JSON, chat 类存纯文本。"""
+    """SSE 结束后落库。build 类消息走 Artifact+结构化 JSON, chat 类存纯文本。
+
+    P1: 建站产物只存**本地相对路径**(预览_path)不内联文件体(DB 零超长内容,根治 1406 类隐患);
+    前端据 `${origin}/artifacts/{preview_path}` 同源拉取预览,nginx 静态直出。
+    发布(P4)后再回填 preview_url(COS 直链)并置 deployed。
+    """
     # 归一化: 拆解 {"data":"x"}{"data":"y"}... → "xy..." (兜底防 AI 服务旧格式)
     assistant_text = _normalize_assistant_text(assistant_text)
-    logger.info("[chat] _persist 调用 trace=%s conv=%s uid=%s user_text=%.50s alen=%s preview=%s",
-                trace_id, conversation_id, user_id, user_text, len(assistant_text), bool(preview_url))
+    logger.info("[chat] _persist 调用 trace=%s conv=%s uid=%s user_text=%.50s alen=%s preview_path=%s",
+                trace_id, conversation_id, user_id, user_text, len(assistant_text), bool(preview_path))
     conv = await conv_repo.get_by(db, id=conversation_id, user_id=user_id)
     if conv is None:
         logger.warning("[chat] 落库失败: 会话不存在 conv=%s user=%s", conversation_id, user_id)
@@ -1637,63 +1648,48 @@ async def _persist_conversation(
     if is_html:
         # ---- 建站/代码生成: 幂等 upsert Artifact(同一 trace 重连/续传/重试只 1 条) ----
         repo = "site"
-        # 多文件产物: 以文件名做 key 存为对象(前端 Object.entries 直接拿文件名, 不是数组下标)
+        # P1: 多文件产物存**本地相对路径**(不内联内容)。files_dict 已是 {fname: rel_path}。
         if files_dict:
-            art_files = {fname: {"name": fname, "size": 0, "url": url} for fname, url in files_dict.items()}
-            # E(#488): 个别文件无 COS 直链时, 用本地兜底内容填 content, 保证右侧预览面板可渲染
-            if deliver_fallback_content and "index.html" in art_files and not art_files["index.html"].get("url"):
-                art_files["index.html"]["content"] = deliver_fallback_content
+            art_files = {fname: {"name": fname, "size": 0, "path": p} for fname, p in files_dict.items()}
         else:
-            # E(#488): 无多文件 dict 时, 优先用本地兜底 HTML 内容(如 COS 不可用的单文件站点),
-            # 否则从 assistant_text 抽取 HTML(COS 不可用时整条 assistant 内容即为站点 HTML)。
-            if deliver_fallback_content:
-                clean_html = deliver_fallback_content
-            else:
-                clean_html = _extract_clean_html(assistant_text)
-            art_files = {"index.html": {"name": "index.html", "size": len(clean_html.encode("utf-8")), "content": clean_html}}
+            # 无多文件 dict(少见): 用主文件预览路径兜底(单文件站点)。
+            art_files = {"index.html": {"name": "index.html", "size": 0, "path": preview_path or ""}}
         art = await artifact_repo.upsert_by_trace(
             db, trace_id,
             project_id=conv.project_id or 0,
             conversation_id=conv.id,
             title=conv.name or (user_text or "")[:20],
             repo=repo,
-            files=art_files,  # dict{name → {name, size, url/content}}
-            preview_url=preview_url or "",
+            files=art_files,  # dict{name → {name, size, path}}
+            preview_url="",    # P1: 未发布不写 COS 直链; 发布(P4)回填
+            preview_path=preview_path or None,
         )
         # A(#485): 气泡只渲染「文字总结 + 右侧 artifact-summary-card」, 去掉冗余 site-card。
-        # 这里把建站/代码产物落库为 type=plain(正文=refined 文字总结), 文件仍落 Artifact(repo="site")
-        # 供右侧预览面板展示; 气泡因此不再是一个空壳 site-card + 重复文案。
-        # A(#485): 气泡只渲染「文字总结 + 右侧 artifact-summary-card」, 去掉冗余 site-card。
-        # ⚠️ 关键: bubbles.content 是 MySQL TEXT(≤64KB), 绝不可内联整站 HTML(会溢出报错)。
-        # 文件「内容」只存在 artifacts.files[name].content(JSON 列, 无 64KB 上限), 供右侧面板渲染;
-        # 气泡这里只带文件「元信息」(name/url/size), 不内联 content。
+        # ⚠️ 关键: bubbles.content 只带文件元信息(name/path/size), 绝不内联整站 HTML(根治 1406)。
         _bubble_files = {}
         if isinstance(art.files, dict):
             for _fname, _fmeta in art.files.items():
                 if isinstance(_fmeta, dict):
                     _bubble_files[_fname] = {
                         "name": _fmeta.get("name", _fname),
-                        "url": _fmeta.get("url") or "",
+                        "path": _fmeta.get("path") or "",
                         "size": _fmeta.get("size", 0),
                     }
                 else:
-                    _bubble_files[_fname] = {"name": _fname, "url": "", "size": 0}
+                    _bubble_files[_fname] = {"name": _fname, "path": "", "size": 0}
         content_obj = {
             "type": "plain",
             "text": refined_summary or "✅ 网站已生成，可在右侧预览面板查看 / 下载。",
             "artifact_id": art.id,
             "title": art.title or "",
-            "preview_url": preview_url or "",
-            "download_url": preview_url or "",
+            "preview_path": preview_path or "",
+            "deployed": False,           # P1: 是否已发布到 COS(发布后 True, 切公开直链)
             "files": _bubble_files,
             "summary": refined_summary,  # v1.2.2: 文字总结持久化
         }
         await message_repo.upsert_assistant(db, conv.id, trace_id, json.dumps(content_obj, ensure_ascii=False), model)
-        if preview_url:
-            proj = await db.get(Project, conv.project_id)
-            if proj is not None:
-                proj.preview_url = preview_url
-        logger.info("[chat] Artifact 幂等落库 id=%s trace=%s repo=%s preview=%s", art.id, trace_id, repo, preview_url or "(无)")
+        # P1: 不再回填 Project.preview_url(本地路径非公开); 发布(P4)后才写。
+        logger.info("[chat] Artifact 幂等落库 id=%s trace=%s repo=%s preview_path=%s", art.id, trace_id, repo, preview_path or "(无)")
     else:
         # ---- 闲聊/文档: 纯文本 ----
         # #551: 失败兜底 —— 若 LLM 未产出 token(assistant_text 为空), 但 emit_llm_failure 已产出
