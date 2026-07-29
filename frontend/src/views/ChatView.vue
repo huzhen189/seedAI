@@ -1945,6 +1945,11 @@ watch(
         pendingSend.value = false
         send()
       }
+    } else {
+      // 软登出: 关闭进行中的 SSE,避免带着旧身份继续流;清空会话/消息态
+      esRef.value?.close()
+      esRef.value = null
+      convStore.reset?.()
     }
   },
 )
