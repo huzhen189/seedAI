@@ -7,6 +7,8 @@ const props = defineProps<{
   steps: ThoughtStep[]
   plans: PlanEvent[]
   degraded: boolean
+  /** 降级原因: model_switch=主模型切换 / timeout=模型超时未产出 / pm=已路由产品经理 */
+  degradedReason?: 'model_switch' | 'timeout' | 'pm' | null
   current: string
   /** 意图识别结果(两级) */
   intent: { level1: string; level2: string }
@@ -29,9 +31,11 @@ const INTENT_COLORS: Record<string, string> = {
 
 const STAGE_LABELS: Record<string, string> = {
   received: '系统已收到你的需求',
+  intent_recognized: '已识别意图',
   enter_router: '意图路由 — 识别你的需求类型',
   dispatch: '技能调度 — 加载 AI 能力',
   analyzing: '系统正在分析你的需求',
+  pm_summon: '系统分析到您缺少开发方向，已自动为您召唤产品经理进行分析',
   orchestration: '系统正在对你的需求进行拆分',
   enter_planner: '需求规划 — 拆解任务/制定步骤',
   enter_coder: '代码生成 — 编写构建代码',
@@ -45,10 +49,11 @@ const STAGE_LABELS: Record<string, string> = {
 // 每个阶段配一个 emoji 图标, 让时间线更直观(对应 ChatView 推送的 stage 名)
 const STEP_ICONS: Record<string, string> = {
   received: '✅',
-  intent_recognized: '🧠',
+  intent_recognized: '🧭',
   enter_router: '🧭',
   dispatch: '⚡',
   analyzing: '🔍',
+  pm_summon: '🧠',
   orchestration: '🧩',
   doc_plan: '📝',
   doc_write: '✍️',
@@ -67,6 +72,17 @@ const STEP_ICONS: Record<string, string> = {
 function iconFor(stage: string): string {
   return STEP_ICONS[stage] || '•'
 }
+
+// 是否路由到产品经理(PM)进行需求澄清/分析: build/requirement 即 PM 路径
+const isPM = computed(() => props.intent?.level1 === 'build' && props.intent?.level2 === 'requirement')
+// 降级提示文案: PM 路径用友好叙事, 其余按真实原因区分
+const degradedText = computed(() => {
+  if (props.degradedReason === 'pm' || (isPM.value && props.degraded)) {
+    return '🧠 系统分析到您缺少开发方向，已自动为您召唤产品经理进行分析'
+  }
+  if (props.degradedReason === 'model_switch') return '⚠ 主模型繁忙，已自动切换备用模型继续生成'
+  return '⚠ 模型响应超时，本次未能生成内容'
+})
 
 function intentLabel(l: { level1: string; level2: string }): string {
   const l1Map: Record<string, string> = {
@@ -100,7 +116,7 @@ function intentLabel(l: { level1: string; level2: string }): string {
     >
       🧠 已识别: {{ intentLabel(intent) }}
     </div>
-    <div v-if="degraded" class="badge warn">⚠ 生成异常，已启用兜底方案</div>
+    <div v-if="degraded" class="badge warn">{{ degradedText }}</div>
 
     <div v-for="(p, i) in plans" :key="'plan-' + i" class="plan-card">
       <div class="plan-head">
@@ -127,7 +143,9 @@ function intentLabel(l: { level1: string; level2: string }): string {
         <div class="step-body">
           <div class="step-label">
             {{ s.label || STAGE_LABELS[s.stage] || s.stage }}
-            <span v-if="s.status === 'active'" class="pulse">进行中</span>
+            <span v-if="s.status === 'active'" class="pulse">
+              进行中<span class="typing"><i></i><i></i><i></i></span>
+            </span>
             <span v-else-if="s.status === 'done' && s.stage !== 'degraded_warn'" class="ok">✓</span>
           </div>
           <pre v-if="s.think" class="think">{{ s.think }}</pre>
@@ -199,8 +217,13 @@ function intentLabel(l: { level1: string; level2: string }): string {
 .plan-steps li { font-size: 13px; line-height: 1.5; color: #334155; }
 
 .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.step { display: flex; gap: 8px; align-items: flex-start; position: relative; }
-.dot { flex: none; width: 9px; height: 9px; margin-top: 4px; border-radius: 50%; background: var(--border); }
+/* 每一步进入时播放入画动画: 新步骤挂载即触发, 形成"一条一条播放"的实时反馈感 */
+.step { display: flex; gap: 8px; align-items: flex-start; position: relative; animation: stepIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
+@keyframes stepIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+.dot { flex: none; width: 9px; height: 9px; margin-top: 4px; border-radius: 50%; background: var(--border); transition: background 0.3s ease; }
 .step-icon { flex: none; font-size: 15px; line-height: 1; margin-top: 1px; }
 .step.active .dot { background: var(--brand); box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.15); }
 .step.done .dot { background: #22c55e; }
@@ -210,7 +233,13 @@ function intentLabel(l: { level1: string; level2: string }): string {
 .step-body { flex: 1; min-width: 0; }
 .step-label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .step.active .step-label { color: var(--brand); }
-.pulse { font-size: 11px; font-weight: 500; color: var(--brand); background: #eef2ff; border-radius: 999px; padding: 1px 8px; animation: blink 1.2s ease-in-out infinite; }
+.pulse { font-size: 11px; font-weight: 500; color: var(--brand); background: #eef2ff; border-radius: 999px; padding: 1px 8px; display: inline-flex; align-items: center; gap: 4px; animation: blink 1.2s ease-in-out infinite; }
+/* 进行中打字指示点 */
+.typing { display: inline-flex; gap: 2px; }
+.typing i { width: 3px; height: 3px; border-radius: 50%; background: var(--brand); opacity: 0.4; animation: typingDot 1.2s infinite; }
+.typing i:nth-child(2) { animation-delay: 0.2s; }
+.typing i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes typingDot { 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
 .ok { color: #22c55e; }
 .think { white-space: pre-wrap; word-break: break-word; background: #f8fafc; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.6; color: #334155; max-height: 200px; overflow: auto; margin: 6px 0 0; }
 .review { font-size: 12px; margin-top: 6px; line-height: 1.5; color: #334155; }

@@ -98,6 +98,7 @@ const sopChain = computed(() =>
 )
 const currentStage = ref('')
 const degraded = ref(false)
+const degradedReason = ref<'model_switch' | 'timeout' | 'pm' | null>(null)
 const requirementDoc = ref<Record<string, any> | null>(null)
 const previewUrl = ref<string | null>(null)
 const errorMsg = ref('')
@@ -1027,6 +1028,7 @@ function resetGenState() {
   planNodes.value = []
   currentStage.value = ''
   degraded.value = false
+  degradedReason.value = null
   previewUrl.value = null
   // 重置「正在生成」文件占位状态
   genFileName.value = ''
@@ -1121,6 +1123,10 @@ const liveThinkText = computed(() => {
 const streamingStageLabel = computed(
   () => labelFor(currentStage.value) || currentStage.value || '思考中',
 )
+// 是否路由到产品经理(PM)进行需求澄清/分析: build/requirement 即 PM 路径
+const isPMIntent = computed(
+  () => currentIntent.value.level1 === 'build' && currentIntent.value.level2 === 'requirement',
+)
 
 // 统一的 SSE 事件回调:把 node/think/plan/token 映射到本地状态。
 function makeCallbacks(assistantIdx: number): ChatCallbacks {
@@ -1212,6 +1218,7 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
     },
     onDegraded: () => {
       degraded.value = true
+      degradedReason.value = 'model_switch'
     },
     onRequirement: (d) => {
       console.log('[SSE] 收到需求文档:', (d.data as any)?.brand?.name)
@@ -1234,10 +1241,12 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       const emptyResult = !hasContent && !hasArtifacts && !hasSub
       if (emptyResult) {
         degraded.value = true
-        // 保留时间线并追加降级警告步, 给出明确可见结论
+        degradedReason.value = isPMIntent.value ? 'pm' : 'timeout'
+        // 保留时间线并给出明确可见结论
         thoughtSteps.value.forEach((s) => { if (s.status === 'active') s.status = 'done' })
-        if (!thoughtSteps.value.some((s) => s.stage === 'degraded_warn')) {
-          thoughtSteps.value.push({ stage: 'degraded_warn', label: '⚠ 模型响应超时，已启用兜底，本次未生成内容', status: 'done', think: '' })
+        // PM 路径: pm_summon 步骤已在 onIntent 实时播报, 不再追加错误式警告
+        if (degradedReason.value !== 'pm' && !thoughtSteps.value.some((s) => s.stage === 'degraded_warn')) {
+          thoughtSteps.value.push({ stage: 'degraded_warn', label: '⚠ 模型响应超时，本次未能生成内容', status: 'done', think: '' })
         }
       } else {
         thoughtSteps.value = []
@@ -1300,6 +1309,10 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       // 在思考时间线顶部插入意图识别步骤(两级显示)
       const lbl = d.level2_label ? `${d.level1_label || ''} → ${d.level2_label}` : (d.label || '')
       if (lbl) upsertStep('intent_recognized', 'done', lbl)
+      // PM 路径(build/requirement): 实时播报"召唤产品经理", 而非错误提示
+      if (isPMIntent.value) {
+        upsertStep('pm_summon', 'done', '🧠 系统分析到您缺少开发方向，已自动为您召唤产品经理进行分析')
+      }
     },
     onOptions: (d: OptionEvent) => {
       // 保底: 确保存在宿主 assistant 气泡, 选项卡内嵌其中(任意时刻气泡可见)
@@ -2152,6 +2165,7 @@ watch(pendingRetry, (r) => {
                   :steps="thoughtSteps"
                   :plans="planNodes"
                   :degraded="degraded"
+                  :degraded-reason="degradedReason"
                   :current="currentStage"
                   :intent="currentIntent"
                   :current-role="sopCurrentRole"
