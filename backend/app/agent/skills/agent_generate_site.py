@@ -844,6 +844,17 @@ async def generate_stream(
         )
         return
 
+    # 直冲路径需求文档(模版/直接建站): 未传入 requirement_doc 时,
+    # 基于本轮需求文本 emit 轻量需求文档, 使右侧「需求文档」面板展示并落库。
+    # 修复: 模版=完整需求文档, 点击应直接出 HTML 而非仅填框; 此前直冲路径不 emit requirement_doc。
+    if requirement_doc is None and req_text.strip():
+        _req_doc = {
+            "brand": {"name": (req_text.splitlines()[0][:40] or "需求文档")},
+            "report": req_text,
+            "raw_llm_output": req_text,
+        }
+        yield ev("requirement_doc", data=_req_doc, agent_id=SKILL_NAME)
+
     # 断点恢复入口(§7): 跳过已完成阶段
     if checkpoint:
         stage = checkpoint.get("stage", "")

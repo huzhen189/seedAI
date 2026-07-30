@@ -470,7 +470,11 @@ async def _classify_segment(
             _MI_SITE_NOUNS = ()
         _site_nouns = ("网站", "官网", "门户网站", "博客", "blog", "主页", "首页", "落地页",
                        "h5", "小程序官网", "站点", "公司官网", "企业官网", "个人网站",
-                       "电商网站", "商城", "平台官网", "官网页面", "web页面") + tuple(_MI_SITE_NOUNS)
+                       "电商网站", "商城", "平台官网", "官网页面", "web页面",
+                       # 个人/作品类站点: 修复「简历/作品集」口吻漏召 build/site(#路由缺口)
+                       # "简历" 同时覆盖「个人简历/简历网站/简历网页」等子串; "网页" 仍按设计排除(留给 build_page/design)
+                       "简历", "作品集", "个人主页", "个人简历", "简历网站", "简历网页",
+                       "个人作品集", "简历页", "portfolio") + tuple(_MI_SITE_NOUNS)
         _has_verb = any(v in current_user_msg for v in _build_verbs)
         _has_noun = any(n in current_user_msg for n in _site_nouns)
         if _has_verb and _has_noun:

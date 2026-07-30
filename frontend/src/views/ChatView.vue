@@ -297,15 +297,9 @@ const SITE_TEMPLATES: { key: string; title: string; icon: string; desc: string; 
 // 选中项目后即可直接对话建站, 不需要模板引导。
 const showTemplates = computed(() => !projectStore.currentProjectId && !input.value.trim())
 function applyTemplate(t: { prompt: string }) {
+  // 模版=完整需求文档: 点击即填充并自动触发生成(不再仅填框等用户发送)
   input.value = t.prompt
-  if (auth.user.value) {
-    // 已登录: 可选直接发送, 这里仅填充并聚焦, 给用户微调空间
-  }
-  // 触发 ChatInput 聚焦(经 v-model 已同步, 再滚动到输入区)
-  nextTick(() => {
-    const el = document.querySelector('.chat-input-area textarea') as HTMLTextAreaElement | null
-    el?.focus()
-  })
+  nextTick(() => send())
 }
 const execElapsedText = computed(() => {
   const s = execElapsed.value
@@ -1419,7 +1413,14 @@ function makeCallbacks(assistantIdx: number): ChatCallbacks {
       const hasArtifacts = projectArtifacts.value.length > 0
       const hasSub = subTasks.value.some((s) => s.status === 'done' && s.result_summary)
       const emptyResult = !hasContent && !hasArtifacts && !hasSub
-      if (emptyResult) {
+      // 🔧 暂停态防御: 后端任何"正常暂停、等待用户输入"的决策都会先发明确的暂停事件
+      //   (clarify / confirm / block / paused) 再补发 done(队列收尾)。这些轮次本来就没有
+      //   正文/产物/子任务, 不应误判为"模型超时"(否则会出现"弹了确认框却同时显示超时"的矛盾 UI)。
+      //   真超时轮次不会携带上述任一暂停态, 仍会正常报超时。
+      const pauseState = !!clarifyData.value || !!pendingConfirm.value || !!blockReason.value || !!v4Pause.value
+      if (pauseState) {
+        thoughtSteps.value.forEach((s) => { if (s.status === 'active') s.status = 'done' })
+      } else if (emptyResult) {
         degraded.value = true
         degradedReason.value = isPMIntent.value ? 'pm' : 'timeout'
         // 保留时间线并给出明确可见结论
