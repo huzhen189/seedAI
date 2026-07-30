@@ -18,7 +18,7 @@ from typing import Dict
 
 from ..events import ev
 from ..intent.common import build_skill_sys
-from ..providers import get_chat_model
+from ..providers import ainvoke_with_fallback
 from ..registry import register_skill
 from ._llm_fallback import emit_llm_failure
 logger = logging.getLogger("ai_service.skills.agent_requirement")
@@ -235,15 +235,15 @@ async def requirement_agent_handler(
 
     t0 = time.time()
     try:
-        chat = get_chat_model(model_id, streaming=False)
-        resp = await asyncio.to_thread(chat.invoke, [{"role": "system", "content": full_sys}, *req_msgs])
+        # 非流式兜底调用: 主模型优先, 失败按 FALLBACK_ORDER 自动降级到下一可用模型
+        raw = await ainvoke_with_fallback(model_id, req_msgs, system=full_sys)
     except Exception as e:
         AGENT_LOG.warning("[需求] [2/4] LLM调用失败/超时: %s", e)
         # 兜底: 既给临时思考提示, 也 yield refined 使道歉文案成为正式落库回复(用户必见, 否则是空气泡)
         async for _ev in emit_llm_failure(model_id, e, "requirement_agent"):
             yield _ev
         return
-    raw = (resp.content or "").strip()
+    raw = (raw or "").strip()
     AGENT_LOG.info("[需求] [2/4] LLM完成 耗时=%.0fms 输出长度=%d", (time.time() - t0) * 1000, len(raw))
 
     # 解析输出

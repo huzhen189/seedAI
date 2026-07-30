@@ -20,6 +20,10 @@ logger = logging.getLogger("ai_service.skills.fallback")
 def llm_failure_reason(err: Exception) -> str:
     """把底层异常映射成用户可读的原因(不泄露内部细节)。"""
     msg = str(err).lower()
+    # 未配 key(服务端 .env 缺 key, langchain 抛 "Missing credentials. Please pass an `api_key`...")
+    # → 这是『配置缺失』, 不是『鉴权失败』(key 失效/错误)。2026-07-30 曾把 qwen 空 key 误判成鉴权失败。
+    if "missing credentials" in msg or "pass an `api_key`" in msg or "api_key` or `admin" in msg:
+        return "模型密钥未配置（服务端缺失 API Key）"
     if "timed out" in msg or "timeout" in msg:
         return "模型响应超时"
     if "429" in msg or "rate" in msg or "quota" in msg or "limit" in msg:

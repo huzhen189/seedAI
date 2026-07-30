@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 
-from ..providers import ModelUnavailableError, get_chat_model, resolve_fallback_order
+from ..providers import ModelUnavailableError, ainvoke_with_fallback
 from ..registry import register_skill
 logger = logging.getLogger("ai_service.skills.agent_chat")
 
@@ -109,19 +109,14 @@ async def explain_skill(
 
     t0 = time.time()
     try:
-        chat = get_chat_model(model_id, streaming=False)
-        resp = await asyncio.to_thread(chat.invoke, [{"role": "system", "content": sys_prompt}, *messages])
-        result = resp.content
+        # 非流式兜底调用: 主模型优先, 失败按 FALLBACK_ORDER 自动降级到下一可用模型
+        result = await ainvoke_with_fallback(model_id, messages, system=sys_prompt)
         elapsed = time.time() - t0
         SKILL_LOG.info("[chat] 回答完成 trace=%s chars=%s 耗时 %.1fs", trace_id, len(result), elapsed)
         return result
-    except Exception as e:
-        order = resolve_fallback_order(model_id)
-        suggested = [m for m in order if m != model_id]
-        SKILL_LOG.warning("[chat] 模型不可用 trace=%s: %s", trace_id, e)
-        raise ModelUnavailableError(
-            failed=model_id, message=f"模型 {model_id} 不可用: {e}", suggested=suggested
-        ) from e
+    except ModelUnavailableError as e:
+        SKILL_LOG.warning("[chat] 全部模型不可用 trace=%s: %s", trace_id, e)
+        raise
 
 
 register_skill(name="agent_chat", display_name="小胡", avatar="🤖", role="智能助手",

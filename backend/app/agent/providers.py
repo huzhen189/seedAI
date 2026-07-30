@@ -204,3 +204,50 @@ async def astream_with_fallback(
         message=f"模型 {primary} 不可用(已尝试降级序 {order})",
         suggested=suggested,
     ) from last_err
+
+
+async def ainvoke_with_fallback(
+    primary: str, messages: list, system: str | None = None
+) -> str:
+    """非流式兜底调用(对标 astream_with_fallback):主模型优先,连接中断重试 1 次,
+    仍失败则按 FALLBACK_ORDER 降级到下一个『已配 key』的模型,全部失败抛 ModelUnavailableError。
+    返回模型输出的文本内容(str)。
+
+    供 agent_chat / agent_requirement 等『一次性拿到完整回答』的场景使用——
+    之前这两个 skill 直接 get_chat_model 单点调用,任一模型抖动就直接道歉返回、不降级
+    (2026-07-30 排查『生成需求文档报模型鉴权失败却不兜底』时发现)。
+    """
+    order = resolve_fallback_order(primary)  # 仅含已配 key 的模型, primary 在前
+    plan: List[tuple[str, bool]] = [(m, m == primary) for m in order]
+    if not plan:  # 理论上不会发生(至少有 1 个模型配了 key);兜底仍尝试 primary 让错误暴露
+        plan = [(primary, True)]
+    last_err: Exception | None = None
+    for mid, is_primary in plan:
+        attempts = 2 if is_primary else 1
+        for attempt in range(attempts):
+            try:
+                logger.info("LLM 非流式调用 model=%s attempt=%d", mid, attempt + 1)
+                chat = get_chat_model(mid, streaming=False)
+                msgs = ([{"role": "system", "content": system}] if system else []) + messages
+                resp = await asyncio.to_thread(chat.invoke, msgs)
+                if not is_primary:
+                    logger.warning("LLM 非流式降级生效: %s 不可用, 改用 %s", primary, mid)
+                return resp.content or ""
+            except (GeneratorExit, ConnectionResetError, ConnectionError) as e:
+                last_err = e
+                if attempt < attempts - 1:
+                    logger.warning("LLM 连接中断, 1s 后重试(%s/%s): %s", attempt + 1, attempts, e)
+                    await asyncio.sleep(1)
+                    continue
+                break
+            except Exception as e:
+                last_err = e
+                if not is_primary:
+                    logger.warning("LLM 降级模型 %s 也失败: %s", mid, e)
+                break
+    suggested = [m for m in order if m != primary and m in PROVIDERS and PROVIDERS[m].api_key]
+    raise ModelUnavailableError(
+        failed=primary,
+        message=f"模型 {primary} 不可用(已尝试降级序 {order})",
+        suggested=suggested,
+    ) from last_err
