@@ -54,10 +54,12 @@ from .rulesmatcher import match_rules
 from .safety import SafetyResult, run_safety
 from .selection import clear_pending_options, resolve_selection
 from .signals import is_delete_signal, is_reset_signal
-from .store import load_slots, reset_slots, save_slots
+from .store import load_sir, reset_sir, save_sir
 from .tools import SkillCandidate, ToolResult, run_tools
 from .vector_store import retrieve_intents
 from .multi_intent import recognize_intents
+from .dst import apply_delta, compute_missing, derive_decision, build_sir_for_shortcut
+from .sir_prompt import _extract_sir_delta
 
 logger = logging.getLogger("ai_service.intent.cascade")
 
@@ -93,9 +95,10 @@ RULE_SYSTEM = (
     "综合判断依据:\n"
     "1) 用户最新输入语义; 2) 已提供的上下文与任务态; 3) 已收集槽位(不要对已知信息再追问);\n"
     "4) 业务规则(如建完整站前需先有需求文档); 5) 可用技能列表。\n\n"
+    "你只负责『选意图 + 给澄清选项/问题』。**不要**抽取或累加槽位(collected_slots / missing_slots 已由"
+    "下游 DST 引擎按 SOM-DST 规则处理, 你产生会导致重复/覆盖错乱)。\n\n"
     "输出严格 JSON(不要多余文字):\n"
     '{"intent_id":"...","confidence":0.0~1.0,"industry":"...",'
-    '"missing_slots":["slot_key",...],"collected_slots":{"slot_key":"value",...},'
     '"questions":["自然语言追问(若缺槽位, 最多2条)"],'
     '"options":[{"label":"候选A","recommended":false}],"multi":false,'
     '"free_text_hint":"可补充其他要求","reason":"简短裁决理由"}\n\n'
@@ -185,10 +188,10 @@ async def _llm_rule(
             conf = float(data.get("confidence", 0.5))
             conf = max(0.0, min(1.0, conf))
             industry = normalize_industry(data.get("industry"))
-            missing = [str(x) for x in (data.get("missing_slots") or []) if x]
-            collected_slots = data.get("collected_slots") or {}
-            if not isinstance(collected_slots, dict):
-                collected_slots = {}
+            # NOTE(DST/SIR 重构): collected_slots / missing_slots 改由下游 DST 引擎
+            # (apply_delta + catalog.required_slots_of) 处理, 此处不再解析(留空)。
+            missing: list = []
+            collected_slots: dict = {}
             questions = [str(x) for x in (data.get("questions") or []) if x][:2]
             # 结构化澄清选项(防御式解析: 最多 3 个, 每个需有非空 label)
             raw_opts = data.get("options") or []
@@ -295,10 +298,17 @@ async def _classify_segment(
     has_requirement_doc: bool = False,
     has_site_artifact: bool = False,
 ) -> PipelineResult:
-    """单意图分类核心(步骤 ①~⑪, 不含多意图拆分)。
+    """单意图分类核心(步骤 ①~⑪, 不含多意图拆分) —— DST/SIR 重构版。
+
+    与旧版差异:
+      - 持久化契约改为 SIR 根(load_sir/save_sir/reset_sir), 不再写扁平 {intent_id,slots}。
+      - LLM 终判路径新增 _extract_sir_delta → apply_delta 形成 new_sir
+        (4 标准操作 + 4 冲突规则, 替代 ad-hoc 的 merged.update() 任意覆盖)。
+      - 缺失/决策改由 compute_missing / derive_decision 推导(用 catalog.required_slots_of)。
+      - 所有捷径分支走 build_sir_for_shortcut 构造确定性 SIR(零额外 LLM)。
 
     供 classify_v3 顶层调用; 也被 multi_intent.split_hybrid 逐段复用(无递归)。
-    阻塞 I/O(save/load_slots, run_safety, observe_record) 统一 asyncio.to_thread 隔离。
+    阻塞 I/O(save/load_sir, run_safety, observe_record) 统一 asyncio.to_thread 隔离。
     """
     t0 = time.time()
     req_id = uuid.uuid4().hex
@@ -319,7 +329,7 @@ async def _classify_segment(
         _chosen, _cands = _sel
         logger.info("[级联] [0] 命中选项选择 → 短路 skill=%s", _chosen)
         clear_pending_options(conversation_id)
-        reset_slots(conversation_id, user_id, project_id)
+        reset_sir(conversation_id, user_id, project_id)  # 清空 SIR(选项选择是全新意图起点)
         await record_intent_classify("route", "selection", (time.time() - t0) * 1000)
         return _emit_route(
             {"level1": "chat", "level2": "casual"}, 1.0, decision="route",
@@ -331,7 +341,7 @@ async def _classify_segment(
     # ── [+0] 删除操作 → 路由到 agent_delete skill ──
     if is_delete_signal(current_user_msg):
         logger.info("[级联][%s] 删除操作 → 路由 agent_delete %s", req_id, current_user_msg[:40])
-        reset_slots(conversation_id, user_id, project_id)
+        reset_sir(conversation_id, user_id, project_id)
         await record_intent_classify("route", "delete", (time.time() - t0) * 1000)
         return _emit_route(
             get_intent(_CHAT_CASUAL) or {"level1": "chat", "level2": "casual"}, 0.98, decision="route",
@@ -343,7 +353,7 @@ async def _classify_segment(
     # ── RESET: 用户显式退出建站/澄清 ──
     if is_reset_signal(current_user_msg):
         logger.info("[级联][%s] RESET 信号 → 闲聊", req_id)
-        reset_slots(conversation_id, user_id, project_id)
+        reset_sir(conversation_id, user_id, project_id)
         await record_intent_classify("route", "reset", (time.time() - t0) * 1000)
         return _emit_route(
             get_intent(_CHAT_CASUAL) or {"level1": "chat", "level2": "casual"}, 0.3,
@@ -376,7 +386,7 @@ async def _classify_segment(
             }
             logger.info("[级联][%s] 上下文闸门命中: 已落站 + 命中修改词(%d) → 直路由 build_modify conf=%.2f",
                         req_id, _hit_mod, _conf)
-            reset_slots(conversation_id, user_id, project_id)
+            reset_sir(conversation_id, user_id, project_id)  # 修改意图不需携带历史建站 DST
             await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                     user_id=user_id, raw_input=current_user_msg,
                                     llm_intent="build/modify", llm_confidence=_conf,
@@ -402,10 +412,12 @@ async def _classify_segment(
     # 修复: 若上一轮处于 PM 模式(路由到 agent_requirement)且当前仍无需求文档/未落站
     # → 维持 PM 继续采集, 不被 [1-β]/novelty/chat 抢占; 显式建站触发语(_BUILD_TRIGGER)
     # 仍放行直冲生成器(由下游 [10] 门控放行)。
-    _prior = await asyncio.to_thread(load_slots, conversation_id, user_id, project_id)
+    # 注意 SIR 重构: 旧的 prior['intent_id'] 现在是 prior['meta']['active_intent'];
+    # 携带历史已采集槽位(build_sir_for_shortcut 透传 prior slots, 保住已 confirmed 信息)。
+    _prior = await asyncio.to_thread(load_sir, conversation_id, user_id, project_id)
     _prior_was_pm = (
-        (_prior.get("intent_id") or "") == "build_requirement"
-        or (_prior.get("selected_skill") or "") == "agent_requirement"
+        (_prior.get("meta", {}).get("active_intent") or "") == "build_requirement"
+        or (_prior.get("meta", {}).get("selected_skill") or "") == "agent_requirement"
     )
     if _prior_was_pm and not has_requirement_doc and not has_site_artifact:
         _is_explicit_build = any(t in current_user_msg for t in _BUILD_TRIGGER)
@@ -416,12 +428,13 @@ async def _classify_segment(
             }
             logger.info("[级联][%s] PM 粘性: 上一轮 PM 且仍无需求文档 → 维持 agent_requirement (msg=%.30s)",
                         req_id, current_user_msg)
-            await asyncio.to_thread(save_slots, conversation_id, {
-                "intent_id": "build_requirement",
-                "slots": _prior.get("slots", {}) or {},
-                "clarify_rounds": int(_prior.get("clarify_rounds", 0) or 0),
-                "confidence": 0.8, "selected_skill": "agent_requirement",
-            }, user_id, project_id)
+            # 确定性 SIR: active_intent=build_requirement, 携带历史已采集槽位
+            await asyncio.to_thread(save_sir, conversation_id,
+                build_sir_for_shortcut("build_requirement", confidence=0.8,
+                                       selected_skill="agent_requirement",
+                                       slots=_prior.get("slots", {}) or {},
+                                       stability="medium"),
+                user_id, project_id)
             await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                     user_id=user_id, raw_input=current_user_msg,
                                     llm_intent="build/requirement", llm_confidence=0.8,
@@ -434,7 +447,7 @@ async def _classify_segment(
                 _pm_intent, 0.8, decision="route",
                 selected_skill="agent_requirement", industry="other",
                 reason="PM 粘性: 维持需求采集(无需求文档)", request_id=req_id,
-                evidence={"pm_sticky": True, "prior_intent": _prior.get("intent_id")},
+                evidence={"pm_sticky": True, "prior_intent": _prior.get("meta", {}).get("active_intent")},
             )
 
     # ── [1-β] 建站意图共现启发式(修复白名单短板: 纯子串匹配无法覆盖
@@ -474,21 +487,23 @@ async def _classify_segment(
                 _reason = "建站共现启发式: 动词+站点名词(无需求文档→先转产品经理采集规格)"
                 logger.info("[级联][%s] 建站共现启发式命中 但无需求 → 转 PM conf=%.2f (verb=%s noun=%s)",
                             req_id, _conf, _has_verb, _has_noun)
+                # 确定性 SIR: 转 PM 模式(active_intent=build_requirement), 供 PM 粘性识别续答
+                await asyncio.to_thread(save_sir, conversation_id,
+                    build_sir_for_shortcut("build_requirement", confidence=_conf,
+                                           selected_skill=_sel_skill, stability="medium"),
+                    user_id, project_id)
             else:
                 _sel_skill = _site_intent["skill"]
                 _conf = 0.92
                 _reason = "建站共现启发式: 动词+站点名词"
                 logger.info("[级联][%s] 建站共现启发式命中 → 直路由 conf=%.2f skill=%s (verb=%s noun=%s)",
                             req_id, _conf, _sel_skill, _has_verb, _has_noun)
-            # 记录 PM 模式(供 PM 粘性 [8.5] 识别续答; 即使走 [1-β] 也持久化,
-            # 否则 prior_intent_id 为空会导致续答漏判)。PM 分支不 reset, 保留标记。
-            await asyncio.to_thread(save_slots, conversation_id, {
-                "intent_id": "build_requirement" if _sel_skill == "agent_requirement" else _site_intent["id"],
-                "slots": {}, "clarify_rounds": 0, "confidence": _conf,
-                "selected_skill": _sel_skill,
-            }, user_id, project_id)
-            if _sel_skill != "agent_requirement":
-                reset_slots(conversation_id, user_id, project_id)
+                # 直冲生成器: 不携带历史 DST, 但保留最小 SIR(active_intent=build_site + 空 slots)
+                # 方案 A: 既跨轮标记意图, 又不带入历史脏槽位(生成器从本轮需求出发)
+                await asyncio.to_thread(save_sir, conversation_id,
+                    build_sir_for_shortcut("build_site", confidence=_conf,
+                                           selected_skill=_sel_skill, stability="stable"),
+                    user_id, project_id)
             await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                     user_id=user_id, raw_input=current_user_msg,
                                     llm_intent="build/site", llm_confidence=_conf,
@@ -523,10 +538,11 @@ async def _classify_segment(
     if strong_rule and candidates and top_intent_id == strong_rule.intent_id and top_score >= SUPER_FAST:
         intent = candidates[0]["intent"]
         logger.info("[级联] super-fast 直通: 规则=%s 向量top1=%.2f → 跳过LLM", strong_rule.rule_id, top_score)
-        await asyncio.to_thread(save_slots, conversation_id, {
-            "intent_id": intent["id"], "slots": {}, "clarify_rounds": 0,
-            "confidence": strong_rule.confidence,
-        }, user_id, project_id)
+        # 确定性 SIR(super-fast 直路由, 视为高精, 无需追问)
+        await asyncio.to_thread(save_sir, conversation_id,
+            build_sir_for_shortcut(intent["id"], confidence=strong_rule.confidence,
+                                   stability="high"),
+            user_id, project_id)
         await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                 user_id=user_id, raw_input=current_user_msg,
                                 llm_intent=f"{intent['level1']}/{intent['level2']}",
@@ -556,7 +572,15 @@ async def _classify_segment(
         if intent:
             logger.info("[级联] 强规则直路由: 规则=%s → intent=%s/%s (跳过向量/LLM 终判)",
                         strong_rule.rule_id, intent["level1"], intent["level2"])
-            reset_slots(conversation_id, user_id, project_id)
+            # 方案 A: build/site 直路由不清空 SIR, 存最小 SIR(active_intent + 空 slots);
+            #         其他意图仍 reset(保持「切换意图清空旧 DST」原语义)
+            if intent.get("level1") == "build" and intent.get("level2") == "site":
+                await asyncio.to_thread(save_sir, conversation_id,
+                    build_sir_for_shortcut(intent["id"], confidence=strong_rule.confidence,
+                                           selected_skill=intent.get("skill"), stability="high"),
+                    user_id, project_id)
+            else:
+                reset_sir(conversation_id, user_id, project_id)
             await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                     user_id=user_id, raw_input=current_user_msg,
                                     llm_intent=f"{intent['level1']}/{intent['level2']}",
@@ -586,7 +610,7 @@ async def _classify_segment(
         logger.warning("[级联] run_safety 异常: %s", e)
     if safety_result.risk_level == "critical":
         logger.warning("[级联][%s] 安全检查→拦截 reason=%s risk=%s", req_id, safety_result.block_reason, safety_result.risk_level)
-        reset_slots(conversation_id, user_id, project_id)
+        reset_sir(conversation_id, user_id, project_id)
         await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                 user_id=user_id, raw_input=current_user_msg, llm_intent="chat/casual",
                                 llm_confidence=0.0, rules_triggered=["critical_safety"],
@@ -603,20 +627,24 @@ async def _classify_segment(
         )
 
     # ── [9] LLM 有界终判 ──
-    prior = await asyncio.to_thread(load_slots, conversation_id, user_id, project_id)
-    prior_intent_id = prior.get("intent_id", "") or ""
-    prior_collected = prior.get("slots", {}) or {}
+    prior = await asyncio.to_thread(load_sir, conversation_id, user_id, project_id)
+    prior_intent_id = prior.get("meta", {}).get("active_intent", "") or ""
+    prior_slots = prior.get("slots", {}) or {}
 
+    # 候选 active_intent 先验: LLM 终判选出的 intent(或向量 top1)
+    _cand_intent_id = (candidates[0]["intent_id"] if candidates
+                       else prior_intent_id or _CHAT_CASUAL)
 
-    # ── [7→9] 新奇度兜底(R3 修复: 必须放在 load_slots 之后,
+    # ── [7→9] 新奇度兜底(R3 修复: 必须放在 load_sir 之后,
     #    否则跨轮 memory/prior slots 尚未加载就被闲聊短路, 丢失上下文):
     #    无规则命中 且 向量全低 → 闲聊 ──
     if not rule_hits and top_score < NOVELTY:
         logger.info("[级联] 新奇度兜底: top_score=%.2f < %.2f → 闲聊", top_score, NOVELTY)
         chat_intent = get_intent(_CHAT_CASUAL) or {"level1": "chat", "level2": "casual", "skill": "agent_chat"}
-        await asyncio.to_thread(save_slots, conversation_id, {
-            "intent_id": _CHAT_CASUAL, "slots": {}, "clarify_rounds": 0,             "confidence": top_score,
-        }, user_id, project_id)
+        # 确定性 SIR: chat 意图(stability=low, 无槽位需求)
+        await asyncio.to_thread(save_sir, conversation_id,
+            build_sir_for_shortcut(_CHAT_CASUAL, confidence=max(top_score, 0.3), stability="low"),
+            user_id, project_id)
         await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                                 user_id=user_id, raw_input=current_user_msg, llm_intent="chat/casual",
                                 llm_confidence=top_score, rules_triggered=[],
@@ -634,11 +662,23 @@ async def _classify_segment(
                       "source": "novelty"},
         )
 
+    # ── [9.5] LLM 产出 SIR_delta(本轮状态变化量) → DST.apply_delta 合并 ──
+    #    _llm_rule 仍负责 intent 选择(输出 intent_id/confidence/industry + 澄清选项);
+    #    _extract_sir_delta 负责槽位/约束/意图稳定性抽取(替代旧 merged.update 任意覆盖)。
     ruling = await _llm_rule(
         current_user_msg, candidates, model_id=model_id, context_hint=context_hint,
         project_status=project_status, has_requirement_doc=has_requirement_doc,
-        prior_intent_id=prior_intent_id, collected=prior_collected,
+        prior_intent_id=prior_intent_id, collected=prior_slots,
     )
+
+    # LLM 终判给出的 active_intent 作为 SIR_delta 的 meta.active_intent 先验来源
+    _delta_candidate_intent = ruling.intent_id or _cand_intent_id
+    delta = await _extract_sir_delta(
+        current_user_msg, model_id=model_id, prior_sir=prior,
+        active_intent_candidate=_delta_candidate_intent, prior_intent_id=prior_intent_id,
+    )
+    # DST 合并: 4 标准操作 + 4 冲突规则, 零 LLM 歧义
+    new_sir = apply_delta(prior, delta, source="llm_delta")
 
     intent = get_intent(ruling.intent_id) or (
         candidates[0]["intent"] if candidates else
@@ -646,37 +686,33 @@ async def _classify_segment(
     )
     conf = ruling.confidence
     industry = ruling.industry or "other"
+    intent_id = intent["id"]
 
-    # 槽位累积(历史 + 本次 LLM 抽取)
-    merged = dict(prior_collected)
-    merged.update(ruling.collected_slots or {})
-    # 仍缺失的槽位(历史+本次都已收集的, 不再追问)
-    still_missing = [s for s in ruling.missing_slots if s not in merged]
+    # 缺失槽由 catalog 推导(替代 LLM 给 missing_slots)
+    still_missing = compute_missing(new_sir, intent_id)
 
-    # ── [10] 置信门控 ──
-    clarify_rounds = int(prior.get("clarify_rounds", 0) or 0)
+    # ── [10] 置信门控(SIR 驱动) ──
+    clarify_rounds = int(prior.get("meta", {}).get("clarify_rounds", 0) or 0)
     new_rounds = clarify_rounds
 
-    # 建站意图 + 已具备需求(需求文档或对话上下文)→ 直接提交生成, 不再追问。
+    # 基础决策: DST 推导(pending 空 + 必填齐 → route, 否则 clarify)
+    decision = derive_decision(new_sir, intent_id)
+
+    # 业务特例(保留既有策略):
+    # 建站意图 + 已具备需求(需求文档或对话上下文)→ 直接提交生成, 不追问。
     if intent.get("level1") == "build" and (has_requirement_doc or has_conv_req):
         logger.info("[级联] 门控: 建站意图且需求已具备 → 强制提交生成(跳过追问) intent=%s/%s",
                     intent.get("level1"), intent.get("level2"))
         decision = "route"
-    elif conf >= COMMIT:
-        decision = "route"
+    # 闲聊: 无槽位需求, 直接闲聊(derive_decision 对 chat 已 route, 此处冗余保险)
     elif intent.get("level1") == "chat":
-        # 闲聊类: 即使低置信也不追问, 直接闲聊
         decision = "route"
     elif clarify_rounds >= CLARIFY_MAX_ROUNDS:
-        # 追问耗尽 → 提交最佳猜测
+        # 追问耗尽 → 提交最佳猜测(route), 不再追问
         logger.info("[级联] 澄清轮次耗尽(%d) → 提交 intent=%s", clarify_rounds, intent["id"])
         decision = "route"
-    elif still_missing:
-        decision = "clarify"
-        new_rounds = clarify_rounds + 1
-    else:
-        # 无缺失槽位但不够自信 → 仍澄清(让模型确认意图)
-        decision = "clarify"
+
+    if decision == "clarify":
         new_rounds = clarify_rounds + 1
 
     # 工具映射(尊重 doc-gating)
@@ -699,33 +735,38 @@ async def _classify_segment(
             clarify_multi = ruling.multi
             clarify_free_text_hint = ruling.free_text_hint
 
-    # ── [11] 持久化槽位 ──
-    await asyncio.to_thread(save_slots, conversation_id, {
-        "intent_id": intent["id"],
-        "slots": merged,
-        "clarify_rounds": new_rounds if decision == "clarify" else 0,
-        "confidence": conf,
-    }, user_id, project_id)
+    # 回写 clarify_rounds 到 SIR(供跨轮延续追问计数)
+    new_sir["meta"]["clarify_rounds"] = new_rounds if decision == "clarify" else 0
+    # 记录来源(便于 observability)
+    new_sir["meta"]["source"] = "llm_ruling"
+
+    # ── [11] 持久化 SIR 根 ──
+    await asyncio.to_thread(save_sir, conversation_id, new_sir, user_id, project_id)
 
     evidence = {
         "rule": [h.rule_id for h in rule_hits],
         "vector_top": [(c["intent_id"], round(c["score"], 3)) for c in candidates[:5]],
         "llm_ruling": {
             "intent_id": ruling.intent_id, "confidence": conf, "industry": industry,
-            "missing_slots": still_missing, "collected_slots": merged,
+            "missing_slots": still_missing, "delta": delta.model_dump(),
             "questions": questions, "reason": ruling.reason,
         },
-        "slots": {"rounds": new_rounds, "prior_intent": prior_intent_id},
+        "sir": {
+            "active_intent": new_sir["meta"]["active_intent"],
+            "rounds": new_rounds, "pending": new_sir["pending"],
+            "slots": {k: v.get("status") for k, v in new_sir["slots"].items()},
+        },
         "source": "llm_ruling",
     }
-    logger.info("[级联][%s] 门控: conf=%.2f intent=%s/%s decision=%s rounds=%d",
-                req_id, conf, intent["level1"], intent["level2"], decision, new_rounds)
+    logger.info("[级联][%s] 门控: conf=%.2f intent=%s/%s decision=%s rounds=%d pending=%s",
+                req_id, conf, intent["level1"], intent["level2"], decision, new_rounds, new_sir["pending"])
 
     await asyncio.to_thread(observe_record, request_id=req_id, conversation_id=conversation_id,
                             user_id=user_id, raw_input=current_user_msg,
                             llm_intent=f"{intent['level1']}/{intent['level2']}",
                             llm_confidence=conf, rules_triggered=[h.rule_id for h in rule_hits],
-                            belief_before=prior.get("confidence", 0.0), belief_after=conf,
+                            belief_before=prior.get("meta", {}).get("active_intent") and 1.0 or 0.0,
+                            belief_after=conf,
                             decision=decision, latency_ms=(time.time() - t0) * 1000, tokens_used=0,
                             specialist_routed=selected_skill if decision in ("route", "clarify") else None,
                             outcome="pending",
