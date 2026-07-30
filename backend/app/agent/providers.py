@@ -19,7 +19,9 @@ from langchain_openai import ChatOpenAI
 
 from .config import settings
 
-logger = logging.getLogger("ai_service.provider")
+# 日志命名规范: app.<module>(见项目约定)。旧名 "ai_service.provider" 不在 handler 覆盖范围内,
+# 导致 provider 层日志被静默丢弃(2026-07-30 排查 hy3 401 时发现)。
+logger = logging.getLogger("app.agent.providers")
 
 
 # 默认降级序(用户指定可覆盖,见 §13.2 / #31)
@@ -121,9 +123,18 @@ def resolve_fallback_order(primary: str) -> List[str]:
     return order
 
 
+def _key_fp(key: str) -> str:
+    """key 指纹(前 6 + 后 4 + 长度),用于排查「服务器实际用了哪把 key」而不泄露密钥。"""
+    if not key:
+        return "<EMPTY>"
+    return f"{key[:6]}…{key[-4:]}/{len(key)}"
+
+
 def get_chat_model(model_id: str, streaming: bool = True) -> ChatOpenAI:
     """按 model_id 构造一个可流式/非流式调用的 ChatOpenAI。"""
     p = PROVIDERS[model_id]
+    # key 指纹日志:线上出现 401 时可立刻判定是 key 缺失/过期还是打错端点(2026-07-30 hy3 401002 排查)
+    logger.info("[provider] build model=%s base=%s key=%s", p.model, p.base_url, _key_fp(p.api_key))
     return ChatOpenAI(
         model=p.model,
         api_key=p.api_key,
@@ -131,10 +142,10 @@ def get_chat_model(model_id: str, streaming: bool = True) -> ChatOpenAI:
         streaming=streaming,
         temperature=0.4,
         max_tokens=8192,
-        # read 超时从 120s 提到 900s: 长链路流式生成(单页 3~8 万字符)时,
-        # deepseek 偶有数分钟静默(限流/批处理), 原 120s 会误判掉线 → 触发降级到 qwen 并拖慢整轮。
-        # 900s 给足单页生成余量(主模型 attempts=2 → 最坏 30min 才放弃, 但正常生成远小于此)。
-        request_timeout=httpx.Timeout(connect=15.0, read=900.0, write=15.0, pool=10.0),
+        # read 超时: 120s→900s→1800s。长链路流式生成(单页 3~8 万字符甚至更长)时,
+        # deepseek 偶有数分钟静默(限流/批处理), 短 read 会误判掉线 → 触发降级到 qwen 并拖慢整轮。
+        # 1800s 给足长生成余量(主模型 attempts=2 → 最坏 60min 才放弃, 但正常生成远小于此)。
+        request_timeout=httpx.Timeout(connect=15.0, read=1800.0, write=15.0, pool=10.0),
         max_retries=2,
     )
 
