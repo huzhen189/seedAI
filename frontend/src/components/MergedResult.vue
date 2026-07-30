@@ -63,7 +63,7 @@ defineProps<{
   margin-bottom: 4px;
 }
 .pid { font-weight: 700; color: #b45309; flex: none; }
-.pgoal { flex: 1; min-width: 0; color: #334155; }
+.pgoal { flex: 1; min-width: 0; color: #3f4a44; }
 .preason { flex: none; color: #b91c1c; max-width: 50%; text-align: right; }
 .all-ok { font-size: 12px; color: #15803d; margin-top: 6px; }
 </style>

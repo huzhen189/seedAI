@@ -30,7 +30,7 @@ function apply(pref: ThemePref) {
   if (typeof document !== 'undefined') {
     document.documentElement.setAttribute('data-theme', resolved)
     const meta = document.querySelector('meta[name="theme-color"]')
-    if (meta) meta.setAttribute('content', resolved === 'dark' ? '#0f1115' : '#f6f7f9')
+    if (meta) meta.setAttribute('content', resolved === 'dark' ? '#0e1412' : '#f4f7f5')
   }
 }
 

@@ -184,13 +184,14 @@ function goSettings() {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background: var(--brand);
+  background: var(--brand-grad);
   color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 13px;
   font-weight: 700;
+  box-shadow: 0 4px 12px rgba(21,196,164,.3);
 }
 .uname {
   font-size: 13px;
@@ -207,15 +208,18 @@ function goSettings() {
   color: var(--muted);
 }
 .login {
-  border: 1px solid var(--brand);
-  background: var(--brand);
+  border: 1px solid transparent;
+  background: var(--brand-grad);
   color: #fff;
-  border-radius: 8px;
-  padding: 5px 14px;
+  border-radius: 999px;
+  padding: 5px 16px;
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
+  box-shadow: 0 6px 16px rgba(21,196,164,.28);
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast), filter var(--transition-fast);
 }
+.login:hover { transform: translateY(-2px); box-shadow: 0 10px 22px rgba(21,196,164,.36); filter: brightness(1.03); }
 /* 主题切换分段控件(v0.9.0 #239) */
 .theme-switch {
   display: inline-flex;

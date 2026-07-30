@@ -65,7 +65,7 @@ function seriesPoints(values: number[]): string {
         :key="'ring' + ri"
         :points="ring"
         fill="none"
-        stroke="#e2e8f0"
+        stroke="#e3e9e4"
         stroke-width="1"
       />
       <!-- 轴线 -->
@@ -73,7 +73,7 @@ function seriesPoints(values: number[]): string {
         v-for="(sp, si) in spokes"
         :key="'spoke' + si"
         :x1="cx" :y1="cy" :x2="sp.x2" :y2="sp.y2"
-        stroke="#e2e8f0" stroke-width="1"
+        stroke="#e3e9e4" stroke-width="1"
       />
       <!-- 各序列多边形 -->
       <g v-for="(s, i) in series" :key="'s' + i">
@@ -96,7 +96,7 @@ function seriesPoints(values: number[]): string {
         :key="'ax' + ai"
         :x="a.x" :y="a.y"
         text-anchor="middle" dominant-baseline="middle"
-        font-size="12" fill="#475569"
+        font-size="12" fill="#5d6b62"
       >{{ a.label }}</text>
     </svg>
     <!-- 图例 -->
@@ -111,6 +111,6 @@ function seriesPoints(values: number[]): string {
 <style scoped>
 .radar { display: inline-block; }
 .legend { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 4px; }
-.lg { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #475569; }
+.lg { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #5d6b62; }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 </style>

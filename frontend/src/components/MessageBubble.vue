@@ -243,8 +243,8 @@ function fmtTime(t: string): string {
   line-height: 1.6;
 }
 .bubble.user {
-  background: #eef2ff;
-  border: 1px solid #e0e7ff;
+  background: #def6ef;
+  border: 1px solid #cdeee7;
   align-self: flex-end;
   max-width: 90%;
 }
@@ -265,9 +265,9 @@ function fmtTime(t: string): string {
   margin: 0;
   max-height: 140px;
   overflow-y: auto;
-  color: #64748b;
-  background: #f8fafc;
-  border: 1px solid var(--border, #e2e8f0);
+  color: #7e8e84;
+  background: #f6f9f7;
+  border: 1px solid var(--border, #e3e9e4);
   border-radius: 8px;
   padding: 8px 10px;
 }
@@ -293,7 +293,7 @@ function fmtTime(t: string): string {
 .trail-card { padding: 4px 0; }
 .trail-event {
   display: flex; align-items: flex-start; gap: 6px; padding: 3px 0;
-  font-size: 12px; color: #64748b;
+  font-size: 12px; color: #7e8e84;
 }
 .trail-badge { flex-shrink: 0; width: 18px; text-align: center; font-size: 10px; }
 
@@ -303,30 +303,30 @@ function fmtTime(t: string): string {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; cursor: pointer;
   border: 1px solid var(--qc, var(--border)); color: var(--qc, var(--brand));
-  background: color-mix(in srgb, var(--qc, #4f46e5) 8%, #fff);
+  background: color-mix(in srgb, var(--qc, #15c4a4) 8%, #fff);
   border-radius: 999px; padding: 2px 10px; font-weight: 600;
 }
 .qc-flag {
   font-size: 10px; background: #f59e0b; color: #fff; border-radius: 4px; padding: 0 5px; font-weight: 700;
 }
-.qc-flag.gray { background: #94a3b8; }
+.qc-flag.gray { background: #9baba1; }
 .qc-detail {
-  margin-top: 8px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 10px;
+  margin-top: 8px; background: #f6f9f7; border: 1px solid #e3e9e4; border-radius: 10px; padding: 8px 10px;
 }
 .qc-dim {
   display: grid; grid-template-columns: 56px 1fr 30px 64px; align-items: center; gap: 8px;
   font-size: 12px; padding: 3px 0;
 }
-.qc-dim-label { color: #475569; }
-.qc-bar { height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden; }
+.qc-dim-label { color: #5d6b62; }
+.qc-bar { height: 6px; background: #e3e9e4; border-radius: 3px; overflow: hidden; }
 .qc-bar > i { display: block; height: 100%; border-radius: 3px; }
 .qc-mean { font-weight: 700; text-align: right; }
 .qc-judges { display: flex; gap: 3px; justify-content: flex-end; }
 .qc-dot {
   width: 18px; height: 18px; line-height: 18px; text-align: center; font-size: 10px;
-  background: #e2e8f0; border-radius: 4px; color: #475569; font-style: normal;
+  background: #e3e9e4; border-radius: 4px; color: #5d6b62; font-style: normal;
 }
-.qc-dot.zero { color: #cbd5e1; background: #f1f5f9; }
+.qc-dot.zero { color: #c6d2cb; background: #eef2ef; }
 .qc-risk { margin-top: 6px; font-size: 11px; color: #dc2626; font-weight: 600; }
 
 /* ---- 评价 ---- */
@@ -343,13 +343,13 @@ function fmtTime(t: string): string {
   border-radius: 6px; padding: 1px 8px; color: var(--brand); margin-left: auto;
 }
 .rate-panel {
-  margin-top: 8px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px;
+  margin-top: 8px; background: #f6f9f7; border: 1px solid #e3e9e4; border-radius: 10px; padding: 10px;
 }
 .rate-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
-.rate-row-label { width: 56px; font-size: 12px; color: #475569; flex-shrink: 0; }
+.rate-row-label { width: 56px; font-size: 12px; color: #5d6b62; flex-shrink: 0; }
 .stars { display: inline-flex; gap: 1px; }
 .stars .star {
-  font-size: 14px; color: #d1d5db; cursor: pointer; transition: color .12s, transform .12s;
+  font-size: 14px; color: #ccd4ce; cursor: pointer; transition: color .12s, transform .12s;
   font-style: normal; line-height: 1;
 }
 .stars .star.on { color: #f59e0b; }
@@ -362,7 +362,7 @@ function fmtTime(t: string): string {
   color: var(--brand); padding: 0;
 }
 .rate-dims {
-  background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 4px 8px; margin-bottom: 6px;
+  background: #fff; border: 1px solid #e3e9e4; border-radius: 8px; padding: 4px 8px; margin-bottom: 6px;
 }
 .rate-comment {
   width: 100%; box-sizing: border-box; font-size: 12px; border: 1px solid var(--border);
@@ -370,7 +370,7 @@ function fmtTime(t: string): string {
 }
 .rate-actions { display: flex; gap: 8px; margin-top: 6px; }
 .rate-submit {
-  font-size: 12px; cursor: pointer; border: none; background: var(--brand, #4f46e5); color: #fff;
+  font-size: 12px; cursor: pointer; border: none; background: var(--brand, #15c4a4); color: #fff;
   border-radius: 6px; padding: 4px 14px; font-weight: 600;
 }
 .rate-submit:disabled { opacity: 0.5; cursor: not-allowed; }

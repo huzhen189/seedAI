@@ -91,7 +91,7 @@ watch(() => props.content, scheduleRender)
 }
 .md :deep(pre) {
   background: #0f172a;
-  color: #e2e8f0;
+  color: #e3e9e4;
   padding: 12px 14px;
   border-radius: 10px;
   overflow: auto;

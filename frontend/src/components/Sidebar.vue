@@ -335,7 +335,7 @@ watch(showSearch, (v) => {
   cursor: pointer;
 }
 .sitem:hover {
-  background: #f3f4f6;
+  background: #eef2ef;
 }
 .sres-label {
   font-size: 10px;
@@ -450,7 +450,7 @@ watch(showSearch, (v) => {
   cursor: pointer;
 }
 .pdot.active {
-  background: #eef2ff;
+  background: #def6ef;
   border-radius: 8px;
 }
 </style>

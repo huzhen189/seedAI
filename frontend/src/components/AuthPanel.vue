@@ -104,7 +104,8 @@ async function submit() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(244, 246, 250, 0.9);
+  background: rgba(214, 232, 224, 0.82);
+  backdrop-filter: blur(4px);
   z-index: 50;
 }
 .auth-card {
@@ -112,12 +113,17 @@ async function submit() {
   width: 320px;
   background: #fff;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   padding: 26px 22px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-lg);
   display: flex;
   flex-direction: column;
   gap: 12px;
+  animation: cardPop .28s cubic-bezier(.34,1.56,.64,1);
+}
+@keyframes cardPop {
+  from { opacity: 0; transform: translateY(14px) scale(.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 .close-x {
   position: absolute;
@@ -177,13 +183,16 @@ async function submit() {
 .auth-card button.submit {
   height: 40px;
   border: none;
-  border-radius: 8px;
-  background: var(--brand);
+  border-radius: 999px;
+  background: var(--brand-grad);
   color: #fff;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
+  box-shadow: 0 6px 16px rgba(21,196,164,.28);
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast), filter var(--transition-fast);
 }
+.auth-card button.submit:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 10px 22px rgba(21,196,164,.36); filter: brightness(1.03); }
 .auth-card button.submit:disabled {
   opacity: 0.6;
   cursor: default;

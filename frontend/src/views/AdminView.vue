@@ -221,7 +221,7 @@ async function fetchQuality() {
 }
 
 // 单裁判下每个实际出现的 QC 模型配一条固定色序列(避免撞色)
-const QC_MODEL_COLORS = ['#2563eb', '#16a34a', '#d97706', '#0ea5e9', '#db2777', '#7c3aed']
+const QC_MODEL_COLORS = ['#15c4a4', '#16a34a', '#d97706', '#15b8c4', '#db2777', '#e8734a']
 function modelColor(idx: number): string {
   return QC_MODEL_COLORS[idx % QC_MODEL_COLORS.length]
 }
@@ -243,7 +243,7 @@ const qcSeries = computed(() => {
   const series: Array<{ name: string; color: string; values: number[] }> = models.map(
     (m, i) => mk(m, modelColor(i), q.qc_model_avg?.[m] || {}),
   )
-  series.push(mk('整体', '#7c3aed', q.qc_overall_dim_avg || {}))
+  series.push(mk('整体', '#e8734a', q.qc_overall_dim_avg || {}))
   return series
 })
 
@@ -1266,8 +1266,8 @@ onUnmounted(() => {
 }
 .tabs button.on {
   color: var(--brand);
-  border-color: var(--brand2, #c7d2fe);
-  background: #eef2ff;
+  border-color: var(--brand2, #bdeee3);
+  background: #def6ef;
   font-weight: 600;
 }
 .panel {
@@ -1294,7 +1294,7 @@ onUnmounted(() => {
   font-size: 22px;
   font-weight: 700;
   margin-top: 6px;
-  color: #1e293b;
+  color: #2b322e;
 }
 .card-row { display: flex; gap: 12px; flex-wrap: wrap; }
 .card-row .card { min-width: 120px; flex: 1; }
@@ -1311,7 +1311,7 @@ onUnmounted(() => {
 .block h3 {
   margin: 0 0 10px;
   font-size: 14px;
-  color: #1e293b;
+  color: #2b322e;
 }
 .block h4 {
   margin: 0 0 10px;
@@ -1332,13 +1332,13 @@ onUnmounted(() => {
   align-items: center;
 }
 .kv span { color: var(--muted); }
-.kv b { color: #1e293b; font-weight: 700; }
+.kv b { color: #2b322e; font-weight: 700; }
 .pill {
   display: inline-block;
   margin: 2px 6px 2px 0;
   padding: 1px 8px;
   border-radius: 999px;
-  background: #eef2ff;
+  background: #def6ef;
   color: var(--brand);
   font-size: 12px;
   font-weight: 600;
@@ -1363,7 +1363,7 @@ onUnmounted(() => {
 }
 .mname {
   width: 90px;
-  color: #334155;
+  color: #3f4a44;
 }
 .mbar {
   flex: 1;
@@ -1472,40 +1472,40 @@ onUnmounted(() => {
 .evt { display: flex; gap: 10px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--border); }
 .eseq { width: 28px; color: var(--muted); text-align: right; }
 .etype { width: 48px; font-weight: 600; color: var(--brand); }
-.estage { color: #64748b; }
+.estage { color: #7e8e84; }
 .ecomment { color: var(--muted); font-style: italic; margin-left: auto; }
 .back { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 4px 12px; cursor: pointer; font-size: 13px; margin-bottom: 8px; }
 .db-grid { display: flex; gap: 12px; flex-wrap: wrap; }
 .db-card { display: flex; flex-direction: column; gap: 4px; background: var(--panel); border: 1px solid var(--border); border-left: 3px solid #22c55e; border-radius: 10px; padding: 12px 14px; min-width: 220px; flex: 1; }
 .db-card.err { border-left-color: var(--err); }
 .db-head { display: flex; align-items: center; justify-content: space-between; }
-.db-name { font-weight: 700; font-size: 14px; color: #334155; text-transform: uppercase; }
+.db-name { font-weight: 700; font-size: 14px; color: #3f4a44; text-transform: uppercase; }
 .db-stat { font-size: 12px; font-weight: 600; }
 .db-stat.ok { color: #22c55e; }
 .db-stat.err { color: var(--err); }
 .db-cap { display: flex; align-items: baseline; gap: 8px; }
-.db-cap-val { font-size: 20px; font-weight: 700; color: #1e293b; }
+.db-cap-val { font-size: 20px; font-weight: 700; color: #2b322e; }
 .db-cap-pct { font-size: 14px; font-weight: 700; color: var(--brand); }
 .db-cap-pct.none { color: var(--muted); }
 .db-cap-detail { font-size: 12px; color: var(--muted); }
-.db-extra { font-size: 12px; color: #475569; margin-top: 2px; }
+.db-extra { font-size: 12px; color: #5d6b62; margin-top: 2px; }
 .db-colls { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-.db-colls .pill { background: #ecfeff; color: #0e7490; }
+.db-colls .pill { background: #eafaf5; color: #0e9e8c; }
 
 /* R1: API 延迟子标签(业务端 / 需求端) */
 .subtabs { display: flex; gap: 8px; margin-bottom: 10px; }
 .subtabs button { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 5px 14px; cursor: pointer; font-size: 13px; color: var(--muted); }
-.subtabs button.on { color: var(--brand); border-color: var(--brand2, #c7d2fe); background: #eef2ff; font-weight: 600; }
+.subtabs button.on { color: var(--brand); border-color: var(--brand2, #bdeee3); background: #def6ef; font-weight: 600; }
 
 /* 系统分析表 */
 .atable { width: 100%; border-collapse: collapse; font-size: 13px; }
 .atable th { text-align: left; padding: 6px 8px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }
 .atable td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .atable .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
-.rate-bar { display: flex; align-items: center; gap: 12px; font-size: 22px; font-weight: 700; color: #1e293b; position: relative; padding: 10px 0; }
+.rate-bar { display: flex; align-items: center; gap: 12px; font-size: 22px; font-weight: 700; color: #2b322e; position: relative; padding: 10px 0; }
 .rate-bar::before { content: ''; position: absolute; bottom: 0; left: 0; height: 4px; border-radius: 2px; background: linear-gradient(90deg, #22c55e var(--rate), #fee2e2 var(--rate)); width: 100%; }
 .rate-sub { font-size: 13px; color: var(--muted); font-weight: 400; }
-h4 { margin: 12px 0 8px; font-size: 14px; color: #1e293b; }
+h4 { margin: 12px 0 8px; font-size: 14px; color: #2b322e; }
 .reset-log { white-space: pre-wrap; font-size: 12px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 12px; margin-top: 10px; color: #991b1b; line-height: 1.6; }
 
 /* QC 雷达 + 复盘详情(v0.8.5 M1) */
@@ -1514,21 +1514,21 @@ h4 { margin: 12px 0 8px; font-size: 14px; color: #1e293b; }
 .pill { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: #ede9fe; color: #6d28d9; margin-left: 6px; }
 .pill.warn { background: #fef3c7; color: #b45309; }
 .pill.danger { background: #fee2e2; color: #b91c1c; }
-.pill.gray { background: #f1f5f9; color: #64748b; }
+.pill.gray { background: #eef2ef; color: #7e8e84; }
 .qctable { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
 .qctable th { text-align: left; padding: 6px 8px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }
 .qctable td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .fb-row { font-size: 13px; margin: 4px 0; }
 .fb-dims { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-.fb-dim { font-size: 12px; background: #f1f5f9; border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; color: #475569; }
+.fb-dim { font-size: 12px; background: #eef2ef; border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; color: #5d6b62; }
 .msg { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 6px 0; }
-.msg.user { background: #eef2ff; }
+.msg.user { background: #def6ef; }
 .msg.assistant { background: #fff; }
 .msg-role { font-size: 11px; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
 .msg-body { font-size: 13px; white-space: pre-wrap; word-break: break-word; max-height: 280px; overflow: auto; }
 .model-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
 .model-table th { text-align: left; padding: 6px 10px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }
 .model-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); }
-.model-table .mname { font-weight: 600; color: var(--primary, #2563eb); }
+.model-table .mname { font-weight: 600; color: var(--primary, #15c4a4); }
 .user-input { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
 </style>

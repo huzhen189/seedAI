@@ -484,7 +484,7 @@ defineExpose({ selectFile, reset })
   padding-bottom: 6px;
 }
 .req-tree .tree-head {
-  color: var(--accent, #6366f1);
+  color: var(--accent, #15c4a4);
 }
 
 /* ---- 文件树(需求文档下方) ---- */
@@ -543,23 +543,23 @@ defineExpose({ selectFile, reset })
   border-left: 2px solid transparent;
   transition: background 0.15s;
 }
-.tree-item:hover { background: #f1f5f9; }
+.tree-item:hover { background: #eef2ef; }
 .tree-item.active {
-  background: #eef2ff;
+  background: #def6ef;
   border-left-color: var(--brand);
   font-weight: 600;
 }
 .tree-icon { font-size: 14px; flex-shrink: 0; }
 .tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-ver {
-  font-size: 9px; font-weight: 700; color: var(--accent, #6366f1);
-  background: var(--accent-light, #eef2ff); border-radius: 8px;
+  font-size: 9px; font-weight: 700; color: var(--accent, #15c4a4);
+  background: var(--accent-light, #def6ef); border-radius: 8px;
   padding: 0 5px; flex-shrink: 0; margin-right: 2px;
 }
 .tree-size { font-size: 10px; color: var(--muted); flex-shrink: 0; }
 .dl-btn {
   border: none; background: transparent; cursor: pointer; font-size: 13px;
-  color: var(--accent, #6366f1); flex-shrink: 0; padding: 0 2px;
+  color: var(--accent, #15c4a4); flex-shrink: 0; padding: 0 2px;
   opacity: 0.7; transition: opacity 0.15s;
 }
 .dl-btn:hover { opacity: 1; }
@@ -580,8 +580,8 @@ defineExpose({ selectFile, reset })
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
-  background: var(--bg, #f8fafc);
-  border-bottom: 1px solid var(--border, #e2e8f0);
+  background: var(--bg, #f6f9f7);
+  border-bottom: 1px solid var(--border, #e3e9e4);
   flex-shrink: 0;
   min-height: 36px;
 }
@@ -649,7 +649,7 @@ defineExpose({ selectFile, reset })
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--text, #334155);
+  color: var(--text, #3f4a44);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -664,7 +664,7 @@ defineExpose({ selectFile, reset })
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--text, #334155);
+  color: var(--text, #3f4a44);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -710,8 +710,8 @@ defineExpose({ selectFile, reset })
   display: flex; gap: 6px; flex-wrap: wrap;
 }
 .req-tag {
-  background: var(--accent-light, #eef2ff);
-  color: var(--accent, #6366f1);
+  background: var(--accent-light, #def6ef);
+  color: var(--accent, #15c4a4);
   padding: 2px 8px; border-radius: 10px; font-size: 12px;
 }
 .req-color {

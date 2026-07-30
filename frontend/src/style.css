@@ -1,37 +1,42 @@
 :root {
-  /* 颜色系统 */
-  --bg: #f8fafc;
-  --bg-alt: #f1f5f9;
+  /* 颜色系统 —— 清新文艺·年轻活泼(薄荷青 + 珊瑚橘 + 暖纸白) */
+  --bg: #f4f7f5;            /* 暖纸白泛薄荷 */
+  --bg-alt: #eaf0ed;
   --panel: #ffffff;
-  --panel-hover: #f8fafc;
-  --border: #e2e8f0;
-  --border-light: #f1f5f9;
-  --text: #0f172a;
-  --text-secondary: #475569;
-  --muted: #94a3b8;
-  --brand: #4f46e5;
-  --brand-light: #818cf8;
-  --brand-bg: #eef2ff;
-  --brand2: #6366f1;
-  --ok: #16a34a;
-  --ok-bg: #f0fdf4;
-  --warn: #d97706;
-  --warn-bg: #fffbeb;
-  --err: #dc2626;
-  --err-bg: #fef2f2;
-  --active-bg: #eef2ff;
-  --hover-bg: #f8fafc;
+  --panel-hover: #eff4f1;
+  --border: #e3e9e4;        /* 柔绿灰描边 */
+  --border-light: #f1f5f2;
+  --text: #2b322e;          /* 暖近黑(带绿调) */
+  --text-secondary: #5d6b62;
+  --muted: #9baba1;
+  --brand: #15c4a4;         /* 薄荷青(主色) */
+  --brand-light: #62e0cb;
+  --brand-bg: #def6ef;      /* 主色浅底 */
+  --brand2: #ff8a5c;        /* 珊瑚橘(活泼点缀) */
+  --ok: #25b574;            /* 清新绿 */
+  --ok-bg: #e7f7ef;
+  --warn: #f2a73d;          /* 暖琥珀 */
+  --warn-bg: #fdf2dd;
+  --err: #ef5a6b;           /* 柔红 */
+  --err-bg: #fdebed;
+  --active-bg: #def6ef;
+  --hover-bg: #eff4f1;
 
-  /* 阴影 */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
-  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.08), 0 2px 8px rgba(0, 0, 0, 0.04);
+  /* 渐变(年轻活泼感) */
+  --brand-grad: linear-gradient(135deg, #15c4a4 0%, #62e0cb 100%);
+  --accent-grad: linear-gradient(135deg, #ff8a5c 0%, #ffb486 100%);
+  --brand-soft-grad: linear-gradient(135deg, #eafaf5 0%, #fef3ec 100%);
 
-  /* 圆角 */
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 20px;
+  /* 阴影(偏柔绿,轻盈悬浮) */
+  --shadow-sm: 0 1px 2px rgba(20, 50, 40, 0.04);
+  --shadow-md: 0 6px 16px rgba(20, 50, 40, 0.06), 0 1px 3px rgba(20, 50, 40, 0.04);
+  --shadow-lg: 0 14px 40px rgba(20, 50, 40, 0.08), 0 2px 8px rgba(20, 50, 40, 0.04);
+
+  /* 圆角(更圆润亲和) */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-xl: 26px;
 
   /* 字号层级 */
   --text-xs: 11px;
@@ -53,31 +58,35 @@
 }
 
 html[data-theme='dark'] {
-  --bg: #0f1117;
-  --bg-alt: #161923;
-  --panel: #1a1d2e;
-  --panel-hover: #1e2137;
-  --border: #2a3048;
-  --border-light: #1e2438;
-  --text: #e2e8f0;
-  --text-secondary: #94a3b8;
-  --muted: #64748b;
-  --brand: #818cf8;
-  --brand-light: #a5b4fc;
-  --brand-bg: rgba(99, 102, 241, 0.12);
-  --brand2: #a5b4fc;
-  --ok: #22c55e;
-  --ok-bg: rgba(34, 197, 94, 0.08);
-  --warn: #f59e0b;
-  --warn-bg: rgba(245, 158, 11, 0.08);
-  --err: #ef4444;
-  --err-bg: rgba(239, 68, 68, 0.08);
-  --active-bg: rgba(99, 102, 241, 0.14);
+  --bg: #0e1412;
+  --bg-alt: #141c19;
+  --panel: #18211e;
+  --panel-hover: #1d2825;
+  --border: #293a34;
+  --border-light: #1f2b27;
+  --text: #e8f1ec;
+  --text-secondary: #9fb3a8;
+  --muted: #6c8178;
+  --brand: #2fd8b8;
+  --brand-light: #7df0d9;
+  --brand-bg: rgba(45, 216, 184, 0.14);
+  --brand2: #ff9e74;
+  --ok: #34d28a;
+  --ok-bg: rgba(52, 210, 138, 0.10);
+  --warn: #f6b65a;
+  --warn-bg: rgba(246, 182, 90, 0.10);
+  --err: #ff7585;
+  --err-bg: rgba(239, 90, 107, 0.10);
+  --active-bg: rgba(45, 216, 184, 0.16);
   --hover-bg: rgba(255, 255, 255, 0.04);
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.4);
+  --brand-grad: linear-gradient(135deg, #2fd8b8 0%, #7df0d9 100%);
+  --accent-grad: linear-gradient(135deg, #ff9e74 0%, #ffc19e 100%);
+  --brand-soft-grad: linear-gradient(135deg, #152320 0%, #221c18 100%);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 6px 16px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 14px 40px rgba(0, 0, 0, 0.4);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }

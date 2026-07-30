@@ -51,11 +51,11 @@ const sopChain = computed(() =>
 )
 
 const INTENT_COLORS: Record<string, string> = {
-  learn: '#dbeafe',
+  learn: '#c2ecdf',
   code: '#dcfce7',
   build: '#fef3c7',
-  doc: '#f5f3ff',
-  translate: '#fdf2f8',
+  doc: '#fef3ec',
+  translate: '#fef3ec',
 }
 
 const STAGE_LABELS: Record<string, string> = {
@@ -148,7 +148,7 @@ function intentLabel(l: { level1: string; level2: string }): string {
     <div
       v-if="intent.level1"
       class="intent-badge"
-      :style="{ background: INTENT_COLORS[intent.level1] || '#f1f5f9' }"
+      :style="{ background: INTENT_COLORS[intent.level1] || '#eef2ef' }"
     >
       🧠 已识别: {{ intentLabel(intent) }}
     </div>
@@ -240,7 +240,7 @@ function intentLabel(l: { level1: string; level2: string }): string {
   font-weight: 600;
   border-radius: 999px;
   padding: 3px 12px;
-  background: #f1f5f9;
+  background: #eef2ef;
   color: var(--muted);
   border: 1px solid transparent;
   transition: all 0.25s ease;
@@ -256,7 +256,7 @@ function intentLabel(l: { level1: string; level2: string }): string {
   border-radius: 10px;
   font-size: 13px;
   font-weight: 600;
-  color: #1e293b;
+  color: #2b322e;
   border: 1px solid rgba(0, 0, 0, 0.06);
 }
 .badge {
@@ -272,8 +272,8 @@ function intentLabel(l: { level1: string; level2: string }): string {
 }
 
 .plan-card {
-  border: 1px solid var(--brand2, #c7d2fe);
-  background: linear-gradient(180deg, #eef2ff 0%, #fafaff 100%);
+  border: 1px solid var(--brand2, #bdeee3);
+  background: linear-gradient(180deg, #def6ef 0%, #fafaff 100%);
   border-radius: 12px;
   padding: 12px 14px;
 }
@@ -282,7 +282,7 @@ function intentLabel(l: { level1: string; level2: string }): string {
 .plan-title { font-weight: 700; font-size: 14px; color: var(--brand); }
 .plan-goal { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
 .plan-steps { margin: 10px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
-.plan-steps li { font-size: 13px; line-height: 1.5; color: #334155; }
+.plan-steps li { font-size: 13px; line-height: 1.5; color: #3f4a44; }
 
 .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 /* 每一步进入时播放入画动画: 新步骤挂载即触发, 形成"一条一条播放"的实时反馈感 */
@@ -301,7 +301,7 @@ function intentLabel(l: { level1: string; level2: string }): string {
 .step-body { flex: 1; min-width: 0; }
 .step-label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .step.active .step-label { color: var(--brand); }
-.pulse { font-size: 11px; font-weight: 500; color: var(--brand); background: #eef2ff; border-radius: 999px; padding: 1px 8px; display: inline-flex; align-items: center; gap: 4px; animation: blink 1.2s ease-in-out infinite; }
+.pulse { font-size: 11px; font-weight: 500; color: var(--brand); background: #def6ef; border-radius: 999px; padding: 1px 8px; display: inline-flex; align-items: center; gap: 4px; animation: blink 1.2s ease-in-out infinite; }
 /* 进行中打字指示点 */
 .typing { display: inline-flex; gap: 2px; }
 .typing i { width: 3px; height: 3px; border-radius: 50%; background: var(--brand); opacity: 0.4; animation: typingDot 1.2s infinite; }
@@ -309,8 +309,8 @@ function intentLabel(l: { level1: string; level2: string }): string {
 .typing i:nth-child(3) { animation-delay: 0.4s; }
 @keyframes typingDot { 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
 .ok { color: #22c55e; }
-.think { white-space: pre-wrap; word-break: break-word; background: #f8fafc; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.6; color: #334155; max-height: 200px; overflow: auto; margin: 6px 0 0; }
-.review { font-size: 12px; margin-top: 6px; line-height: 1.5; color: #334155; }
+.think { white-space: pre-wrap; word-break: break-word; background: #f6f9f7; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.6; color: #3f4a44; max-height: 200px; overflow: auto; margin: 6px 0 0; }
+.review { font-size: 12px; margin-top: 6px; line-height: 1.5; color: #3f4a44; }
 .review .pass { color: #16a34a; font-weight: 700; margin-right: 4px; }
 .review .fail { color: #dc2626; font-weight: 700; margin-right: 4px; }
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
@@ -319,17 +319,17 @@ function intentLabel(l: { level1: string; level2: string }): string {
 .tool-trail { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
 .tt-item {
   display: flex; gap: 8px; align-items: flex-start;
-  background: #f8fafc; border: 1px solid var(--border);
+  background: #f6f9f7; border: 1px solid var(--border);
   border-radius: 10px; padding: 8px 10px;
   animation: stepIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-.tt-item.reasoning { background: #eef2ff; border-color: #c7d2fe; }
+.tt-item.reasoning { background: #def6ef; border-color: #bdeee3; }
 .tt-ico { flex: none; font-size: 15px; line-height: 1.2; margin-top: 1px; }
 .tt-body { flex: 1; min-width: 0; }
-.tt-text { font-size: 12.5px; line-height: 1.6; color: #4338ca; }
+.tt-text { font-size: 12.5px; line-height: 1.6; color: #0e9b86; }
 .tt-row { display: flex; align-items: center; gap: 8px; }
 .tt-name {
-  font-size: 12.5px; font-weight: 600; color: #334155;
+  font-size: 12.5px; font-weight: 600; color: #3f4a44;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .tt-spin { display: inline-flex; gap: 2px; }
@@ -352,7 +352,7 @@ function intentLabel(l: { level1: string; level2: string }): string {
 }
 .tt-result summary:hover { text-decoration: underline; }
 .tt-summary {
-  font-size: 12px; color: #334155; margin-top: 4px; line-height: 1.5;
+  font-size: 12px; color: #3f4a44; margin-top: 4px; line-height: 1.5;
   background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
   white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow: auto;
 }

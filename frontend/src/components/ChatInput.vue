@@ -55,8 +55,11 @@ function submit() {
 .bar { display: flex; align-items: center; gap: 8px; }
 .row { display: flex; gap: 8px; align-items: flex-end; }
 textarea { flex: 1; resize: none; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-family: inherit; font-size: 14px; }
-.send, .stop { border: none; border-radius: 10px; padding: 10px 18px; font-weight: 600; cursor: pointer; color: #fff; }
-.send { background: var(--brand); }
-.send:disabled { opacity: 0.5; cursor: not-allowed; }
+.send, .stop { border: none; border-radius: var(--radius-md); padding: 10px 18px; font-weight: 600; cursor: pointer; color: #fff; transition: transform var(--transition-fast), box-shadow var(--transition-fast), filter var(--transition-fast); }
+.send { background: var(--brand-grad); box-shadow: 0 6px 16px rgba(21,196,164,.28); }
+.send:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 10px 22px rgba(21,196,164,.36); filter: brightness(1.03); }
+.send:active:not(:disabled) { transform: translateY(0); }
+.send:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
 .stop { background: var(--err); }
+.stop:hover { transform: translateY(-2px); }
 </style>
