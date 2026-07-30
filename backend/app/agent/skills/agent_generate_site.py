@@ -37,6 +37,7 @@ from ..knowledge.chroma import build_rag_context, save_memory
 from ..registry import register_skill
 from ..scoring import parse_scores, SCORING_DIMENSIONS, needs_review
 from ..analytics import record_reviewer, record_llm_call
+from shared.vendor import VENDOR_REFERENCE, LIBS_REFERENCE
 logger = logging.getLogger("ai_service.skills.agent_generate_site")
 
 # 本技能注册名(供统计维度 per-skill 区分; 与 @register_skill 名一致)
@@ -75,6 +76,7 @@ SYS_PLANNER = (
     '  "title": "网站标题(简短,≤12字)",\n'
     '  "goal": "本次生成要达成的核心目标(1句话)",\n'
     '  "steps": ["步骤1", "步骤2", ...],   // 3~6 个有序执行步骤,每步一句话\n'
+    '  "files": ["index.html"],   // 需生成的文件列表;多页面站点列出全部(首页必须 index.html),如 ["index.html","products.html","about.html"]\n'
     '  "design_spec": {\n'
     '     "mood": "整体调性(如 高级/克制/科技/温润)",\n'
     '     "visual_strategy": "差异化视觉策略(1-2句,如 玻璃拟态分层 + 渐变光晕 + 磁吸交互)",\n'
@@ -105,31 +107,51 @@ SYS_CODER = (
     "【多页面站点】若需求含多个页面(如 首页/产品/关于我们/联系我们),请为每个页面生成独立 HTML 文件,"
     "英文 slug 命名(如 index.html、products.html、about.html、contact.html),文件间通过统一顶部导航相互链接,"
     "并保持相同的设计语言与 CSS/JS 引用;首页必须命名为 index.html。文件树会列出全部页面,用户可在右侧面板切换预览。"
-    "不要输出 markdown 代码块围栏(```)、不要输出多余解释。\n\n"
+    "不要输出 markdown 代码块围栏(```)、不要输出多余解释。\n"
+    "⚠️ 若上方『必须生成的文件列表』给出了具体文件名,你必须【严格按该列表逐一生成】(每个文件以 <!-- FILE: 文件名 --> 开头),"
+    "缺一不可;页面之间(尤其顶部导航)必须互相链接到这些真实文件名(如 <a href=\"products.html\">产品</a>),"
+    "严禁使用 href=\"#\" 占位链接(预览中跳不动、会被评审判不通过)。\n\n"
     "【链接与资源硬约束——必须严格遵守】\n"
     "• 所有站内链接(href)与资源引用(src)必须使用【相对路径】,例如 page.html、styles/style.css、script.js;"
     "页面之间互相链接就用对方的文件名(about.html、contact.html),不要用带域名的绝对 URL。\n"
-    "• 严禁写出 `/artifacts/...` 开头的本平台内部绝对路径;严禁为站内资源写 `http(s)://本站域名/...` 绝对地址"
-    "(外部 CDN 如 fonts.googleapis.com、cdn.jsdelivr.net 等第三方资源除外,可保留)。\n"
+    "• 严禁写出 `/artifacts/...` 开头的本平台内部绝对路径;严禁为站内资源写 `http(s)://本站域名/...` 绝对地址。\n"
     "• 违反此约束会导致站内导航在预览中失效(404/跨域),请在生成时务必自查所有 `href`/`src` 均为相对引用。\n\n"
-    "【高级视觉与交互硬标准——必须满足】\n"
-    "1. 视觉质感: 使用玻璃拟态(glassmorphism)、柔和分层阴影、渐变光晕/微噪点质感、克制留白;"
+    "【样式与依赖硬约束——强制】\n"
+    "• 平台已内置 SeedPremium 玻璃拟态设计系统(随页面自动内联,无需你手写基础样式)。"
+    "你必须【只使用该系统提供的 class】(见下方白名单),不要自己从零堆样式,也不要重复定义 :root 变量。\n"
+    "• 基础样式与交互首选 SeedPremium(玻璃拟态/卡片/按钮/进场动画已全部内置)。\n"
+    "• 若确实需要额外框架/库(Vue/React/jQuery/Swiper/Bootstrap/Chart.js/Three.js 等),"
+    "【只能从下方『本地组件库白名单』选取】,并一律用 /vendor/libs/<name>/<file> 根绝对路径引入"
+    "(如 <script src=\"/vendor/libs/vue/vue.global.prod.js\">)。"
+    "该目录已预置在服务器域名根,发布后全站共享、无需重复下载、离线可用。\n"
+    "• 严禁再引入任何外部【JS/CSS 框架 CDN】: 包括但不限于 unpkg.com、cdn.jsdelivr.net、cdn.tailwindcss.com、"
+    "cdnjs、code.jquery.com,以及 React / Vue / Babel / Tailwind Play CDN 等运行时。"
+    "这些在离线/沙箱预览中不可达,会导致页面变灰块或白屏;需要它们请改用本地 /vendor/libs 白名单。\n"
+    "• 字体: 仅使用系统字体栈(已内置在 SeedPremium 的 .display/h1/h2/h3/.lead 中),"
+    "严禁引入任何外部字体 CDN(含 fonts.googleapis.com / fonts.gstatic.com / 各类 iconfont CDN);"
+    "离线/沙箱预览无法加载外部字体,会回退但不可控。需要图标请用内联 SVG 或 SeedPremium 内置标记。\n"
+    "• 严禁使用占位图服务(via.placeholder.com / placeholder.com / dummyimage 等),"
+    "预览环境无法访问会显示灰块。图片请使用真实图片 URL(https 可达)或直接内联 SVG。\n\n"
+    + VENDOR_REFERENCE + "\n\n"
+    + (LIBS_REFERENCE + "\n\n" if LIBS_REFERENCE else "")
+    + "【高级视觉与交互硬标准——必须满足】\n"
+    "1. 视觉质感: 优先用 .glass / .card 玻璃拟态 + 柔和分层阴影 + 渐变光晕,克制留白;"
     "杜绝大色块平涂与廉价渐变。配色须经设计且符合 WCAG AA 对比度。\n"
-    "2. 排版: 建立清晰字号层级(Display/标题/正文/辅助),使用系统字体栈或 Google Fonts,"
+    "2. 排版: 使用系统字体栈(已内置)或 Google Fonts,层级用 .display/h1/h2/h3/.lead 体现,"
     "字距与行高经过调校,呈现『编辑级』排版。\n"
-    "3. 微交互: 按钮/卡片 hover 有磁吸或抬升、平滑 cubic-bezier 缓动;"
-    "重要元素进入视口时用 IntersectionObserver 渐显/位移。\n"
-    "4. 动效性能: 仅 animate transform/opacity,目标 60fps;尊重 prefers-reduced-motion。\n"
-    "5. 响应式: 移动端单列、桌面多列,断点合理;触控目标 ≥44px。\n"
-    "6. 主题变量: 在 :root 用 CSS 变量暴露主色/背景/圆角/阴影,便于切换;若规格要求则实现浅/暗双主题。\n"
-    "7. 结构/可访问性: 语义化标签 + 必要 aria;英雄区(Hero)有强视觉焦点与清晰 CTA。\n"
+    "3. 微交互: 按钮用 .btn / .btn-primary / .btn-ghost,加 data-magnetic=\"0.25\" 实现磁吸;"
+    "卡片 .card 已有 hover 抬升;重要区块加 class=\"reveal\" 实现滚动渐显。\n"
+    "4. 动效性能: 仅 animate transform/opacity,目标 60fps;尊重 prefers-reduced-motion(系统已处理)。\n"
+    "5. 响应式: .grid-2/3/4 自动断点;移动端单列;触控目标 ≥44px(.btn 已保证)。\n"
+    "6. 主题变量: 改 :root 的 --brand/--brand-2/--bg 等变量即可换肤;深色在 <html class=\"dark\"> 切换。\n"
+    "7. 结构/可访问性: 语义化标签 + 必要 aria;英雄区(.hero)有强视觉焦点与清晰 CTA(.btn-primary)。\n"
     "8. 内容: 不输出 lorem 占位或灰底色块;每一屏都要有真实信息与精心排布的内容。"
 )
 
 SYS_CODER_GAME = (
     "你是一名游戏开发者。生成一个完整的单文件 HTML 互动小游戏。"
-    "必须引入 Three.js CDN: "
-    "<script src=\"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js\"></script>。"
+    "必须引入本地 Three.js(已预置,无需外网): "
+    "<script src=\"/vendor/libs/three/three.min.js\"></script>。"
     "游戏要素: 3D/2D 场景 + 玩家控制(键盘+触屏) + 碰撞/得分 + 开始/重新开始按钮 + 操作提示。"
     "视觉打磨: 发光粒子 / HUD / 流畅帧率 / 赛博感配色;把 CSS/JS 全部内联,"
     "只输出完整 HTML,不要解释、不要 markdown 代码块围栏(```)。"
@@ -144,6 +166,11 @@ SYS_REVIEWER = (
     "且 DOM 选择器能匹配到元素: 逐项核对每个可见交互控件, 确认存在 addEventListener/onclick="
     "().querySelector(.+)/getElementById(.+) 之类绑定且 class/id 与 HTML 中一致;"
     "若页面含『点击 X 跳转/切换/提交』但找不到对应事件或选择器对不上, 视为未实现(不通过)。\n"
+    "【评审范围说明】你看到的 HTML 可能是被截断的片段(尤其多文件站点只取了首个文件的前若干字符),"
+    "因此『结构完整性(标签是否闭合 / 是否有 <html 根标签)』已由上游静态检查保证,你无需重复判断,"
+    "也不要仅因『看不到结尾』就判不通过;请聚焦于可见内容的质量维度: 视觉质感 / 微交互 / 配色对比度 /"
+    "排版层级 / 可访问性 是否达到『高级感』,以及是否存在明显会导致白屏的致命 JS 错误(eval / 未定义调用)。"
+    "若可见部分无明显问题,应判 passed=true。\n"
     "输出 JSON(不要代码块围栏):\\n"
     '{"passed": true/false, "comment": "..., 最多60字", '
     '"scores": {"correctness": 1-10, "completeness": 1-10, "readability": 1-10, '
@@ -213,6 +240,46 @@ def _extract_html(text: str) -> str:
     return text.strip()
 
 
+def _extract_page_files(req_text: str, plan_files: "list | None") -> list[str]:
+    """从用户需求(显式点名的 *.html)与 Planner 文件列表提取本次应生成的页面文件名。
+
+    用于把『多文件强约束』钉进 Coder prompt:保证多页面站点真的分文件输出、导航互相跳转。
+    index.html 永远置首(平台约定入口)。
+    """
+    found: list[str] = []
+    for m in re.findall(r"[\w\-]+\.html", req_text or "", re.IGNORECASE):
+        f = m.strip().lower()
+        if f not in found:
+            found.append(f)
+    for f in (plan_files or []):
+        if isinstance(f, str):
+            f = f.strip().lower()
+            if f.endswith(".html") and f not in found:
+                found.append(f)
+    if not found:
+        found = ["index.html"]
+    if "index.html" in found:
+        found.remove("index.html")
+    found.insert(0, "index.html")
+    return found
+
+
+def _coder_with_files(base: str, page_files: list[str]) -> str:
+    """把『本次必须生成的文件列表』钉进 Coder 系统提示(仅多文件时生效)。"""
+    if len(page_files) <= 1:
+        return base
+    others = [f for f in page_files if f != "index.html"]
+    return (
+        base
+        + "\n\n【本次必须生成的文件(严格按此列表,缺一不可)】\n"
+        + "\n".join(f"• {f}" for f in page_files)
+        + "\n每个文件必须以 `<!-- FILE: 文件名 -->` 单独标记开头(参考上方『多文件规范』)。"
+        + "页面之间(尤其顶部导航)必须互相链接到这些真实文件名,例如 "
+        + "、".join(f'<a href="{f}">页面</a>' for f in others)
+        + ' 形式的链接;严禁使用 href="#" 占位链接(预览中跳不动、会被评审判不通过)。'
+    )
+
+
 def _parse_plan(raw: str) -> dict:
     """把 Planner 的 JSON 输出安全解析为计划结构。
 
@@ -244,10 +311,14 @@ def _parse_plan(raw: str) -> dict:
                 steps.append(line)
         steps = steps[:6]
     design_spec = data.get("design_spec") if isinstance(data.get("design_spec"), dict) else {}
-    return {"title": title, "goal": goal, "reasoning": reasoning, "steps": steps, "design_spec": design_spec}
+    files_raw = data.get("files") or []
+    files = [str(f).strip() for f in files_raw if isinstance(f, str) and str(f).strip()]
+    return {"title": title, "goal": goal, "reasoning": reasoning, "steps": steps,
+            "design_spec": design_spec, "files": files}
 
 
-async def _review(model_id: str, html: str) -> Dict:
+async def _review(model_id: str, html: str, intent: Optional[str] = None,
+                expected_files: Optional[list] = None) -> Dict:
     """3-C: 静态分析 + LLM 自审(7 维, v1.2.0 统一打分)。
 
     返回含 needs_review 的评审结果, 供:
@@ -294,10 +365,55 @@ async def _review(model_id: str, html: str) -> Dict:
                 "scores": {"correctness": 3, "completeness": 4, "readability": 5,
                            "compliance": 5, "efficiency": 5, "craft": 4, "safety": 8},
                 "issues": ["交互控件缺少 JS 事件绑定(按钮/导航点击无反应)"], "needs_review": True}
+    # #598 静态围栏: 禁止外部 JS/CSS 框架 CDN 与占位图(离线/沙箱预览不可达 → 白屏/灰块)。
+    # 仅游戏意图允许 Three.js CDN, 其余一律禁止。匹配 src/href 里的域名关键字。
+    _blocked_cdn = re.search(
+        r"(unpkg\.com|cdn\.jsdelivr\.net|cdnjs\.cloudflare\.com|cdn\.tailwindcss\.com|"
+        r"reactjs\.org|react\.dev|babeljs\.io|code\.jquery\.com|via\.placeholder\.com|"
+        r"placeholder\.com|dummyimage\.com|fonts\.googleapis\.com|fonts\.gstatic\.com|"
+        r"fonts\.google\.com)",
+        html, re.IGNORECASE)
+    _is_game_whitelist = (intent == "game" and
+                          re.search(r"/vendor/libs/three/three\.min\.js", html, re.IGNORECASE))
+    if _blocked_cdn and not _is_game_whitelist:
+        GEN_LOG.warning("[gen] 静态校验未通过: 含禁用外部 CDN/占位图 %s", _blocked_cdn.group(0))
+        return {"passed": False,
+                "comment": f"检测到禁用外部依赖({_blocked_cdn.group(0)}), 离线预览会变灰块/白屏, 须改用内置 SeedPremium",
+                "scores": {"correctness": 4, "completeness": 5, "readability": 5,
+                           "compliance": 2, "efficiency": 5, "craft": 3, "safety": 8},
+                "issues": ["引用外部 CDN/框架/占位图(违反平台依赖白名单)"], "needs_review": True}
+    # 多文件强校验: 若本次明确要求生成多个 HTML 文件(>1), 但输出未用 <!-- FILE: --> 分文件,
+    # 或导航里出现 href="#" 占位死链 → 判不通过, 触发 Reflexion 让 Coder 补充分文件/真实跳转。
+    _exp_html = [f for f in (expected_files or []) if str(f).lower().endswith(".html")]
+    if len(_exp_html) > 1:
+        if not re.search(r'<!--\s*FILE:\s*.+?\s*-->', html, re.IGNORECASE):
+            GEN_LOG.warning("[gen] 静态校验未通过: 要求多文件但无 <!-- FILE: --> 标记")
+            return {"passed": False,
+                    "comment": "需求要求生成多页面/多文件,但输出未使用 <!-- FILE: 文件名 --> 分文件标记,须按规范分文件输出",
+                    "scores": {"correctness": 4, "completeness": 4, "readability": 5,
+                               "compliance": 3, "efficiency": 5, "craft": 3, "safety": 8},
+                    "issues": ["未按多文件规范输出(缺少 <!-- FILE: --> 标记)"], "needs_review": True}
+        # 导航/菜单里的占位死链 href="#" 在多页站点会导致跳转失效
+        _nav_dead = re.search(
+            r'(<nav|class\s*=\s*["\'][^"\']*nav|class\s*=\s*["\'][^"\']*menu|navbar)'
+            r'[\s\S]{0,900}?href\s*=\s*["\']#["\']',
+            html, re.IGNORECASE)
+        if _nav_dead:
+            GEN_LOG.warning("[gen] 静态校验未通过: 导航含 href=\"#\" 死链")
+            return {"passed": False,
+                    "comment": "导航/菜单中存在 href=\"#\" 占位死链,多页站点必须互相链接到真实文件名(如 products.html)",
+                    "scores": {"correctness": 4, "completeness": 5, "readability": 5,
+                               "compliance": 3, "efficiency": 5, "craft": 3, "safety": 8},
+                    "issues": ["导航含 href=\"#\" 死链(应改为相对文件名跳转)"], "needs_review": True}
     # LLM 自审(给 JSON 结论)
     try:
         t0r = time.monotonic()
-        out = await asyncio.to_thread(_chat, model_id, SYS_REVIEWER, [{"role": "user", "content": html[:6000]}])
+        # LLM 自审片段: 多文件时取首个完整文件(index.html), 且给足长度(整文件, 上限 24k),
+        # 避免截断导致误判"未闭合/不完整"。结构完整性已由上方静态检查保证。
+        _rev_files = _parse_multi_files(html)
+        _rev_doc = _rev_files.get("index.html", html) if len(_rev_files) > 1 else html
+        _llm_slice = _rev_doc[:24000]
+        out = await asyncio.to_thread(_chat, model_id, SYS_REVIEWER, [{"role": "user", "content": _llm_slice}])
         await record_llm_call(model_id, True, (time.monotonic() - t0r) * 1000)
         m = re.search(r"\{.*\}", out, re.DOTALL)
         if m:
@@ -352,6 +468,59 @@ def _parse_multi_files(raw: str) -> dict[str, str]:
     if not files:
         files['index.html'] = raw.strip()
     return files
+
+
+def _assemble_marked(files: "dict[str, str]") -> str:
+    """把 {文件名: 内容} 组装成带 <!-- FILE: 文件名 --> 标记的单段 HTML,
+    供 _deliver / _parse_multi_files / 评审消费。单文件时直接返回内容(与原行为一致)。"""
+    if len(files) <= 1:
+        return next(iter(files.values()), "")
+    return "\n\n".join(f"<!-- FILE: {f} -->\n{c}" for f, c in files.items())
+
+
+def _page_instruction(fname: str, page_files: "list[str]") -> str:
+    """多文件场景: 让 Coder 只生成『当前这一个文件』,用相对文件名互相链接。
+    关键: 不依赖模型自己切分(实测 deepseek 经常漏写 <!-- FILE: --> 标记),
+    由我们在 _assemble_marked 里统一组装,保证多页站真的分文件落盘。"""
+    others = [f for f in page_files if f != fname]
+    nav_list = "、".join(page_files)
+    return (
+        f"【本次只生成文件 `{fname}`】这是多页面网站的一部分,整站包含以下页面: {nav_list}。\n"
+        f"要求:\n"
+        f"1. 只输出 `{fname}` 这一个文件的【完整 HTML】(从 <!DOCTYPE html> 到 </html>),"
+        f"不要写 `<!-- FILE: -->` 标记,也不要用 markdown 代码围栏包裹。\n"
+        f"2. 页面顶部必须有导航栏,用【相对文件名】链接到本站其他页面"
+        f"(如 <a href=\"products.html\">产品</a>),禁止 href=\"#\" 占位链接。\n"
+        f"3. 本站其他页面为: {('、'.join(others) if others else '无')}。"
+        f"各页面导航栏与视觉风格必须一致(同一品牌/配色/字体)。\n"
+        f"4. 首页(index.html)导航应覆盖全部页面;子页导航同样要能跳回首页及其他页。"
+    )
+
+
+async def _gen_pages(out: "dict[str, str]", page_files: "list[str]", base_user_msgs: list,
+                   system: str, model_id: str, is_cancelled, trace_id: str) -> "AsyncGenerator":
+    """生成整站。多文件=每页一次 Coder 调用(可靠切分);单文件=一次调用(行为不变)。
+    逐页 yield gen_file / token / degraded 事件,并把每页 HTML 写入 out[fname]。"""
+    for fname in page_files:
+        yield ev("gen_file", name=fname)
+        yield ev("node", stage="enter_coder")
+        GEN_LOG.info("[gen] Coder(页) 开始 trace=%s file=%s", trace_id, fname)
+        user_msgs = list(base_user_msgs)
+        if len(page_files) > 1:
+            user_msgs = user_msgs + [{"role": "user", "content": _page_instruction(fname, page_files)}]
+        parts: list = []
+        async for chunk, mid in astream_with_fallback(model_id, user_msgs, system=system):
+            if await _cancelled_now(is_cancelled):
+                yield ev("aborted")
+                return
+            text = getattr(chunk, "content", chunk)
+            if text:
+                parts.append(text)
+                yield ev("token", data=text)
+        if mid != model_id:
+            yield ev("degraded", model=mid, requested=model_id)
+        out[fname] = _extract_html("".join(parts))
+        GEN_LOG.info("[gen] Coder(页) 完成 trace=%s file=%s chars=%s", trace_id, fname, len(out[fname]))
 
 
 def _normalize_relative_links(html: str, filenames: "set[str]") -> str:
@@ -426,10 +595,17 @@ async def _deliver(html: str, trace_id: str, user_id: int | None = None,
       - 前端拼 `${location.origin}/artifacts/{path}` 同源预览(零超长内容下发)。
     """
     from shared.artifacts import site_dir as _site_dir, to_rel_path, rel_path_for
+    from shared.vendor import ensure_vendor
 
     files = _parse_multi_files(html)
     # q-2: 落盘后统一校验+修正页面内链接为相对路径, 把多页跳转钉死(见 _normalize_relative_links)。
     files = {f: _normalize_relative_links(c, files.keys()) for f, c in files.items()}
+    # #599: 落盘前内联 SeedPremium 设计系统(CSS/JS), 保证预览离线/iframe 可用、
+    # 且模型即使没引也不缺样式; 模型若已内联同样标记会幂等跳过。
+    files = {
+        f: (ensure_vendor(c) if f.lower().endswith((".html", ".htm")) else c)
+        for f, c in files.items()
+    }
 
     base = _site_dir(user_id, project_id, version)
     base.mkdir(parents=True, exist_ok=True)
@@ -647,6 +823,11 @@ async def generate_stream(
     first_user_msg = req_text or (messages[-1].get("content", "") if messages else "")
     GEN_LOG.info("[gen] 需求来源=%s 长度=%d trace=%s", req_source, len(req_text), trace_id)
 
+    # 多文件强约束: 从用户需求(显式点名的 *.html)提取页面文件列表,钉进 Coder prompt,
+    # 保证多页面站点真的分文件输出、导航互相跳转。Planner 完成后用其 files 列表精修。
+    page_files = _extract_page_files(req_text, [])
+    coder_prompt_eff = _coder_with_files(coder_prompt, page_files)
+
     # ② 需求闸门(修复 RC2): 选中需求为空, 或无建站语义且无摘要时, 不发"垃圾站",
     #    直接 clarify 早退, 引导用户补充明确需求。
     _has_site = any(kw in req_text for kw in _BUILD_KW)
@@ -698,7 +879,7 @@ async def generate_stream(
             user_msgs = user_msgs + list(messages)
             # 重新执行 Coder
             html_parts = []
-            async for chunk, _ in astream_with_fallback(model_id, user_msgs, system=coder_prompt):
+            async for chunk, _ in astream_with_fallback(model_id, user_msgs, system=coder_prompt_eff):
                 if await _cancelled_now(is_cancelled):
                     yield ev("aborted"); return
                 text = getattr(chunk, "content", chunk)
@@ -707,7 +888,7 @@ async def generate_stream(
             # 进 Reviewer r1
             for attempt in range(3):
                 yield ev("node", stage="enter_reviewer", attempt=attempt + 1)
-                review = await _review(model_id, html)
+                review = await _review(model_id, html, expected_files=page_files)
                 await record_reviewer(SKILL_NAME, review, reason=_review_reason(review))
                 GEN_LOG.info("[gen] Reviewer 第%s轮(恢复) trace=%s passed=%s llm_fail=%s", attempt + 1, trace_id, review["passed"], review.get("llm_fail", False))
                 if review["passed"]:
@@ -720,7 +901,7 @@ async def generate_stream(
                 yield ev("node", stage="enter_coder", retry=True)
                 fix_msgs = [{"role": "user", "content": f"上一版未通过:{review['comment']}\n修正 HTML:\n{html[:8000]}"}]
                 hp = []
-                async for chunk, _ in astream_with_fallback(model_id, fix_msgs, system=coder_prompt):
+                async for chunk, _ in astream_with_fallback(model_id, fix_msgs, system=coder_prompt_eff):
                     if await _cancelled_now(is_cancelled):
                         yield ev("aborted"); return
                     text = getattr(chunk, "content", chunk)
@@ -735,7 +916,7 @@ async def generate_stream(
                 attempt = int(stage[-1])
             for a in range(attempt, 3):
                 yield ev("node", stage="enter_reviewer", attempt=a + 1)
-                review = await _review(model_id, html)
+                review = await _review(model_id, html, expected_files=page_files)
                 await record_reviewer(SKILL_NAME, review, reason=_review_reason(review))
                 if review["passed"] or review.get("llm_fail") or a >= 2:
                     yield ev("think", stage="reviewer", passed=review["passed"],
@@ -745,7 +926,7 @@ async def generate_stream(
                 yield ev("node", stage="enter_coder", retry=True)
                 fix_msgs = [{"role": "user", "content": f"修正:{review['comment']}\nHTML:\n{html[:8000]}"}]
                 hp = []
-                async for chunk, _ in astream_with_fallback(model_id, fix_msgs, system=coder_prompt):
+                async for chunk, _ in astream_with_fallback(model_id, fix_msgs, system=coder_prompt_eff):
                     if await _cancelled_now(is_cancelled):
                         yield ev("aborted"); return
                     text = getattr(chunk, "content", chunk)
@@ -817,6 +998,9 @@ async def generate_stream(
                                   error_type=type(e).__name__)
             raise
         plan = _parse_plan(spec)
+        # 用 Planner 给出的 files 列表精修多文件约束(需求里点名 + Planner 推断取并集)
+        page_files = _extract_page_files(req_text, plan.get("files", []))
+        coder_prompt_eff = _coder_with_files(coder_prompt, page_files)
         GEN_LOG.info(
             "[gen] Planner 完成 trace=%s title=%s steps=%s",
             trace_id, plan.get("title", "-"), len(plan.get("steps", [])),
@@ -835,32 +1019,22 @@ async def generate_stream(
         # 变成死代码, 且会让前端卡在「running/await_confirm」无法继续。
         # 现在方案以 plan 事件展示后即开始生成, 无需用户手动确认(用户要停可随时点停止)。
 
-        # 2) Coder(流式,模型不可用时不自动降级,由前端确认后重发)
-        # 提前告知前端正在生成的文件名(供跑马灯占位 + loading 状态), 不含文件内容
-        yield ev("gen_file", name="index.html")
-        yield ev("node", stage="enter_coder")
-        GEN_LOG.info("[gen] Coder 开始 trace=%s model=%s", trace_id, model_id)
+        # 2) Coder(流式): 多文件=逐页生成(可靠切分); 单文件=原单次调用
+        GEN_LOG.info("[gen] Coder 开始 trace=%s model=%s pages=%d", trace_id, model_id, len(page_files))
         user_msgs = [{"role": "user", "content": f"需求规格:\n{spec}"}]
         if req_text:
             user_msgs.append({"role": "user", "content": f"【用户原始需求(来源: {req_source})】\n{req_text}"})
         user_msgs = user_msgs + list(messages)
-        html_parts: list = []
+        _files: dict[str, str] = {}
         token_count = 0
-        async for chunk, mid in astream_with_fallback(model_id, user_msgs, system=coder_prompt):
-            if await _cancelled_now(is_cancelled):
-                yield ev("aborted")
-                return
-            text = getattr(chunk, "content", chunk)
-            if text:
-                html_parts.append(text)
+        async for _ev in _gen_pages(_files, page_files, user_msgs, coder_prompt_eff, model_id, is_cancelled, trace_id):
+            if _ev.get("event") == "token":
                 token_count += 1
-                yield ev("token", data=text)
-        if mid != model_id:
-            yield ev("degraded", model=mid, requested=model_id)
-        html = _extract_html("".join(html_parts))
+            yield _ev
+        html = _assemble_marked(_files)
         GEN_LOG.info(
-            "[gen] Coder 完成 trace=%s chars=%s chunks=%s model=%s",
-            trace_id, len(html), token_count, model_id,
+            "[gen] Coder 完成 trace=%s chars=%s pages=%d chunks=%s model=%s",
+            trace_id, len(html), len(_files), token_count, model_id,
         )
         # 检查取消(断点保存点 2: coder_done)
         if await _cancelled_now(is_cancelled):
@@ -875,7 +1049,7 @@ async def generate_stream(
         # 3) Reviewer + Reflexion(≤3 轮)
         for attempt in range(3):
             yield ev("node", stage="enter_reviewer", attempt=attempt + 1)
-            review = await _review(model_id, html)
+            review = await _review(model_id, html, expected_files=page_files)
             await record_reviewer(SKILL_NAME, review, reason=_review_reason(review))
             GEN_LOG.info(
                 "[gen] Reviewer 第%s轮 trace=%s passed=%s llm_fail=%s",
@@ -902,26 +1076,17 @@ async def generate_stream(
                 yield ev("paused", stage=f"reviewer_r{attempt}", progress=75 + attempt * 10)
                 yield ev("done")
                 return
-            # Reflexion: 让 Coder 基于评审建议修正
+            # Reflexion: 基于评审意见重新生成(多文件逐页 / 单文件单次, 行为一致)
             yield ev("node", stage="enter_coder", retry=True)
-            fix_msgs = [
-                {
-                    "role": "user",
-                    "content": f"上一版未通过评审:{review['comment']}\n请修正以下 HTML:\n{html[:8000]}",
-                }
-            ]
-            html_parts = []
-            async for chunk, mid in astream_with_fallback(model_id, fix_msgs, system=coder_prompt):
-                if await _cancelled_now(is_cancelled):
-                    yield ev("aborted")
-                    return
-                text = getattr(chunk, "content", chunk)
-                if text:
-                    html_parts.append(text)
-                    yield ev("token", data=text)
-            if mid != model_id:
-                yield ev("degraded", model=mid, requested=model_id)
-            html = _extract_html("".join(html_parts))
+            _fix_user = list(user_msgs)
+            _fix_user.append({
+                "role": "user",
+                "content": f"上一版未通过评审:{review['comment']}\n请按上述意见修正并重新生成整站(多页面需分别输出各文件)。",
+            })
+            _files2: dict[str, str] = {}
+            async for _ev in _gen_pages(_files2, page_files, _fix_user, coder_prompt_eff, model_id, is_cancelled, trace_id):
+                yield _ev
+            html = _assemble_marked(_files2)
 
         # 4) 预览投递(P1 本地路径,§10)
         yield ev("node", stage="previewing")

@@ -290,6 +290,7 @@ async def _build_messages_from_db(db: AsyncSession, conversation_id: int, reques
             stmt = stmt.order_by(desc(Message.id)).limit(settings.chat_recent_limit)
             result = await db.execute(stmt)
             db_msgs = list(result.scalars().all())
+            db_total = len(db_msgs)
             db_msgs.reverse()  # 恢复时间线升序
             for m in db_msgs:
                 content = m.content or ""
@@ -300,7 +301,7 @@ async def _build_messages_from_db(db: AsyncSession, conversation_id: int, reques
                     content = content[:2000] + "...(已截断)"
                 messages.append({"role": m.role, "content": content})
             logger.info("[chat] MySQL回源 conv=%d cursor=%s db_total_fetched=%d kept=%d",
-                       conversation_id, cursor_id or 'latest', len(messages))
+                       conversation_id, cursor_id or 'latest', db_total, len(messages))
         except Exception as e:
             logger.warning("[chat] MySQL查询失败 conv=%d err=%s", conversation_id, e)
 

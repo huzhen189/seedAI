@@ -131,7 +131,10 @@ def get_chat_model(model_id: str, streaming: bool = True) -> ChatOpenAI:
         streaming=streaming,
         temperature=0.4,
         max_tokens=8192,
-        request_timeout=httpx.Timeout(connect=15.0, read=120.0, write=15.0, pool=10.0),
+        # read 超时从 120s 提到 900s: 长链路流式生成(单页 3~8 万字符)时,
+        # deepseek 偶有数分钟静默(限流/批处理), 原 120s 会误判掉线 → 触发降级到 qwen 并拖慢整轮。
+        # 900s 给足单页生成余量(主模型 attempts=2 → 最坏 30min 才放弃, 但正常生成远小于此)。
+        request_timeout=httpx.Timeout(connect=15.0, read=900.0, write=15.0, pool=10.0),
         max_retries=2,
     )
 
