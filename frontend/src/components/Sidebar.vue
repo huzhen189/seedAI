@@ -7,6 +7,7 @@ import {
   type MessageSearchResult,
 } from '../api/projects'
 import type { Conversation } from '../types'
+import Icon from './Icon.vue'
 
 defineProps<{ collapsed: boolean }>()
 const emit = defineEmits<{
@@ -155,11 +156,11 @@ watch(showSearch, (v) => {
   <aside class="sidebar" :class="{ collapsed }">
     <div class="actions">
       <template v-if="!collapsed">
-        <button class="act" title="新建项目" @click="newProject">＋</button>
-        <button class="act" title="搜索" @click="showSearch = !showSearch">🔍</button>
+        <button class="act" title="新建项目" @click="newProject"><Icon name="plus" :size="16" /></button>
+        <button class="act" title="搜索" @click="showSearch = !showSearch"><Icon name="search" :size="16" /></button>
       </template>
       <button class="act toggle-btn" :title="collapsed ? '展开' : '收起'" @click="emit('toggle')">
-        {{ collapsed ? '▶' : '◀' }}
+        <Icon :name="collapsed ? 'chevronRight' : 'chevronLeft'" :size="16" />
       </button>
     </div>
 
@@ -174,7 +175,7 @@ watch(showSearch, (v) => {
           class="sitem"
           @click="pickSearch(r)"
         >
-          {{ r.type === 'project' ? '📁' : '💬' }} {{ r.title }}
+          <Icon :name="r.type === 'project' ? 'folder' : 'message'" :size="14" /> {{ r.title }}
         </div>
       </div>
       <div v-if="msgResults.length" class="sres msg-results">
@@ -185,9 +186,9 @@ watch(showSearch, (v) => {
           class="sitem msg-item"
           @click="pickMessage(r)"
         >
-          <div class="msg-meta">📁 {{ r.project_name }} · 💬 {{ r.conv_title }}</div>
-          <div class="msg-user">🙋 {{ r.user_text }}</div>
-          <div v-if="r.ai_reply" class="msg-ai">🤖 {{ r.ai_reply }}</div>
+          <div class="msg-meta"><Icon name="folder" :size="12" /> {{ r.project_name }} · <Icon name="message" :size="12" /> {{ r.conv_title }}</div>
+          <div class="msg-user"><Icon name="user" :size="12" /> {{ r.user_text }}</div>
+          <div v-if="r.ai_reply" class="msg-ai"><Icon name="bot" :size="12" /> {{ r.ai_reply }}</div>
         </div>
       </div>
       <div v-if="!searching && !projectStore.searchResults.length && !msgResults.length && searchText" class="search-hint">无匹配结果</div>
@@ -201,7 +202,7 @@ watch(showSearch, (v) => {
           :class="{ active: p.id === projectStore.currentProjectId }"
           @click="selectProject(p.id)"
         >
-          <span class="caret" :class="{ open: expanded[p.id] }" @click.stop="toggleProject(p.id)">▸</span>
+          <span class="caret" :class="{ open: expanded[p.id] }" @click.stop="toggleProject(p.id)"><Icon name="chevronRight" :size="12" /></span>
           <span
             v-if="editingProjectId !== p.id"
             class="pname"
@@ -233,7 +234,7 @@ watch(showSearch, (v) => {
                 class="cname"
                 title="双击改名"
                 @dblclick.stop="startEditConvWithPid(c, p.id)"
-              >💬 {{ c.name || '会话' }}</span>
+              ><Icon name="message" :size="14" /> {{ c.name || '会话' }}</span>
               <input
                 v-else
                 v-model="editConvName"
@@ -247,7 +248,7 @@ watch(showSearch, (v) => {
           </template>
         </div>
       </div>
-      <div v-if="projectStore.projects.length === 0" class="empty">暂无项目，点 ＋ 新建</div>
+      <div v-if="projectStore.projects.length === 0" class="empty">暂无项目，点击上方按钮新建</div>
     </div>
     <div v-else class="plist collapsed">
       <div
@@ -257,7 +258,7 @@ watch(showSearch, (v) => {
         :class="{ active: p.id === projectStore.currentProjectId }"
         @click="toggleProject(p.id)"
       >
-        📁
+        <Icon name="folder" :size="14" />
       </div>
     </div>
   </aside>
@@ -323,7 +324,7 @@ watch(showSearch, (v) => {
 }
 .sres {
   margin-top: 6px;
-  background: #fff;
+  background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 8px;
   max-height: 200px;
@@ -335,7 +336,7 @@ watch(showSearch, (v) => {
   cursor: pointer;
 }
 .sitem:hover {
-  background: #eef2ef;
+  background: var(--surface-3);
 }
 .sres-label {
   font-size: 10px;
@@ -450,7 +451,7 @@ watch(showSearch, (v) => {
   cursor: pointer;
 }
 .pdot.active {
-  background: #def6ef;
+  background: var(--brand-bg);
   border-radius: 8px;
 }
 </style>

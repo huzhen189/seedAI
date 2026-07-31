@@ -141,7 +141,7 @@ async function save() {
 .card {
   width: 340px;
   max-width: 100%;
-  background: #fff;
+  background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 26px 22px;
@@ -210,7 +210,7 @@ async function save() {
   font-size: 12px;
 }
 .ok {
-  color: #16a34a;
+  color: var(--ok);
   font-size: 12px;
 }
 .card button.submit {

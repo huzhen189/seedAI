@@ -111,6 +111,6 @@ function seriesPoints(values: number[]): string {
 <style scoped>
 .radar { display: inline-block; }
 .legend { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 4px; }
-.lg { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #5d6b62; }
+.lg { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-3); }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 </style>

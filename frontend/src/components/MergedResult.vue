@@ -36,18 +36,18 @@ defineProps<{
 <style scoped>
 .merged {
   border: 1px solid var(--ok);
-  background: linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%);
+  background: linear-gradient(180deg, var(--ok-bg) 0%, var(--surface-1) 100%);
   border-radius: 12px;
   padding: 10px 14px;
   margin-top: 10px;
 }
-.merged.partial { border-color: var(--warn); background: linear-gradient(180deg, #fffbeb 0%, #ffffff 100%); }
+.merged.partial { border-color: var(--warn); background: linear-gradient(180deg, var(--warn-bg) 0%, var(--surface-1) 100%); }
 .merged-head { display: flex; align-items: center; gap: 8px; }
 .merged-icon { font-size: 16px; }
-.merged-title { font-weight: 700; font-size: 13.5px; color: #15803d; }
+.merged-title { font-weight: 700; font-size: 13.5px; color: var(--ok); }
 .merged.partial .merged-title { color: var(--warn); }
 .merged-counts { font-size: 12px; margin-left: auto; color: var(--muted); }
-.merged-counts .ok { color: #15803d; font-weight: 600; }
+.merged-counts .ok { color: var(--ok); font-weight: 600; }
 .merged-counts .bad { color: var(--warn); font-weight: 600; }
 .partial-list { margin-top: 8px; }
 .partial-title { font-size: 12px; color: var(--warn); margin-bottom: 4px; }
@@ -57,13 +57,13 @@ defineProps<{
   gap: 8px;
   font-size: 12px;
   padding: 4px 8px;
-  background: #fffbeb;
-  border: 1px solid #fde68a;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
   border-radius: 8px;
   margin-bottom: 4px;
 }
-.pid { font-weight: 700; color: #b45309; flex: none; }
-.pgoal { flex: 1; min-width: 0; color: #3f4a44; }
-.preason { flex: none; color: #b91c1c; max-width: 50%; text-align: right; }
-.all-ok { font-size: 12px; color: #15803d; margin-top: 6px; }
+.pid { font-weight: 700; color: var(--warn); flex: none; }
+.pgoal { flex: 1; min-width: 0; color: var(--text-2); }
+.preason { flex: none; color: var(--err); max-width: 50%; text-align: right; }
+.all-ok { font-size: 12px; color: var(--ok); margin-top: 6px; }
 </style>

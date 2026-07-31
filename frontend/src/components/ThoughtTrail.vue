@@ -240,7 +240,7 @@ function intentLabel(l: { level1: string; level2: string }): string {
   font-weight: 600;
   border-radius: 999px;
   padding: 3px 12px;
-  background: #eef2ef;
+  background: var(--surface-3);
   color: var(--muted);
   border: 1px solid transparent;
   transition: all 0.25s ease;
@@ -256,7 +256,7 @@ function intentLabel(l: { level1: string; level2: string }): string {
   border-radius: 10px;
   font-size: 13px;
   font-weight: 600;
-  color: #2b322e;
+  color: var(--text);
   border: 1px solid rgba(0, 0, 0, 0.06);
 }
 .badge {
@@ -267,13 +267,13 @@ function intentLabel(l: { level1: string; level2: string }): string {
   align-self: flex-start;
 }
 .badge.warn {
-  background: #fef3c7;
+  background: var(--warn-bg);
   color: var(--warn);
 }
 
 .plan-card {
-  border: 1px solid var(--brand2, #bdeee3);
-  background: linear-gradient(180deg, #def6ef 0%, #fafaff 100%);
+  border: 1px solid var(--brand2, var(--brand-border));
+  background: linear-gradient(180deg, var(--brand-bg) 0%, var(--surface-2) 100%);
   border-radius: 12px;
   padding: 12px 14px;
 }
@@ -282,7 +282,7 @@ function intentLabel(l: { level1: string; level2: string }): string {
 .plan-title { font-weight: 700; font-size: 14px; color: var(--brand); }
 .plan-goal { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
 .plan-steps { margin: 10px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
-.plan-steps li { font-size: 13px; line-height: 1.5; color: #3f4a44; }
+.plan-steps li { font-size: 13px; line-height: 1.5; color: var(--text-2); }
 
 .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 /* 每一步进入时播放入画动画: 新步骤挂载即触发, 形成"一条一条播放"的实时反馈感 */
@@ -301,7 +301,7 @@ function intentLabel(l: { level1: string; level2: string }): string {
 .step-body { flex: 1; min-width: 0; }
 .step-label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .step.active .step-label { color: var(--brand); }
-.pulse { font-size: 11px; font-weight: 500; color: var(--brand); background: #def6ef; border-radius: 999px; padding: 1px 8px; display: inline-flex; align-items: center; gap: 4px; animation: blink 1.2s ease-in-out infinite; }
+.pulse { font-size: 11px; font-weight: 500; color: var(--brand); background: var(--brand-bg); border-radius: 999px; padding: 1px 8px; display: inline-flex; align-items: center; gap: 4px; animation: blink 1.2s ease-in-out infinite; }
 /* 进行中打字指示点 */
 .typing { display: inline-flex; gap: 2px; }
 .typing i { width: 3px; height: 3px; border-radius: 50%; background: var(--brand); opacity: 0.4; animation: typingDot 1.2s infinite; }
@@ -309,27 +309,27 @@ function intentLabel(l: { level1: string; level2: string }): string {
 .typing i:nth-child(3) { animation-delay: 0.4s; }
 @keyframes typingDot { 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
 .ok { color: #22c55e; }
-.think { white-space: pre-wrap; word-break: break-word; background: #f6f9f7; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.6; color: #3f4a44; max-height: 200px; overflow: auto; margin: 6px 0 0; }
-.review { font-size: 12px; margin-top: 6px; line-height: 1.5; color: #3f4a44; }
-.review .pass { color: #16a34a; font-weight: 700; margin-right: 4px; }
-.review .fail { color: #dc2626; font-weight: 700; margin-right: 4px; }
+.think { white-space: pre-wrap; word-break: break-word; background: var(--surface-3); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.6; color: var(--text-2); max-height: 200px; overflow: auto; margin: 6px 0 0; }
+.review { font-size: 12px; margin-top: 6px; line-height: 1.5; color: var(--text-2); }
+.review .pass { color: var(--ok); font-weight: 700; margin-right: 4px; }
+.review .fail { color: var(--err); font-weight: 700; margin-right: 4px; }
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 
 /* Phase 1: think→call→observe 工具调用可见化(WorkBuddy 式) */
 .tool-trail { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
 .tt-item {
   display: flex; gap: 8px; align-items: flex-start;
-  background: #f6f9f7; border: 1px solid var(--border);
+  background: var(--surface-3); border: 1px solid var(--border);
   border-radius: 10px; padding: 8px 10px;
   animation: stepIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-.tt-item.reasoning { background: #def6ef; border-color: #bdeee3; }
+.tt-item.reasoning { background: var(--brand-bg); border-color: var(--brand-border); }
 .tt-ico { flex: none; font-size: 15px; line-height: 1.2; margin-top: 1px; }
 .tt-body { flex: 1; min-width: 0; }
 .tt-text { font-size: 12.5px; line-height: 1.6; color: #0e9b86; }
 .tt-row { display: flex; align-items: center; gap: 8px; }
 .tt-name {
-  font-size: 12.5px; font-weight: 600; color: #3f4a44;
+  font-size: 12.5px; font-weight: 600; color: var(--text-2);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .tt-spin { display: inline-flex; gap: 2px; }
@@ -339,8 +339,8 @@ function intentLabel(l: { level1: string; level2: string }): string {
 .tt-badge {
   font-size: 11px; font-weight: 600; border-radius: 999px; padding: 1px 8px;
 }
-.tt-badge.ok { background: #dcfce7; color: #16a34a; }
-.tt-badge.fail { background: #fee2e2; color: #dc2626; }
+.tt-badge.ok { background: var(--ok-bg); color: var(--ok); }
+.tt-badge.fail { background: var(--err-bg); color: var(--err); }
 .tt-args {
   font-size: 11.5px; color: var(--muted); margin-top: 3px; line-height: 1.5;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -352,9 +352,9 @@ function intentLabel(l: { level1: string; level2: string }): string {
 }
 .tt-result summary:hover { text-decoration: underline; }
 .tt-summary {
-  font-size: 12px; color: #3f4a44; margin-top: 4px; line-height: 1.5;
-  background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
+  font-size: 12px; color: var(--text-2); margin-top: 4px; line-height: 1.5;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
   white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow: auto;
 }
-.tt-summary.err { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
+.tt-summary.err { color: var(--err); border-color: var(--err-border); background: var(--err-bg); }
 </style>

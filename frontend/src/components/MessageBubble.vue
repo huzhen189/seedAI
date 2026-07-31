@@ -243,13 +243,13 @@ function fmtTime(t: string): string {
   line-height: 1.6;
 }
 .bubble.user {
-  background: #def6ef;
+  background: var(--brand-bg);
   border: 1px solid #cdeee7;
   align-self: flex-end;
   max-width: 90%;
 }
 .bubble.assistant {
-  background: #fff;
+  background: var(--surface-2);
   border: 1px solid var(--border);
   max-width: 100%;
 }
@@ -265,15 +265,15 @@ function fmtTime(t: string): string {
   margin: 0;
   max-height: 140px;
   overflow-y: auto;
-  color: #7e8e84;
-  background: #f6f9f7;
-  border: 1px solid var(--border, #e3e9e4);
+  color: var(--text-4);
+  background: var(--surface-3);
+  border: 1px solid var(--border, var(--surface-3));
   border-radius: 8px;
   padding: 8px 10px;
 }
 .expand {
   margin-top: 6px; font-size: 12px; color: var(--brand); cursor: pointer;
-  border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; background: #fff;
+  border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; background: var(--surface-2);
 }
 .time { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 6px; }
 
@@ -285,15 +285,15 @@ function fmtTime(t: string): string {
 
 /* ---- Error Card ---- */
 .error-card {
-  background: #fef2f2; border: 1px solid #fecaca;
-  border-radius: 8px; padding: 8px 12px; color: #b91c1c; font-size: 13px;
+  background: var(--err-bg); border: 1px solid var(--err-border);
+  border-radius: 8px; padding: 8px 12px; color: var(--err); font-size: 13px;
 }
 
 /* ---- Trail Card ---- */
 .trail-card { padding: 4px 0; }
 .trail-event {
   display: flex; align-items: flex-start; gap: 6px; padding: 3px 0;
-  font-size: 12px; color: #7e8e84;
+  font-size: 12px; color: var(--text-4);
 }
 .trail-badge { flex-shrink: 0; width: 18px; text-align: center; font-size: 10px; }
 
@@ -311,45 +311,45 @@ function fmtTime(t: string): string {
 }
 .qc-flag.gray { background: #9baba1; }
 .qc-detail {
-  margin-top: 8px; background: #f6f9f7; border: 1px solid #e3e9e4; border-radius: 10px; padding: 8px 10px;
+  margin-top: 8px; background: var(--surface-3); border: 1px solid var(--surface-3); border-radius: 10px; padding: 8px 10px;
 }
 .qc-dim {
   display: grid; grid-template-columns: 56px 1fr 30px 64px; align-items: center; gap: 8px;
   font-size: 12px; padding: 3px 0;
 }
-.qc-dim-label { color: #5d6b62; }
-.qc-bar { height: 6px; background: #e3e9e4; border-radius: 3px; overflow: hidden; }
+.qc-dim-label { color: var(--text-3); }
+.qc-bar { height: 6px; background: var(--surface-3); border-radius: 3px; overflow: hidden; }
 .qc-bar > i { display: block; height: 100%; border-radius: 3px; }
 .qc-mean { font-weight: 700; text-align: right; }
 .qc-judges { display: flex; gap: 3px; justify-content: flex-end; }
 .qc-dot {
   width: 18px; height: 18px; line-height: 18px; text-align: center; font-size: 10px;
-  background: #e3e9e4; border-radius: 4px; color: #5d6b62; font-style: normal;
+  background: var(--surface-3); border-radius: 4px; color: var(--text-3); font-style: normal;
 }
-.qc-dot.zero { color: #c6d2cb; background: #eef2ef; }
-.qc-risk { margin-top: 6px; font-size: 11px; color: #dc2626; font-weight: 600; }
+.qc-dot.zero { color: var(--text-3); background: var(--surface-3); }
+.qc-risk { margin-top: 6px; font-size: 11px; color: var(--err); font-weight: 600; }
 
 /* ---- 评价 ---- */
 .rate-footer { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 6px; }
 .rate-btn {
   font-size: 12px; cursor: pointer; border: 1px solid var(--brand); color: var(--brand);
-  background: #fff; border-radius: 999px; padding: 2px 12px; font-weight: 600;
+  background: var(--surface-2); border-radius: 999px; padding: 2px 12px; font-weight: 600;
 }
 .rate-btn:hover { background: color-mix(in srgb, var(--brand) 8%, #fff); }
 .rated { display: flex; align-items: center; gap: 8px; }
 .rated-label { font-size: 12px; color: var(--muted); }
 .rate-edit {
-  font-size: 11px; cursor: pointer; border: 1px solid var(--border); background: #fff;
+  font-size: 11px; cursor: pointer; border: 1px solid var(--border); background: var(--surface-2);
   border-radius: 6px; padding: 1px 8px; color: var(--brand); margin-left: auto;
 }
 .rate-panel {
-  margin-top: 8px; background: #f6f9f7; border: 1px solid #e3e9e4; border-radius: 10px; padding: 10px;
+  margin-top: 8px; background: var(--surface-3); border: 1px solid var(--surface-3); border-radius: 10px; padding: 10px;
 }
 .rate-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
-.rate-row-label { width: 56px; font-size: 12px; color: #5d6b62; flex-shrink: 0; }
+.rate-row-label { width: 56px; font-size: 12px; color: var(--text-3); flex-shrink: 0; }
 .stars { display: inline-flex; gap: 1px; }
 .stars .star {
-  font-size: 14px; color: #ccd4ce; cursor: pointer; transition: color .12s, transform .12s;
+  font-size: 14px; color: var(--text-3); cursor: pointer; transition: color .12s, transform .12s;
   font-style: normal; line-height: 1;
 }
 .stars .star.on { color: #f59e0b; }
@@ -362,7 +362,7 @@ function fmtTime(t: string): string {
   color: var(--brand); padding: 0;
 }
 .rate-dims {
-  background: #fff; border: 1px solid #e3e9e4; border-radius: 8px; padding: 4px 8px; margin-bottom: 6px;
+  background: var(--surface-2); border: 1px solid var(--surface-3); border-radius: 8px; padding: 4px 8px; margin-bottom: 6px;
 }
 .rate-comment {
   width: 100%; box-sizing: border-box; font-size: 12px; border: 1px solid var(--border);
@@ -375,7 +375,7 @@ function fmtTime(t: string): string {
 }
 .rate-submit:disabled { opacity: 0.5; cursor: not-allowed; }
 .rate-cancel {
-  font-size: 12px; cursor: pointer; border: 1px solid var(--border); background: #fff;
+  font-size: 12px; cursor: pointer; border: 1px solid var(--border); background: var(--surface-2);
   border-radius: 6px; padding: 4px 12px; color: var(--muted);
 }
 </style>

@@ -12,7 +12,7 @@ const STORAGE_KEY = 'seedai-theme'
 
 const prefs: ThemePref[] = ['light', 'dark', 'system']
 
-const currentPref = ref<ThemePref>('system') // 用户选择
+const currentPref = ref<ThemePref>('dark') // 用户选择(默认深色科技主题)
 const resolvedTheme = ref<'light' | 'dark'>('light') // 实际生效
 
 function systemPrefersDark(): boolean {

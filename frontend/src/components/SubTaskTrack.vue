@@ -152,7 +152,7 @@ const merging = computed(() => {
 <style scoped>
 .track {
   border: 1px solid var(--border);
-  background: linear-gradient(180deg, #fbfbff 0%, #ffffff 100%);
+  background: linear-gradient(180deg, var(--surface-2) 0%, var(--surface-1) 100%);
   border-radius: 14px;
   padding: 14px 16px;
   display: flex;
@@ -172,15 +172,15 @@ const merging = computed(() => {
   border-radius: 999px;
   padding: 2px 10px;
 }
-.strategy-parallel { background: #eafaf5; color: #0e9e8c; border: 1px solid #a5f3fc; }
-.strategy-mixed { background: #fef3ec; color: #6d28d9; border: 1px solid #c9eef1; }
+.strategy-parallel { background: var(--brand-bg-soft); color: var(--brand); border: 1px solid #a5f3fc; }
+.strategy-mixed { background: var(--violet-bg); color: #6d28d9; border: 1px solid #c9eef1; }
 .count { font-size: 12px; color: var(--muted); margin-left: auto; }
 
 .lanes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .merge-banner {
   display: flex; align-items: center; gap: 8px;
   font-size: 13px; font-weight: 600; color: #6d28d9;
-  background: #fef3ec; border: 1px solid #c9eef1; border-radius: 10px;
+  background: var(--violet-bg); border: 1px solid #c9eef1; border-radius: 10px;
   padding: 8px 12px;
 }
 .merge-icon { font-size: 16px; animation: lt-bounce 1.2s ease-in-out infinite; }
@@ -190,17 +190,17 @@ const merging = computed(() => {
   border-left: 3px solid var(--border);
   border-radius: 12px;
   padding: 10px 12px;
-  background: #ffffff;
+  background: var(--surface-2);
   transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.2s ease;
 }
 .lane.running { border-left-color: var(--brand); box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.08); }
 .lane.done { border-left-color: var(--ok); }
 .lane.failed { border-left-color: var(--err); }
-.lane.blocked { border-left-color: #7f1d1d; background: #fef2f2; }
-.lane.skipped { border-left-color: var(--warn); background: #fffbeb; }
-.lane.cancelled { border-left-color: #b91c1c; background: #fef2f2; }
-.lane.aborted { border-left-color: #7f1d1d; background: #fef2f2; }
-.lane.paused { border-left-color: #7e8e84; background: #f6f9f7; }
+.lane.blocked { border-left-color: #7f1d1d; background: var(--err-bg); }
+.lane.skipped { border-left-color: var(--warn); background: var(--warn-bg); }
+.lane.cancelled { border-left-color: var(--err); background: var(--err-bg); }
+.lane.aborted { border-left-color: #7f1d1d; background: var(--err-bg); }
+.lane.paused { border-left-color: var(--text-4); background: var(--surface-3); }
 
 /* §9: SOP 四角色进度条 */
 .sop-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
@@ -209,7 +209,7 @@ const merging = computed(() => {
   font-weight: 600;
   border-radius: 999px;
   padding: 3px 12px;
-  background: #eef2ef;
+  background: var(--surface-3);
   color: var(--muted);
   border: 1px solid transparent;
   transition: all 0.25s ease;
@@ -227,7 +227,7 @@ const merging = computed(() => {
 .status-icon.done { color: var(--ok); }
 .status-icon.failed, .status-icon.blocked { color: var(--err); }
 .status-icon.skipped { color: var(--warn); }
-.status-icon.cancelled, .status-icon.aborted { color: #b91c1c; }
+.status-icon.cancelled, .status-icon.aborted { color: var(--err); }
 .status-icon.paused { color: var(--muted); }
 .goal {
   flex: 1;
@@ -240,38 +240,38 @@ const merging = computed(() => {
   text-overflow: ellipsis;
 }
 .risk { font-size: 11px; font-weight: 700; border-radius: 999px; padding: 1px 8px; flex: none; }
-.risk-high { background: #fee2e2; color: #b91c1c; }
-.risk-medium { background: #fef3c7; color: var(--warn); }
-.risk-low { background: #dcfce7; color: #15803d; }
+.risk-high { background: var(--err-bg); color: var(--err); }
+.risk-medium { background: var(--warn-bg); color: var(--warn); }
+.risk-low { background: var(--ok-bg); color: var(--ok); }
 
 .lane-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .skill-tag {
   font-size: 11px;
   font-weight: 600;
-  background: #def6ef;
+  background: var(--brand-bg);
   color: var(--brand);
   border-radius: 6px;
   padding: 1px 8px;
 }
-.layer-tag { font-size: 11px; color: #6d28d9; background: #fef3ec; border-radius: 6px; padding: 1px 8px; }
-.dep-tag { font-size: 11px; color: var(--muted); background: #eef2ef; border-radius: 6px; padding: 1px 8px; }
+.layer-tag { font-size: 11px; color: #6d28d9; background: var(--violet-bg); border-radius: 6px; padding: 1px 8px; }
+.dep-tag { font-size: 11px; color: var(--muted); background: var(--surface-3); border-radius: 6px; padding: 1px 8px; }
 .status-label { font-size: 11px; margin-left: auto; color: var(--muted); }
 
 .stream {
   white-space: pre-wrap;
   word-break: break-word;
-  background: #f6f9f7;
+  background: var(--surface-3);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 10px;
   font-size: 12.5px;
   line-height: 1.6;
-  color: #3f4a44;
+  color: var(--text-2);
   max-height: 140px;
   overflow: auto;
   margin: 8px 0 0;
 }
-.summary { font-size: 12.5px; line-height: 1.6; color: #3f4a44; margin-top: 8px; }
+.summary { font-size: 12.5px; line-height: 1.6; color: var(--text-2); margin-top: 8px; }
 .artifact {
   display: inline-block;
   margin-left: 8px;
@@ -281,7 +281,7 @@ const merging = computed(() => {
 }
 .artifact:hover { text-decoration: underline; }
 .reason { font-size: 12.5px; line-height: 1.6; margin-top: 8px; }
-.reason.blocked { color: #b91c1c; }
+.reason.blocked { color: var(--err); }
 .reason.skipped { color: var(--warn); }
 .reason.failed { color: var(--err); }
 .confirm-btn {
@@ -290,7 +290,7 @@ const merging = computed(() => {
   font-size: 12px;
   font-weight: 600;
   border: 1px solid var(--warn);
-  background: #fffbeb;
+  background: var(--warn-bg);
   color: var(--warn);
   border-radius: 8px;
   padding: 3px 12px;
@@ -310,10 +310,10 @@ const merging = computed(() => {
   padding: 3px 12px;
   margin-top: 8px;
 }
-.qc-ok { background: #ecfdf5; color: #15803d; border: 1px solid #a7f3d0; }
-.qc-warn { background: #fffbeb; color: var(--warn); border: 1px solid #fde68a; }
+.qc-ok { background: #ecfdf5; color: var(--ok); border: 1px solid #a7f3d0; }
+.qc-warn { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-border); }
 .qc-icon { font-size: 13px; }
-.qc-review { font-size: 11px; font-weight: 600; background: #fef2f2; color: #b91c1c; border-radius: 999px; padding: 1px 7px; }
+.qc-review { font-size: 11px; font-weight: 600; background: var(--err-bg); color: var(--err); border-radius: 999px; padding: 1px 7px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 </style>

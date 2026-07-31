@@ -302,7 +302,48 @@ export interface MetricsSnapshot {
   ai_stats?: { generate_total: number; v090_features: Record<string, number> }
   /** 三库健康状态: MySQL + Redis + Chroma(向量库), 含容量/连接信息(R2) */
   db?: DbStatus
+  /** 运行主机(操作系统)指标: 名称 / 内存 / CPU / 磁盘 / 开机时长 */
+  system?: SystemStatus
   error?: string
+}
+
+/** 运行主机(操作系统)指标(后端 _system_status)。 */
+export interface SystemStatus {
+  platform: { name: string; family: string }   // 友好名称 + linux/windows/darwin
+  hostname?: string
+  kernel?: string                              // 内核版本(platform.release)
+  arch?: string                                // x86_64 / aarch64 等
+  python_version?: string
+  cpu_cores?: number | null
+  cpu_percent?: number | null                  // 0~100
+  load_avg?: number[] | null                   // [1m,5m,15m]
+  boot_time?: number | null                    // epoch 秒(算开机时长)
+  mem?: {
+    ok: boolean
+    total?: number
+    available?: number
+    used?: number
+    percent?: number | null
+    error?: string
+  }
+  disk?: {
+    ok: boolean
+    total?: number
+    used?: number
+    free?: number
+    percent?: number | null
+    partitions?: {
+      device: string
+      mountpoint: string
+      fstype: string
+      total: number
+      used: number
+      free: number
+      percent?: number | null
+    }[]
+    error?: string
+  }
+  ts?: number
 }
 
 /** 单库容量展示(R2): 具体数值 + 百分比两行 */

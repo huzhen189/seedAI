@@ -6,6 +6,7 @@ import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
 import { useTheme, type ThemePref } from '../composables/theme'
 import AuthPanel from './AuthPanel.vue'
+import Icon from './Icon.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -20,9 +21,9 @@ const searchResults = computed(() => projectStore.searchResults)
 
 // 主题分段控件(label + 图标)
 const themeOptions: { value: ThemePref; icon: string; label: string }[] = [
-  { value: 'light', icon: '☀️', label: '亮色' },
-  { value: 'dark', icon: '🌙', label: '暗色' },
-  { value: 'system', icon: '🖥️', label: '跟随系统' },
+  { value: 'light', icon: 'sun', label: '亮色' },
+  { value: 'dark', icon: 'moon', label: '暗色' },
+  { value: 'system', icon: 'monitor', label: '跟随系统' },
 ]
 
 let timer: any
@@ -52,8 +53,11 @@ function goSettings() {
 </script>
 
 <template>
-  <header class="topnav">
-    <div class="brand">🌱 SeedAI</div>
+  <header class="topnav glass-surface">
+    <div class="brand">
+      <Icon name="logo" :size="20" class="brand-ico" />
+      <span class="brand-text">Seed<span class="brand-gradient">AI</span></span>
+    </div>
     <nav class="nav">
       <RouterLink to="/" class="navlink" data-track="导航:对话">对话</RouterLink>
       <RouterLink to="/projects" class="navlink" data-track="导航:项目">项目</RouterLink>
@@ -66,7 +70,8 @@ function goSettings() {
       >
     </nav>
     <div class="search">
-      <input v-model="searchText" placeholder="搜索项目 / 会话" @input="onSearch" />
+      <Icon name="search" :size="15" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none" />
+      <input v-model="searchText" placeholder="搜索项目 / 会话" @input="onSearch" style="padding-left:34px" />
       <div v-if="searchResults.length" class="dropdown">
         <div v-for="r in searchResults" :key="r.type + r.id" class="item" @click="pickItem(r)">
           <span class="tag">{{ r.type === 'project' ? '项目' : '会话' }}</span> {{ r.title }}
@@ -85,7 +90,7 @@ function goSettings() {
           :aria-pressed="currentPref === opt.value"
           @click="setTheme(opt.value)"
         >
-          <span class="ico">{{ opt.icon }}</span>
+          <Icon :name="opt.icon" :size="15" />
         </button>
       </div>
       <template v-if="user">
@@ -110,12 +115,30 @@ function goSettings() {
   padding: 10px 18px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
+  position: relative;
+  z-index: 30;
+}
+.topnav::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; bottom: -1px; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--brand-border), transparent);
+  opacity: 0.5;
 }
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 800;
   font-size: 16px;
-  color: var(--brand);
+  cursor: pointer;
 }
+.brand-ico {
+  color: var(--brand);
+  filter: drop-shadow(0 0 8px var(--brand-bg));
+}
+.brand-text { letter-spacing: 0.3px; }
+.brand-text .brand-gradient { font-weight: 900; }
 .nav {
   display: flex;
   gap: 6px;

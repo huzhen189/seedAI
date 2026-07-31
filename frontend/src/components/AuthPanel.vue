@@ -111,7 +111,7 @@ async function submit() {
 .auth-card {
   position: relative;
   width: 320px;
-  background: #fff;
+  background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 26px 22px;

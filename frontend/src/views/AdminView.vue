@@ -52,6 +52,24 @@ function fmtUptime(s?: number): string {
   return parts.join('')
 }
 
+function fmtBytes(n?: number): string {
+  if (n == null) return '-'
+  if (n <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  let i = 0
+  let v = n
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(2)} ${units[i]}`
+}
+
+function fmtLoadAvg(l?: number[] | null): string {
+  if (!l || l.length === 0) return '-'
+  return l.map((x) => x.toFixed(2)).join(' / ')
+}
+
 // ---- 用户管理(仅超管) ----
 const users = ref<AdminUser[]>([])
 const usersLoading = ref(false)
@@ -423,7 +441,20 @@ const PERF_LABELS: Record<string, string> = {
 const STAGE_LABELS_ANA: Record<string, string> = {
   enter_planner: 'Planner', enter_coder: 'Coder', enter_reviewer: 'Reviewer', previewing: '预览投递',
 }
-function fmtMs(v: number): string { return Math.round(v) + 'ms' }
+function fmtMs(v: number | null | undefined): string {
+  if (v == null || isNaN(Number(v))) return '-'
+  const ms = Number(v)
+  // 普通人友好: 毫秒 -> 秒/分/时, 不裸显 ms
+  if (ms < 1000) return `${Math.round(ms)} 毫秒`
+  const s = ms / 1000
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)} 秒`
+  const m = Math.floor(s / 60)
+  const rs = Math.round(s % 60)
+  if (m < 60) return `${m} 分 ${rs} 秒`
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  return `${h} 小时 ${rm} 分`
+}
 
 function statusLabel(s: string) {
   const m: Record<string, string> = { running: '生成中', done: '完成', error: '错误', aborted: '已取消' }
@@ -579,6 +610,79 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <!-- 服务器系统状态(主机 OS: 名称 / CPU / 内存 / 磁盘 / 开机时长) -->
+      <div v-if="metrics.system" class="block">
+        <h3>服务器系统状态</h3>
+        <div class="sys-grid">
+          <div class="sys-card">
+            <div class="sys-k">操作系统</div>
+            <div class="sys-v">{{ metrics.system.platform?.name || '-' }}</div>
+            <div class="sys-sub">{{ metrics.system.kernel || metrics.system.arch || '' }}</div>
+          </div>
+          <div class="sys-card">
+            <div class="sys-k">主机名</div>
+            <div class="sys-v">{{ metrics.system.hostname || '-' }}</div>
+            <div class="sys-sub">Python {{ metrics.system.python_version || '-' }}</div>
+          </div>
+          <div class="sys-card">
+            <div class="sys-k">已开机</div>
+            <div class="sys-v">{{ fmtUptime(metrics.system.boot_time ? (metrics.system.ts ?? 0) - metrics.system.boot_time : undefined) }}</div>
+            <div class="sys-sub">运行时长 {{ fmtUptime(metrics.uptime_s) }}</div>
+          </div>
+          <div class="sys-card">
+            <div class="sys-k">CPU 使用率</div>
+            <div class="sys-v">
+              <span :class="{ warn: (metrics.system.cpu_percent ?? 0) >= 85 }">
+                {{ metrics.system.cpu_percent != null ? metrics.system.cpu_percent + '%' : '-' }}
+              </span>
+            </div>
+            <div class="sys-sub">
+              {{ metrics.system.cpu_cores ?? '-' }} 核 · 负载 {{ fmtLoadAvg(metrics.system.load_avg) }}
+            </div>
+          </div>
+          <div class="sys-card">
+            <div class="sys-k">内存使用率</div>
+            <div class="sys-v">
+              <span :class="{ warn: (metrics.system.mem?.percent ?? 0) >= 85 }">{{ metrics.system.mem?.percent != null ? metrics.system.mem.percent + '%' : '-' }}</span>
+            </div>
+            <div class="sys-sub" v-if="metrics.system.mem?.ok !== false">
+              {{ fmtBytes(metrics.system.mem?.used) }} / {{ fmtBytes(metrics.system.mem?.total) }}
+            </div>
+            <div class="sys-sub err" v-else>{{ metrics.system.mem?.error || '读取失败' }}</div>
+          </div>
+          <div class="sys-card">
+            <div class="sys-k">磁盘(总计)</div>
+            <div class="sys-v">
+              <span :class="{ warn: (metrics.system.disk?.percent ?? 0) >= 85 }">{{ metrics.system.disk?.percent != null ? metrics.system.disk.percent + '%' : '-' }}</span>
+            </div>
+            <div class="sys-sub" v-if="metrics.system.disk?.ok !== false">
+              {{ fmtBytes(metrics.system.disk?.used) }} / {{ fmtBytes(metrics.system.disk?.total) }}
+            </div>
+            <div class="sys-sub err" v-else>{{ metrics.system.disk?.error || '读取失败' }}</div>
+          </div>
+        </div>
+
+        <!-- 各分区明细 -->
+        <div v-if="metrics.system.disk?.partitions?.length" class="sys-parts">
+          <table class="model-table">
+            <thead>
+              <tr><th>挂载点</th><th>文件系统</th><th>已用 / 总量</th><th>可用</th><th>使用率</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="p in metrics.system.disk.partitions" :key="p.mountpoint">
+                <td><code>{{ p.mountpoint }}</code></td>
+                <td>{{ p.fstype }}</td>
+                <td>{{ fmtBytes(p.used) }} / {{ fmtBytes(p.total) }}</td>
+                <td>{{ fmtBytes(p.free) }}</td>
+                <td>
+                  <span :class="{ warn: (p.percent ?? 0) >= 85 }">{{ p.percent != null ? p.percent + '%' : '-' }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <div class="block">
         <h3>模型用量（次数 / Token / 估算花费）</h3>
         <div v-if="!metrics.model_usage || Object.keys(metrics.model_usage).length === 0" class="muted">暂无数据</div>
@@ -659,7 +763,7 @@ onUnmounted(() => {
         </div>
       </div>
       <!-- QC 六维雷达图(v0.8.5 M1) -->
-      <div v-if="qcSeries.length" class="block qc-radar">
+      <div v-if="(quality?.qc_count ?? 0) > 0 && qcSeries.length" class="block qc-radar">
         <h3>QC 六维雷达(实际模型 + 整体)</h3>
         <RadarChart
           :axes="(quality?.qc_dimensions || []).map((d: string) => quality?.qc_dim_labels?.[d] || d)"
@@ -668,7 +772,7 @@ onUnmounted(() => {
         />
       </div>
       <!-- QC 评分明细(数字, R3) -->
-      <div v-if="qcTable.length" class="block">
+      <div v-if="(quality?.qc_count ?? 0) > 0 && qcTable.length" class="block">
         <h3>QC 评分明细（模型 + 整体, 0-10）</h3>
         <table class="qctable">
           <thead>
@@ -688,7 +792,12 @@ onUnmounted(() => {
             </tr>
           </tbody>
         </table>
-        <p v-if="!quality?.qc_count" class="hint">提示: QC 仅对「需复核」或闲聊类 trace 触发单裁判评分, 样本数 = {{ quality?.qc_count ?? 0 }}。</p>
+      </div>
+      <!-- 无 QC 评分数据时的清晰提示(避免全 0 雷达图让人误以为坏了) -->
+      <div v-if="(quality?.qc_count ?? 0) === 0" class="block muted">
+        <h3>QC 评分（雷达图 / 明细）</h3>
+        <p>暂无 QC 评分数据。QC 单裁判仅对「需复核」或闲聊类生成 trace 触发评分，当前样本数 = 0。</p>
+        <p class="hint">提示：在对话中发起一次网站生成，生成完成后系统会自动对该 trace 做后置 QC 评分，这里即可看到六维雷达图与评分明细。</p>
       </div>
       <div v-if="quality && quality.rating_distribution && Object.keys(quality.rating_distribution).length" class="block">
         <h3>评分分布</h3>
@@ -1266,8 +1375,8 @@ onUnmounted(() => {
 }
 .tabs button.on {
   color: var(--brand);
-  border-color: var(--brand2, #bdeee3);
-  background: #def6ef;
+  border-color: var(--brand2, var(--brand-border));
+  background: var(--brand-bg);
   font-weight: 600;
 }
 .panel {
@@ -1294,7 +1403,7 @@ onUnmounted(() => {
   font-size: 22px;
   font-weight: 700;
   margin-top: 6px;
-  color: #2b322e;
+  color: var(--text);
 }
 .card-row { display: flex; gap: 12px; flex-wrap: wrap; }
 .card-row .card { min-width: 120px; flex: 1; }
@@ -1311,7 +1420,7 @@ onUnmounted(() => {
 .block h3 {
   margin: 0 0 10px;
   font-size: 14px;
-  color: #2b322e;
+  color: var(--text);
 }
 .block h4 {
   margin: 0 0 10px;
@@ -1332,13 +1441,13 @@ onUnmounted(() => {
   align-items: center;
 }
 .kv span { color: var(--muted); }
-.kv b { color: #2b322e; font-weight: 700; }
+.kv b { color: var(--text); font-weight: 700; }
 .pill {
   display: inline-block;
   margin: 2px 6px 2px 0;
   padding: 1px 8px;
   border-radius: 999px;
-  background: #def6ef;
+  background: var(--brand-bg);
   color: var(--brand);
   font-size: 12px;
   font-weight: 600;
@@ -1363,7 +1472,7 @@ onUnmounted(() => {
 }
 .mname {
   width: 90px;
-  color: #3f4a44;
+  color: var(--text-2);
 }
 .mbar {
   flex: 1;
@@ -1472,58 +1581,69 @@ onUnmounted(() => {
 .evt { display: flex; gap: 10px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--border); }
 .eseq { width: 28px; color: var(--muted); text-align: right; }
 .etype { width: 48px; font-weight: 600; color: var(--brand); }
-.estage { color: #7e8e84; }
+.estage { color: var(--text-4); }
 .ecomment { color: var(--muted); font-style: italic; margin-left: auto; }
 .back { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 4px 12px; cursor: pointer; font-size: 13px; margin-bottom: 8px; }
 .db-grid { display: flex; gap: 12px; flex-wrap: wrap; }
 .db-card { display: flex; flex-direction: column; gap: 4px; background: var(--panel); border: 1px solid var(--border); border-left: 3px solid #22c55e; border-radius: 10px; padding: 12px 14px; min-width: 220px; flex: 1; }
 .db-card.err { border-left-color: var(--err); }
 .db-head { display: flex; align-items: center; justify-content: space-between; }
-.db-name { font-weight: 700; font-size: 14px; color: #3f4a44; text-transform: uppercase; }
+.db-name { font-weight: 700; font-size: 14px; color: var(--text-2); text-transform: uppercase; }
 .db-stat { font-size: 12px; font-weight: 600; }
 .db-stat.ok { color: #22c55e; }
 .db-stat.err { color: var(--err); }
 .db-cap { display: flex; align-items: baseline; gap: 8px; }
-.db-cap-val { font-size: 20px; font-weight: 700; color: #2b322e; }
+.db-cap-val { font-size: 20px; font-weight: 700; color: var(--text); }
 .db-cap-pct { font-size: 14px; font-weight: 700; color: var(--brand); }
 .db-cap-pct.none { color: var(--muted); }
 .db-cap-detail { font-size: 12px; color: var(--muted); }
-.db-extra { font-size: 12px; color: #5d6b62; margin-top: 2px; }
+.db-extra { font-size: 12px; color: var(--text-3); margin-top: 2px; }
 .db-colls { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-.db-colls .pill { background: #eafaf5; color: #0e9e8c; }
+.db-colls .pill { background: var(--brand-bg-soft); color: var(--brand); }
+
+/* 服务器系统状态区块 */
+.sys-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.sys-card { display: flex; flex-direction: column; gap: 4px; background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--brand, #15c4a4); border-radius: 10px; padding: 12px 14px; }
+.sys-k { font-size: 12px; color: var(--muted); }
+.sys-v { font-size: 22px; font-weight: 700; color: var(--text); line-height: 1.2; }
+.sys-v .warn { color: #ef8c3b; }
+.sys-sub { font-size: 12px; color: var(--text-3); }
+.sys-sub.err { color: var(--err); }
+.sys-parts { margin-top: 14px; }
+.sys-parts .warn { color: #ef8c3b; font-weight: 700; }
 
 /* R1: API 延迟子标签(业务端 / 需求端) */
 .subtabs { display: flex; gap: 8px; margin-bottom: 10px; }
 .subtabs button { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 5px 14px; cursor: pointer; font-size: 13px; color: var(--muted); }
-.subtabs button.on { color: var(--brand); border-color: var(--brand2, #bdeee3); background: #def6ef; font-weight: 600; }
+.subtabs button.on { color: var(--brand); border-color: var(--brand2, var(--brand-border)); background: var(--brand-bg); font-weight: 600; }
 
 /* 系统分析表 */
 .atable { width: 100%; border-collapse: collapse; font-size: 13px; }
 .atable th { text-align: left; padding: 6px 8px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }
 .atable td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .atable .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
-.rate-bar { display: flex; align-items: center; gap: 12px; font-size: 22px; font-weight: 700; color: #2b322e; position: relative; padding: 10px 0; }
-.rate-bar::before { content: ''; position: absolute; bottom: 0; left: 0; height: 4px; border-radius: 2px; background: linear-gradient(90deg, #22c55e var(--rate), #fee2e2 var(--rate)); width: 100%; }
+.rate-bar { display: flex; align-items: center; gap: 12px; font-size: 22px; font-weight: 700; color: var(--text); position: relative; padding: 10px 0; }
+.rate-bar::before { content: ''; position: absolute; bottom: 0; left: 0; height: 4px; border-radius: 2px; background: linear-gradient(90deg, #22c55e var(--rate), var(--err-bg) var(--rate)); width: 100%; }
 .rate-sub { font-size: 13px; color: var(--muted); font-weight: 400; }
-h4 { margin: 12px 0 8px; font-size: 14px; color: #2b322e; }
-.reset-log { white-space: pre-wrap; font-size: 12px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 12px; margin-top: 10px; color: #991b1b; line-height: 1.6; }
+h4 { margin: 12px 0 8px; font-size: 14px; color: var(--text); }
+.reset-log { white-space: pre-wrap; font-size: 12px; background: var(--err-bg); border: 1px solid var(--err-border); border-radius: 8px; padding: 10px 12px; margin-top: 10px; color: #991b1b; line-height: 1.6; }
 
 /* QC 雷达 + 复盘详情(v0.8.5 M1) */
 .qc-radar { display: flex; flex-direction: column; align-items: center; }
 .qc-radar h3 { align-self: flex-start; }
-.pill { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: #ede9fe; color: #6d28d9; margin-left: 6px; }
-.pill.warn { background: #fef3c7; color: #b45309; }
-.pill.danger { background: #fee2e2; color: #b91c1c; }
-.pill.gray { background: #eef2ef; color: #7e8e84; }
+.pill { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: var(--violet-bg); color: #6d28d9; margin-left: 6px; }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
+.pill.danger { background: var(--err-bg); color: var(--err); }
+.pill.gray { background: var(--surface-3); color: var(--text-4); }
 .qctable { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
 .qctable th { text-align: left; padding: 6px 8px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }
 .qctable td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .fb-row { font-size: 13px; margin: 4px 0; }
 .fb-dims { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-.fb-dim { font-size: 12px; background: #eef2ef; border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; color: #5d6b62; }
+.fb-dim { font-size: 12px; background: var(--surface-3); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; color: var(--text-3); }
 .msg { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 6px 0; }
-.msg.user { background: #def6ef; }
-.msg.assistant { background: #fff; }
+.msg.user { background: var(--brand-bg); }
+.msg.assistant { background: var(--surface-2); }
 .msg-role { font-size: 11px; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
 .msg-body { font-size: 13px; white-space: pre-wrap; word-break: break-word; max-height: 280px; overflow: auto; }
 .model-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }

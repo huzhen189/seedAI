@@ -2,6 +2,7 @@
 import { onMounted } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import { useProjectStore } from '../stores/project'
+import Icon from '../components/Icon.vue'
 
 const auth = useAuthStore()
 const projectStore = useProjectStore()
@@ -22,11 +23,11 @@ async function del(id: number) {
     <h2>我的项目</h2>
     <ul>
       <li v-for="p in projectStore.projects" :key="p.id">
-        <span>📁 {{ p.name }}</span>
+        <span><Icon name="folder" :size="16" /> {{ p.name }}</span>
         <button @click="del(p.id)">删除</button>
       </li>
     </ul>
-    <p v-if="projectStore.projects.length === 0" class="empty">暂无项目，去对话页左侧 ＋ 新建。</p>
+    <p v-if="projectStore.projects.length === 0" class="empty">暂无项目，去对话页左侧加号新建。</p>
   </div>
 </template>
 
@@ -59,7 +60,7 @@ async function del(id: number) {
 }
 .projects li button {
   border: 1px solid var(--border);
-  background: #fff;
+  background: var(--surface-2);
   border-radius: 8px;
   padding: 4px 10px;
   cursor: pointer;

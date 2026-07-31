@@ -451,7 +451,7 @@ defineExpose({ selectFile, reset })
 }
 .toggle-btn {
   border: 1px solid var(--border);
-  background: #fff;
+  background: var(--surface-2);
   border-radius: 4px;
   cursor: pointer;
   padding: 2px 8px;
@@ -512,13 +512,13 @@ defineExpose({ selectFile, reset })
   gap: 6px;
   padding: 6px 10px;
   font-size: 11px;
-  color: #b45309;
-  background: #fffbeb;
-  border-bottom: 1px solid #fde68a;
+  color: var(--warn);
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--warn-border);
 }
 .spinner-sm {
   width: 12px; height: 12px;
-  border: 2px solid #fde68a;
+  border: 2px solid var(--warn-border);
   border-top-color: #f59e0b;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
@@ -527,7 +527,7 @@ defineExpose({ selectFile, reset })
   margin-left: auto;
   border: 1px solid #f59e0b;
   background: transparent;
-  color: #b45309;
+  color: var(--warn);
   border-radius: 4px;
   cursor: pointer;
   font-size: 10px;
@@ -543,9 +543,9 @@ defineExpose({ selectFile, reset })
   border-left: 2px solid transparent;
   transition: background 0.15s;
 }
-.tree-item:hover { background: #eef2ef; }
+.tree-item:hover { background: var(--surface-3); }
 .tree-item.active {
-  background: #def6ef;
+  background: var(--brand-bg);
   border-left-color: var(--brand);
   font-weight: 600;
 }
@@ -553,7 +553,7 @@ defineExpose({ selectFile, reset })
 .tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-ver {
   font-size: 9px; font-weight: 700; color: var(--accent, #15c4a4);
-  background: var(--accent-light, #def6ef); border-radius: 8px;
+  background: var(--accent-light, var(--brand-bg)); border-radius: 8px;
   padding: 0 5px; flex-shrink: 0; margin-right: 2px;
 }
 .tree-size { font-size: 10px; color: var(--muted); flex-shrink: 0; }
@@ -570,7 +570,7 @@ defineExpose({ selectFile, reset })
   min-width: 0;
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--surface-2);
   overflow: hidden;
 }
 
@@ -580,8 +580,8 @@ defineExpose({ selectFile, reset })
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
-  background: var(--bg, #f6f9f7);
-  border-bottom: 1px solid var(--border, #e3e9e4);
+  background: var(--bg, var(--surface-3));
+  border-bottom: 1px solid var(--border, var(--surface-3));
   flex-shrink: 0;
   min-height: 36px;
 }
@@ -710,7 +710,7 @@ defineExpose({ selectFile, reset })
   display: flex; gap: 6px; flex-wrap: wrap;
 }
 .req-tag {
-  background: var(--accent-light, #def6ef);
+  background: var(--accent-light, var(--brand-bg));
   color: var(--accent, #15c4a4);
   padding: 2px 8px; border-radius: 10px; font-size: 12px;
 }

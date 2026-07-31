@@ -16,3 +16,18 @@ initTheme()
 initTracking()
 initPerfTracking()
 app.mount('#app')
+
+// —— 本地动效库初始化(AOS 滚动揭示 / GSAP 入场) ——
+app.runWithContext(() => {
+  const w = window as any
+  if (w.AOS) {
+    w.AOS.init({ duration: 520, easing: 'ease-out-cubic', once: true, offset: 40, disable: () => false })
+  }
+  if (w.gsap) {
+    requestAnimationFrame(() => {
+      w.gsap.from('.topnav', { y: -24, opacity: 0, duration: 0.5, ease: 'power2.out' })
+      w.gsap.from('.sidebar', { x: -24, opacity: 0, duration: 0.5, ease: 'power2.out', delay: 0.05 })
+      w.gsap.from('.tpl-card', { y: 18, opacity: 0, duration: 0.45, stagger: 0.06, ease: 'power2.out' })
+    })
+  }
+})
