@@ -775,44 +775,33 @@ async def update_project_prompt(
 @router.delete("/projects/{project_id}/artifacts")
 async def delete_all_artifacts(
     project_id: int,
-    confirmed: bool = Query(False),
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """删除项目下所有产物(需 confirmed=true 确认)。"""
-    if not confirmed:
-        raise HTTPException(status_code=400, detail="高频操作需 confirmed=true 确认")
-    proj = await project_repo.get_by(db, id=project_id, user_id=user.id)
-    if proj is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    count = await artifact_repo.delete_all(db, project_id=project_id)
-    logger.info("已删除项目 %s 的全部 %s 个产物", project_id, count)
-    # 清除 site_generated 缓存, 防止删除后 cascade 仍认为站点已生成导致空弹窗
-    try:
-        conversations = await conv_repo.list_by(db, project_id=project_id)
-        for c in conversations:
-            await cache_delete(f"site_generated:{c.id}")
-    except Exception:
-        pass
-    return {"ok": True, "deleted": count}
+    """旧产物删除旁路已退役，等待 M5 Approval Gate 接管。"""
+    del project_id, user, db
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "APPROVAL_GATE_REQUIRED",
+            "message": "产物删除必须经持久化审批工作流；旧 confirmed 参数已不再有效。",
+        },
+    )
 
 
 @router.delete("/projects/{project_id}/artifacts/files")
 async def delete_single_file(
     project_id: int,
     name: str = Query(..., description="要删除的文件名(如 index.html)"),
-    confirmed: bool = Query(False),
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """删除项目中特定文件的产物记录(需 confirmed=true 确认)。仅允许删除自家项目文件。"""
-    if not confirmed:
-        raise HTTPException(status_code=400, detail="请确认后再执行")
-    proj = await project_repo.get_by(db, id=project_id, user_id=user.id)
-    if proj is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    deleted = await artifact_repo.delete_file(db, project_id=project_id, filename=name)
-    if not deleted:
-        return {"ok": True, "deleted": 0, "note": f"未找到文件 {name}"}
-    logger.info("已删除项目 %s 的文件 %s", project_id, name)
-    return {"ok": True, "deleted": 1, "name": name}
+    """旧单文件删除旁路已退役，等待 M5 Approval Gate 接管。"""
+    del project_id, name, user, db
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "APPROVAL_GATE_REQUIRED",
+            "message": "产物删除必须经持久化审批工作流；旧 confirmed 参数已不再有效。",
+        },
+    )

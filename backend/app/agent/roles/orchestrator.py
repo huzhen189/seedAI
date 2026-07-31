@@ -78,7 +78,7 @@ class RoleOrchestrator(Orchestrator):
         trace_id: Optional[str],
         is_cancelled,
         shared_ctx: Any,
-        confirmed_subtasks: set,
+        original_query: str = "",
         **extra_kwargs,
     ) -> SubTaskResult:
         # 决定本子任务是否走角色增强路径(四角色技能)
@@ -88,24 +88,24 @@ class RoleOrchestrator(Orchestrator):
             # 非四角色技能(agent_search/chat/delete 等)→ 原生执行,零改动
             return await super()._run_one(
                 st, sink, model_id, base_messages, trace_id, is_cancelled,
-                shared_ctx, confirmed_subtasks, **extra_kwargs,
+                shared_ctx, original_query=original_query, **extra_kwargs,
             )
 
         # §方案B P1: 四角色技能由 RoleAgent.execute() 真正执行(一等执行单元),
         # 执行后产出强 Schema 交接物(RoleHandoff)供下游角色按 SOP 消费。
         t0 = time.time()
-        # 1) 风险门控(死红线 HIGH / 需确认 MEDIUM),与原 Orchestrator 一致
+        # 1) 风险门控：HIGH 直接拒绝；MEDIUM 等待 M5 Approval Gate。
         if st.risk_level == RISK_HIGH:
             st.transition(SUB_BLOCKED)
             await sink(ev("subtask_fail", sub_task_id=st.id, reason="高风险操作不予执行(系统拒绝)", recoverable=False))
             return SubTaskResult(id=st.id, status=SUB_BLOCKED, skill=st.selected_skill, goal=st.goal,
                                  error="高风险拦截", risk_level=st.risk_level)
-        if st.risk_level == RISK_MEDIUM and st.id not in confirmed_subtasks:
+        if st.risk_level == RISK_MEDIUM:
             st.transition(SUB_SKIPPED)
             await sink(ev("subtask_fail", sub_task_id=st.id,
-                          reason="中风险操作需用户确认(回复确认后重发)", recoverable=True))
+                          reason="中风险操作等待 Approval Gate 授权", recoverable=True))
             return SubTaskResult(id=st.id, status=SUB_SKIPPED, skill=st.selected_skill, goal=st.goal,
-                                 error="中风险待确认", risk_level=st.risk_level)
+                                 error="中风险等待审批", risk_level=st.risk_level)
 
         # 2) 上下文补全(子类聚焦 + 依赖产出),与原 Orchestrator._enrich 一致
         enriched = self._enrich(st, base_messages, shared_ctx)

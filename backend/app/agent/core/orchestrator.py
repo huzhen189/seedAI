@@ -78,13 +78,11 @@ class Orchestrator:
         *,
         trace_id: Optional[str] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
-        confirmed_subtasks: Optional[set[str]] = None,
         shared_ctx: Optional[SharedContext] = None,
         original_query: str = "",
         **extra_kwargs,
     ) -> Any:
         """async 生成器: 逐事件 yield(sub_task_id 贯穿)。"""
-        confirmed_subtasks = confirmed_subtasks or set()
         shared_ctx = shared_ctx or SharedContext()
         # 策略: 有依赖 → mixed(分层串行+层内并行), 无依赖 → parallel(全并行)
         has_dep = any(s.dependencies for s in sub_tasks)
@@ -154,7 +152,7 @@ class Orchestrator:
                 asyncio.create_task(
                     self._run_one(
                         st, q.put, model_id, messages, trace_id,
-                        is_cancelled, shared_ctx, confirmed_subtasks,
+                        is_cancelled, shared_ctx,
                         original_query=original_query, **extra_kwargs,
                     )
                 )
@@ -253,7 +251,6 @@ class Orchestrator:
         trace_id: Optional[str],
         is_cancelled: Optional[Callable[[], bool]],
         shared_ctx: SharedContext,
-        confirmed_subtasks: set[str],
         original_query: str = "",
         **extra_kwargs,
     ) -> SubTaskResult:
@@ -269,16 +266,16 @@ class Orchestrator:
                 id=st.id, status=SUB_BLOCKED, skill=st.selected_skill, goal=st.goal,
                 error="高风险拦截", risk_level=st.risk_level,
             )
-        # MEDIUM: 需用户二次确认; 未确认则跳过(返回 SUB_SKIPPED)并等前端回传,
-        #         confirmed_subtasks 携带已确认 id 重发时, 此处放行执行
-        if st.risk_level == RISK_MEDIUM and st.id not in confirmed_subtasks:
+        # M1: 旧 confirmed_subtasks 重放授权已退役。中风险动作在 M5 的
+        # 持久化 Approval Gate 可用前一律停在等待态，不能由客户端参数放行。
+        if st.risk_level == RISK_MEDIUM:
             st.transition(SUB_SKIPPED)
             await sink(ev("subtask_fail", sub_task_id=st.id,
-                    reason="中风险操作需用户确认(回复确认后重发)",
+                    reason="中风险操作等待 Approval Gate 授权",
                     recoverable=True))
             return SubTaskResult(
                 id=st.id, status=SUB_SKIPPED, skill=st.selected_skill, goal=st.goal,
-                error="中风险待确认", risk_level=st.risk_level,
+                error="中风险等待审批", risk_level=st.risk_level,
             )
 
         # ── 上下文补全(兜底 3: 子任务自洽) ──

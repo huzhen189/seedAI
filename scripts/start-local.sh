@@ -11,6 +11,9 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# 配置由 app.config.settings 通过 Pydantic 直接读取仓库根 .env；
+# 禁止 source .env，避免把配置内容当作 Shell 代码执行。
+
 PY_BIZ="/c/Users/zhenhu/.workbuddy/binaries/python/envs/seedai-biz/Scripts/python.exe"
 
 # 跨 shell 的可靠 sleep(部分环境缺 coreutils 的 sleep; 退回 python / ping)

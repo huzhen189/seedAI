@@ -969,7 +969,6 @@ async def worker_loop(concurrency: int = 1):
 
                 # ── [4/6] 意图分类(汇总器已算好最终 skill, 单一来源) ──
                 decision = intent.get("decision", "route")
-                confirmed = bool(job.get("confirmed", False))
                 skill_name = skill or intent.get("selected_skill") or skill_for(intent["level1"], intent["level2"]) or "agent_chat"
                 req_id = intent.get("request_id")
                 logger.info("[Worker] [4/6] 决策 decision=%s risk=%s 汇总skill=%s 最终skill=%s conf=%.0f%% (+%.0fms)",
@@ -1029,8 +1028,9 @@ async def worker_loop(concurrency: int = 1):
                     logger.info("[Worker] [6/6] 执行完毕 unsupported→已降级")
                     continue
 
-                # 3) 二次确认(high): 未确认则发 confirm 事件等前端回传(确认后带 confirmed 重发)
-                if decision == "confirm" and not confirmed:
+                # M1: 旧 confirmed 重试授权已退役。高风险动作不会执行，
+                # 直到 M5 Approval Gate 提供持久化、绑定目标且可单次消费的授权。
+                if decision == "confirm":
                     reason = (intent.get("plan") or [{}])[0].get("reason", "需确认")
                     risk_level = (intent.get("plan") or [{}])[0].get("risk_level", "high")
                     logger.info("[Worker] [5/6] 二次确认 等待用户确认 skill=%s reason=%s risk=%s",
@@ -1114,7 +1114,6 @@ async def worker_loop(concurrency: int = 1):
                             return SubTask(**valid)
 
                         sub_tasks = [_dict_to_subtask(d) for d in sub_tasks_raw]
-                        confirmed_subtasks = set(job.get("confirmed_subtasks") or [])
                         # 3.3: 多意图路径同样注入历史上下文(避免污染原 messages,复制后前置)
                         orch_messages = list(messages)
                         if rel_ctx_msg is not None:
@@ -1132,8 +1131,7 @@ async def worker_loop(concurrency: int = 1):
                         else:
                             orch = Orchestrator()
                             logger.info("[Worker] [5/6] 角色编排层已关闭,回退原生 Orchestrator")
-                        logger.info("[Worker] [5/6] 多意图编排 sub_tasks=%d confirmed=%s",
-                                    len(sub_tasks), confirmed_subtasks)
+                        logger.info("[Worker] [5/6] 多意图编排 sub_tasks=%d", len(sub_tasks))
                         # 编排统计埋点(补充 6: 多意图必接统计)
                         from ..analytics import record_orchestration, record_sub_task
                         t0_split = time.time()
@@ -1151,7 +1149,6 @@ async def worker_loop(concurrency: int = 1):
                         async for event in orch.execute(
                             sub_tasks, model_id, orch_messages,
                             trace_id=trace_id, is_cancelled=_cancelled,
-                            confirmed_subtasks=confirmed_subtasks,
                             shared_ctx=shared_ctx,
                             original_query=user_text,
                             project_system_prompt=proj_prompt,
@@ -1293,8 +1290,8 @@ async def worker_loop(concurrency: int = 1):
                     logger.debug("[Worker] 角色上下文注入失败(忽略,降级直跑) skill=%s: %s", skill_name, _re_e)
                     _agent = None
                     _enriched_messages = messages
-                logger.info("[Worker] [5/6] 路由执行 skill=%s decision=%s doc=%s status=%s confirmed=%s (+%.0fms)",
-                           skill_name, decision, "有" if doc else "无", proj_status, confirmed,
+                logger.info("[Worker] [5/6] 路由执行 skill=%s decision=%s doc=%s status=%s (+%.0fms)",
+                           skill_name, decision, "有" if doc else "无", proj_status,
                            (time.time() - t_job) * 1000)
                 event_cnt = 0
                 qc_user_text = ""
@@ -1324,7 +1321,6 @@ async def worker_loop(concurrency: int = 1):
                     version=version, user_id=user_id, project_id=project_id,
                     checkpoint=job.get("checkpoint"),      # 断点续跑: 透传至 handler 跳过已完成阶段
                     resume_mode=job.get("resume_mode", "resume"),
-                    confirmed=confirmed,                   # 透传确认标志(agent_delete 等依赖此字段)
                     site_generated=job.get("site_generated", False),
                 ):
                     # 拦截 done: 先发 QC 再发 done(QC 在 done 前, 不阻塞前端 done 渲染)

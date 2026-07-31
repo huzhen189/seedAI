@@ -94,17 +94,10 @@ async def run_delete(
       - model_id: 模型 id
       - messages: 对话历史
       - trace_id: 跟踪 id
-      - intent_info: 意图信息
-      - confirmed: 是否已确认(二次请求)
-      - conversation_id: 会话 id
-      - project_id: 项目 id
       - site_generated: 是否已生成站点
+      - 注意：M1 起旧 confirmed 重试授权已退役；本 Skill 不执行删除，等待 Approval Gate 接管。
     """
     trace_id = kwargs.get("trace_id", "")
-    intent_info = kwargs.get("intent_info", {}) or {}
-    confirmed = kwargs.get("confirmed", False)
-    conversation_id = kwargs.get("conversation_id")
-    project_id = kwargs.get("project_id")
     site_generated = kwargs.get("site_generated", False)
 
     # 取最后一条用户消息
@@ -152,61 +145,23 @@ async def run_delete(
     else:
         risk_level = "medium"        # 兜底: 目标不明确 → 中风险先确认
 
-    # ── 未确认 → 发送确认事件(带 risk_level, 前端按级别渲染) ──
-    if not confirmed:
-        if is_delete_all:
-            reason = "警告：你即将删除当前项目的【全部】生成产物，此操作不可撤销。确认继续吗？"
-        elif is_page:
-            reason = f"你希望删除「{user_msg[:30]}」——按页删需重建站点。先标记为待办，确认后我再处理？"
-        elif fname:
-            reason = f"你希望删除文件「{fname}」——删除后将无法恢复。确认删除吗？"
-        else:
-            reason = f"你希望「{user_msg[:30]}」——删除后将无法恢复。确认删除吗？"
-            fname = user_msg[:30]
-
-        logger.info("[agent_delete] 发送确认 trace=%s delete_all=%s page=%s file=%s risk=%s",
-                    trace_id, is_delete_all, is_page, fname, risk_level)
-        yield ev("confirm", reason=reason, skill="agent_delete", risk_level=risk_level,
-                 target="all" if is_delete_all else ("page" if is_page else "file"))
-        return
-
-    # ── 已确认 → 执行删除(单进程合并: 直接调业务层删除逻辑, 不经 http 回环) ──
-    from ...db import SessionLocal
-    from ...repos.business_repos import artifact_repo, conv_repo
-    from ...cache import cache_delete
-
-    try:
-        async with SessionLocal() as db:
-            if is_delete_all:
-                deleted = await artifact_repo.delete_all(db, project_id=project_id)
-                msg_text = f"已成功删除全部 {deleted} 个生成产物。如需重新生成网站，随时告诉我～"
-            elif is_page:
-                # 删页面/模块: 当前建站产物按整站交付, 精确删页需重建, 标记为待办(不物理删)
-                logger.info("[agent_delete] 页面删除→标记待办 trace=%s target=%s", trace_id, user_msg[:30])
-                yield ev("token", data=f"「{user_msg[:30]}」属于整站产物的一部份。已为你标记为待办："
-                                     "重建站点时会排除该页面。或者你也可以直接说『删除所有产物』后重新建站～")
-                yield ev("node", stage="done")
-                return
-            elif fname:
-                deleted = await artifact_repo.delete_file(db, project_id=project_id, filename=fname)
-                if not deleted:
-                    yield ev("token", data=f"未找到文件「{fname}」，无需删除。")
-                    yield ev("node", stage="done")
-                    return
-                msg_text = f"已删除文件「{fname}」。"
-            else:
-                yield ev("token", data="未能确定要删除的目标，请换个方式说（如「删除index.html」或「删除所有产物」）。")
-                return
-            # 清除 site_generated 缓存, 防止删除后 cascade 仍认为站点已生成
-            conversations = await conv_repo.list_by(db, project_id=project_id)
-            for c in conversations:
-                await cache_delete(f"site_generated:{c.id}")
-            logger.info("[agent_delete] 删除成功 trace=%s deleted=%s", trace_id, deleted)
-        yield ev("token", data=msg_text)
-        yield ev("node", stage="done")
-    except Exception as e:
-        logger.error("[agent_delete] 删除异常 trace=%s: %s", trace_id, e)
-        yield ev("token", data="删除请求未能完成，请稍后重试或检查网络连接。")
+    # M1: 旧 confirmed 重试没有可审计绑定，不能作为删除授权。
+    # 在 M5 Approval Gate 可用前，Skill 只输出结构化等待信号；不触碰 Repo、缓存或文件系统。
+    target = "all" if is_delete_all else ("page" if is_page else "file")
+    logger.warning(
+        "[agent_delete] 已拒绝退役的确认旁路 trace=%s target=%s risk=%s",
+        trace_id,
+        target,
+        risk_level,
+    )
+    yield ev(
+        "approval_required",
+        code="APPROVAL_GATE_REQUIRED",
+        risk_level=risk_level,
+        target=target,
+        message="删除操作已迁移到安全审批工作流；当前版本不接受旧 confirmed 重试。",
+    )
+    return
 
 
 # 注册到 SkillRegistry
@@ -220,5 +175,5 @@ register_skill(
     intent_tags=["删除", "删了", "删掉", "清除", "移除"],
     handler=run_delete,
     is_graph=False,
-    description="删除项目内的生成产物文件（全部或单个），需二次确认",
+    description="产物删除已等待 Approval Gate 接管；旧 confirmed 重试不会执行删除",
 )

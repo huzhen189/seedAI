@@ -3,6 +3,22 @@
 .env.local
 .env.production
 *.local.env
+# 环境配置及其本地备份一律不入库；显式保留可安全提交的模板。
+.env.*
+!.env.example
+!.env.production.example
+
+# ===== 本机诊断 / 验证残留（不属于可提交源码） =====
+backend/_*.py
+backend/_*.json
+backend/_*.jsonl
+backend/_*.log
+deploy/_diag_*.py
+deploy/_fix_*.py
+deploy/_push_*.py
+frontend/preview.err
+frontend/preview.log
+scripts/.pids/
 
 # ===== Python =====
 __pycache__/

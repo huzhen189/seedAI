@@ -728,22 +728,20 @@ async def chat(
 
     payload = {"model_id": model, "messages": messages, "trace_id": tid,
                "conversation_id": conversation_id, "user_id": user.id, "project_id": None}
-    # 前端二次确认回传(安全 confirm 通过后带 confirmed=1 重发, Worker 据此跳过拦截)
-    confirmed = request.query_params.get("confirmed")
-    if confirmed in ("1", "true", "True"):
-        payload["confirmed"] = True
-        logger.info("[chat] 二次确认已通过, 跳过安全拦截")
+    # 旧的 confirmed URL 参数已退役：高风险动作只能由后续 Approval Gate
+    # 以持久审批记录 + CAS 单次消费授权，绝不接受客户端布尔参数提升权限。
+    if request.query_params.get("confirmed"):
+        logger.warning("[chat] 已忽略退役的 confirmed 查询参数 trace=%s", tid)
     # 澄清回填: 用户在前端 clarify 卡选完并确认后, 带 clarified=1 重发。
     #   答案已随 q 参数作为新用户消息追加(见 _append_q), 后端据此跳过意图分类直接路由。
     clarified = request.query_params.get("clarified")
     if clarified in ("1", "true", "True"):
         payload["clarified"] = True
         logger.info("[chat] 澄清回填 clarified=1(q=%.60s)", user_text)
-    # 多意图编排: 前端回传已确认的中风险子任务 id(逗号分隔)
-    confirmed_subtasks = request.query_params.get("confirmed_subtasks")
-    if confirmed_subtasks:
-        payload["confirmed_subtasks"] = [s.strip() for s in confirmed_subtasks.split(",") if s.strip()]
-        logger.info("[chat] 已确认中风险子任务: %s", payload["confirmed_subtasks"])
+    # 旧的 confirmed_subtasks URL 参数同样不再拥有授权语义；
+    # 多意图的风险放行将在 M5 经持久化 Approval Gate 处理。
+    if request.query_params.get("confirmed_subtasks"):
+        logger.warning("[chat] 已忽略退役的 confirmed_subtasks 查询参数 trace=%s", tid)
     # 前端指定 skill(confirm 确认后回传: agent_delete/agent_generate_site 等)
     skill_param = request.query_params.get("skill")
     if skill_param:
