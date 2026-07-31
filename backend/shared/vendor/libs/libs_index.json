@@ -1,0 +1,346 @@
+[
+  {
+    "name": "vue",
+    "version": "3.4.38",
+    "global": "Vue",
+    "desc": "渐进式前端框架(响应式 UI, 全局 Vue.createApp)。",
+    "js": [
+      {
+        "file": "vue.global.prod.js",
+        "path": "/vendor/libs/vue/vue.global.prod.js",
+        "bytes": 146843
+      }
+    ],
+    "css": []
+  },
+  {
+    "name": "react",
+    "version": "18.3.1",
+    "global": "React",
+    "desc": "UI 库核心; 需搭配 react-dom。UMD 全局 React。",
+    "js": [
+      {
+        "file": "react.production.min.js",
+        "path": "/vendor/libs/react/react.production.min.js",
+        "bytes": 10751
+      }
+    ],
+    "css": []
+  },
+  {
+    "name": "react-dom",
+    "version": "18.3.1",
+    "global": "ReactDOM",
+    "desc": "React 渲染层(挂载到 DOM); 与 react 搭配。UMD 全局 ReactDOM。",
+    "js": [
+      {
+        "file": "react-dom.production.min.js",
+        "path": "/vendor/libs/react-dom/react-dom.production.min.js",
+        "bytes": 131835
+      }
+    ],
+    "css": []
+  },
+  {
+    "name": "jquery",
+    "version": "3.7.1",
+    "global": "jQuery/$",
+    "desc": "DOM 操作与事件(轻量交互脚本常用)。",
+    "js": [
+      {
+        "file": "jquery.min.js",
+        "path": "/vendor/libs/jquery/jquery.min.js",
+        "bytes": 87533
+      }
+    ],
+    "css": []
+  },
+  {
+    "name": "alpinejs",
+    "version": "3.14.1",
+    "global": "Alpine",
+    "desc": "轻量声明式交互(attributes 驱动, 无构建)。",
+    "js": [
+      {
+        "file": "cdn.min.js",
+        "path": "/vendor/libs/alpinejs/cdn.min.js",
+        "bytes": 44659
+      }
+    ],
+    "css": []
+  },
+  {
+    "name": "swiper",
+    "version": "11.1.14",
+    "global": "Swiper",
+    "desc": "移动端轮播/幻灯片(带 CSS)。",
+    "js": [
+      {
+        "file": "swiper-bundle.min.js",
+        "path": "/vendor/libs/swiper/swiper-bundle.min.js",
+        "bytes": 151701
+      }
+    ],
+    "css": [
+      {
+        "file": "swiper-bundle.min.css",
+        "path": "/vendor/libs/swiper/swiper-bundle.min.css",
+        "bytes": 18459
+      }
+    ]
+  },
+  {
+    "name": "bootstrap",
+    "version": "5.3.3",
+    "global": "bootstrap",
+    "desc": "UI 组件库(需 jquery+popper 可选); 含 CSS 与 bundle JS。",
+    "js": [
+      {
+        "file": "bootstrap.bundle.min.js",
+        "path": "/vendor/libs/bootstrap/bootstrap.bundle.min.js",
+        "bytes": 80721
+      }
+    ],
+    "css": [
+      {
+        "file": "bootstrap.min.css",
+        "path": "/vendor/libs/bootstrap/bootstrap.min.css",
+        "bytes": 232803
+      }
+    ]
+  },
+  {
+    "name": "bulma",
+    "version": "1.0.2",
+    "global": "",
+    "desc": "纯 CSS 响应式框架(无 JS, class 驱动)。",
+    "js": [],
+    "css": [
+      {
+        "file": "bulma.min.css",
+        "path": "/vendor/libs/bulma/bulma.min.css",
+        "bytes": 677242
+      }
+    ]
+  },
+  {
+    "name": "tailwindcss",
+    "version": "4.1.10",
+    "global": "tailwind",
+    "desc": "原子化 CSS 浏览器运行时(无构建, script 标签直接生效)。",
+    "js": [
+      {
+        "file": "index.global.js",
+        "path": "/vendor/libs/tailwindcss/index.global.js",
+        "bytes": 259295
+      }
+    ],
+    "css": []
+  },
+  {
+    "name": "gsap",
+    "version": "3.12.5",
+    "global": "gsap",
+    "desc": "专业动画时间轴(滚动/交互动画)。",
+    "js": [
+      {
+        "file": "gsap.min.js",
+        "path": "/vendor/libs/gsap/gsap.min.js",
+        "bytes": 72214
+      }
+    ],
+    "css": []
+  },
+  {
+    "name": "animated",
+    "version": "4.1.1",
+    "global": "",
+    "desc": "CSS 动画类库(animate__ 前缀)。",
+    "js": [],
+    "css": [
+      {
+        "file": "animate.min.css",
+        "path": "/vendor/libs/animated/animate.min.css",
+        "bytes": 71750
+      }
+    ]
+  },
+  {
+    "name": "aos",
+    "version": "2.3.4",
+    "global": "AOS",
+    "desc": "滚动进入视口动画(需 CSS)。",
+    "js": [
+      {
+        "file": "aos.js",
+        "path": "/vendor/libs/aos/aos.js",
+        "bytes": 14690
+      }
+    ],
+    "css": [
+      {
+        "file": "aos.css",
+        "path": "/vendor/libs/aos/aos.css",
+        "bytes": 26053
+      }
+    ]
+  },
+  {
+    "name": "chart.js",
+    "version": "4.4.4",
+    "global": "Chart",
+    "desc": "Canvas 图表(折线/柱状/饼图等)。",
+    "js": [
+      {
+        "file": "chart.umd.min.js",
+        "path": "/vendor/libs/chart.js/chart.umd.min.js",
+        "bytes": 205749
+      }
+    ],
+    "css": []
+  },
+  {
+    "name": "sweetalert2",
+    "version": "11.12.4",
+    "global": "Swal",
+    "desc": "美观弹窗/确认框(需 CSS)。",
+    "js": [
+      {
+        "file": "sweetalert2.min.js",
+        "path": "/vendor/libs/sweetalert2/sweetalert2.min.js",
+        "bytes": 53147
+      }
+    ],
+    "css": [
+      {
+        "file": "sweetalert2.min.css",
+        "path": "/vendor/libs/sweetalert2/sweetalert2.min.css",
+        "bytes": 23816
+      }
+    ]
+  },
+  {
+    "name": "glightbox",
+    "version": "3.3.0",
+    "global": "GLightbox",
+    "desc": "图片/视频灯箱(需 CSS)。",
+    "js": [
+      {
+        "file": "glightbox.min.js",
+        "path": "/vendor/libs/glightbox/glightbox.min.js",
+        "bytes": 56300
+      }
+    ],
+    "css": [
+      {
+        "file": "glightbox.min.css",
+        "path": "/vendor/libs/glightbox/glightbox.min.css",
+        "bytes": 13749
+      }
+    ]
+  },
+  {
+    "name": "dayjs",
+    "version": "1.11.13",
+    "global": "dayjs",
+    "desc": "轻量日期处理(2KB)。",
+    "js": [
+      {
+        "file": "dayjs.min.js",
+        "path": "/vendor/libs/dayjs/dayjs.min.js",
+        "bytes": 7160
+      }
+    ],
+    "css": []
+  },
+  {
+    "name": "three",
+    "version": "0.150.1",
+    "global": "THREE",
+    "desc": "3D/WebGL(游戏与沉浸式背景); UMD 全局 THREE。",
+    "js": [
+      {
+        "file": "three.min.js",
+        "path": "/vendor/libs/three/three.min.js",
+        "bytes": 613740
+      }
+    ],
+    "css": []
+  },
+  {
+    "name": "sortablejs",
+    "version": "1.15.3",
+    "global": "Sortable",
+    "desc": "拖拽排序列表。",
+    "js": [
+      {
+        "file": "Sortable.min.js",
+        "path": "/vendor/libs/sortablejs/Sortable.min.js",
+        "bytes": 44605
+      }
+    ],
+    "css": []
+  },
+  {
+    "name": "clipboard",
+    "version": "2.0.11",
+    "global": "ClipboardJS",
+    "desc": "复制到剪贴板(无依赖)。",
+    "js": [
+      {
+        "file": "clipboard.min.js",
+        "path": "/vendor/libs/clipboard/clipboard.min.js",
+        "bytes": 9160
+      }
+    ],
+    "css": []
+  },
+  {
+    "name": "highlight",
+    "version": "11.10.0",
+    "global": "hljs",
+    "desc": "代码高亮(需主题 CSS)。",
+    "js": [
+      {
+        "file": "index.js",
+        "path": "/vendor/libs/highlight/index.js",
+        "bytes": 12296
+      }
+    ],
+    "css": [
+      {
+        "file": "github.min.css",
+        "path": "/vendor/libs/highlight/github.min.css",
+        "bytes": 1309
+      }
+    ]
+  },
+  {
+    "name": "fontawesome",
+    "version": "6.6.0",
+    "global": "",
+    "desc": "图标字体/SVG(纯 CSS)。",
+    "js": [],
+    "css": [
+      {
+        "file": "all.min.css",
+        "path": "/vendor/libs/fontawesome/all.min.css",
+        "bytes": 96518
+      }
+    ]
+  },
+  {
+    "name": "htm",
+    "version": "3.1.1",
+    "global": "htm",
+    "desc": "无需构建的 JSX 替代(配合 preact 极轻量)。",
+    "js": [
+      {
+        "file": "htm.umd.js",
+        "path": "/vendor/libs/htm/htm.umd.js",
+        "bytes": 1364
+      }
+    ],
+    "css": []
+  }
+]
