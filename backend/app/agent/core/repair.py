@@ -16,6 +16,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+
 logger = logging.getLogger("ai_service.repair")
 
 
@@ -66,8 +67,9 @@ _REPAIR_TTL = 600  # repair 状态 10 分钟过期(足够重连窗口)
 async def save_repair_state(state: RepairState) -> None:
     """保存 repair 状态到 Redis。"""
     try:
-        from ..config import settings
         import redis.asyncio as aioredis
+
+        from app.config import settings
         r = aioredis.from_url(settings.redis_url)
         await r.setex(f"repair:{state.trace_id}", _REPAIR_TTL, state.to_json())
     except Exception as e:
@@ -77,8 +79,9 @@ async def save_repair_state(state: RepairState) -> None:
 async def load_repair_state(trace_id: str) -> RepairState | None:
     """从 Redis 加载 repair 状态(中断续跑入口)。"""
     try:
-        from ..config import settings
         import redis.asyncio as aioredis
+
+        from app.config import settings
         r = aioredis.from_url(settings.redis_url)
         val = await r.get(f"repair:{trace_id}")
         if val:
@@ -91,12 +94,13 @@ async def load_repair_state(trace_id: str) -> RepairState | None:
 async def delete_repair_state(trace_id: str) -> None:
     """done 后清理 repair 状态。"""
     try:
-        from ..config import settings
         import redis.asyncio as aioredis
+
+        from app.config import settings
         r = aioredis.from_url(settings.redis_url)
         await r.delete(f"repair:{trace_id}")
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[repair] 状态删除失败: %s", exc)
 
 
 # ---- 失败定位 ----
@@ -197,7 +201,7 @@ async def repair_loop(
                 ]}),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("[repair] 阶段 %s 超时(%ss) trace=%s", failed, timeout, trace_id)
             continue  # 超时不消耗 round 资源? 不，已经消耗了
 

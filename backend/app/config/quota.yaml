@@ -1,0 +1,23 @@
+version: 1
+warning_ratio: 0.80
+redis_prefix: ai:ratelimit
+session_key_prefix: ai:session
+tiers:
+  free:
+    token_budget_daily: 5000000
+    project_token_budget_daily: 5000000
+    rpm: 60
+    max_concurrent_sessions: 5
+    session_token_budget: 2000000
+  pro:
+    token_budget_daily: 5000000
+    project_token_budget_daily: 5000000
+    rpm: 60
+    max_concurrent_sessions: 5
+    session_token_budget: 2000000
+  max:
+    token_budget_daily: 5000000
+    project_token_budget_daily: 5000000
+    rpm: 60
+    max_concurrent_sessions: 5
+    session_token_budget: 2000000

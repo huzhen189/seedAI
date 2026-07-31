@@ -1,0 +1,49 @@
+version: 1
+slots:
+  intent_lite:
+    provider: qwen
+    model_id: qwen-turbo
+    base_url_env: QWEN_BASE_URL
+    default_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    billing: token_plan
+    tenant_selectable: false
+    stages: [S2, S4, S8]
+  intent_strong:
+    provider: qwen
+    model_id: qwen-plus
+    base_url_env: QWEN_BASE_URL
+    default_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    billing: token_plan
+    tenant_selectable: false
+    stages: [S4]
+  exec_standard:
+    provider: hy3
+    model_id: hy3
+    base_url_env: HY3_BASE_URL
+    default_base_url: https://tokenhub.tencentmaas.com/v1
+    billing: token_plan
+    tenant_selectable: true
+    stages: [S6]
+  exec_pro:
+    provider: qwen
+    model_id: qwen3.7-plus
+    base_url_env: QWEN_BASE_URL
+    default_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    billing: token_plan
+    tenant_selectable: true
+    stages: [S6]
+  exec_ultra:
+    provider: deepseek
+    model_id: deepseek-v4-flash
+    base_url_env: DEEPSEEK_BASE_URL
+    default_base_url: https://api.deepseek.com/v1
+    billing: metered
+    tenant_selectable: true
+    stages: [S6]
+embedding:
+  provider: qwen
+  model_id: text-embedding-v3
+  base_url_env: QWEN_EMBEDDING_BASE_URL
+  default_base_url: https://ws-rao72of9tmiy6llq.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  dimensions: 1024
+  cloud_only: true

@@ -1,0 +1,33 @@
+version: 1
+thresholds:
+  primary_high: 0.85
+  primary_low: 0.50
+  secondary: 0.70
+  ambiguity_margin: 0.08
+  tentative_slot: 0.60
+recall:
+  top_k: 5
+  novelty_floor: 0.45
+  user_memory_first: true
+  project_memory_after_intent: true
+clarification:
+  max_rounds: 2
+  one_question_only: true
+  high_risk_soft_confirm: true
+auto_calibrate:
+  enabled: true
+  schedule: weekly
+  min_samples: 200
+  target_direct_error_rate: 0.02
+  target_clarify_rate: 0.15
+  primary_high_min: 0.80
+  primary_high_max: 0.95
+  primary_low_min: 0.40
+  primary_low_max: 0.65
+  tighten_only: true
+execution:
+  max_plan_revisions: 2
+  max_tasks: 20
+  task_timeout_seconds: 300
+  tool_retry_attempts: 3
+  serial_task_dag: true

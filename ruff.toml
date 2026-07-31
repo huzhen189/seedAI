@@ -1,7 +1,7 @@
 # 质量基线(资深开发牵头,2026-07-18):Python lint + format。
 # 仅作用于 .py 文件;前端由 eslint/prettier 覆盖。
 line-length = 100
-target-version = "py39"
+target-version = "py313"
 indent-width = 4
 
 [lint]
