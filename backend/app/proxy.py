@@ -45,12 +45,18 @@ from .analytics import (  # 业务端统计接入(§「新增功能必接统计�
 from .analytics import record_context_detection, record_requirement_doc
 from .analytics import record_feedback
 from .cache import cache_get, cache_set, ck_delete, ck_get, ck_set, enqueue_write_error, get_redis
-from .config import settings
+from app.config import settings
 from .db import get_db
 from .metrics import consume_daily_quota, record_model_usage, record_model_tokens, record_api_latency, record_unsupported
 from .models import Artifact, Conversation, Message, Project, Trace, User
-from .repos.business_repos import conv_repo, message_repo, artifact_repo
-from .repos.trace_repos import feedback_repo, qc_score_repo, trace_repo
+from .db.repositories import (
+    artifact_repo,
+    conv_repo,
+    feedback_repo,
+    message_repo,
+    qc_score_repo,
+    trace_repo,
+)
 from .schemas import FeedbackReq
 from .security import ACCESS_COOKIE, CurrentUser, _set_access_cookie, create_access_token, decode_token, get_current_user
 # 单进程合并:直接复用同进程的推理队列(取代 httpx 转发)
@@ -1449,7 +1455,7 @@ async def _reconcile_once() -> None:
     # 1) 孤儿 running Trace 对账
     try:
         from .db import SessionLocal as _S
-        from .repos.trace_repos import trace_repo
+        from .db.repositories import trace_repo
         from .cache import ck_get
 
         async with _S() as s:

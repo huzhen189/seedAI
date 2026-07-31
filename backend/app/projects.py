@@ -16,10 +16,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .cache import cache_delete, cache_get, cache_invalidate, cache_set
-from .config import settings
+from app.config import settings
 from .db import get_db
 from .models import Artifact, Conversation, Message, Project, Trace
-from .repos.business_repos import artifact_repo, conv_repo, message_repo, project_repo
+from .db.repositories import artifact_repo, conv_repo, message_repo, project_repo
 from .schemas import (
     AutoStartReq,
     ConversationResp,

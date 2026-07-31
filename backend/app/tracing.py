@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Feedback, TraceEvent, UsageLog
-from .repos.trace_repos import feedback_repo, trace_event_repo, trace_repo, usage_log_repo
+from .db.repositories import feedback_repo, trace_event_repo, trace_repo, usage_log_repo
 
 
 logger = logging.getLogger("business.tracing")

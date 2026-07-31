@@ -12,10 +12,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import or_, select
 
 from .cache import cache_user_get, cache_user_set
-from .config import settings
+from app.config import settings
 from .db import get_db
 from .models import User
-from .repos.user_repo import user_repo
+from .db.repositories import user_repo
 from .user_state import ensure_user_state
 from .schemas import LoginReq, RefreshReq, RegisterReq, UpdateMeReq, UserResp
 from .security import (
