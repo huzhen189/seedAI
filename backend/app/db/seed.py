@@ -38,23 +38,20 @@ async def ensure_super_admin(
                 await session.execute(select(User).where(User.account == account))
             ).scalar_one_or_none()
             if existing is not None:
-                if existing.role != "super_admin" or not existing.is_super_admin:
+                if existing.role != "super_admin":
                     existing.role = "super_admin"
-                    existing.is_super_admin = True
                     await session.commit()
                     logger.warning("已把既有账号 %s 提升为 super_admin", account)
                 return False
             session.add(
                 User(
                     account=account,
-                    nickname="超级管理员",
                     display_name="超级管理员",
                     email="huzhen@huzhen.net.cn",
                     password_hash=hash_password(password),
                     role="super_admin",
-                    plan="enterprise",
                     tier="max",
-                    is_super_admin=True,
+                    status="active",
                 )
             )
             await session.commit()

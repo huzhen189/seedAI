@@ -28,7 +28,6 @@ def test_ensure_super_admin_creates_once_then_idempotent() -> None:
                 user = (
                     await session.execute(select(User).where(User.account == "su_a"))
                 ).scalar_one()
-                assert user.is_super_admin is True
                 assert user.role == "super_admin"
 
             # 二次调用不应再新建，返回 False
@@ -77,7 +76,6 @@ def test_ensure_super_admin_promotes_existing_user() -> None:
                         select(User).where(User.account == "promote_me")
                     )
                 ).scalar_one()
-                assert user.is_super_admin is True
                 assert user.role == "super_admin"
 
     asyncio.run(scenario())
