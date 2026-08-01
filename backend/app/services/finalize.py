@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.turn_context import TurnContext
+from app.db.repositories import outbox
 from app.models import Message, Turn, UsageLedger
 
 
@@ -35,6 +36,23 @@ class FinalizeService:
         turn.status = terminal
         turn.last_event_id = "finalized"
         turn.lock_version += 1
+        # 终态必须与业务写入同事务落 Outbox，否则外部只能看到 turn.accepted、
+        # 永远等不到收口。event_key 的唯一约束即幂等护栏。
+        artifact_refs = list(context.execution.artifact_refs) if context.execution else []
+        await outbox.insert(
+            session,
+            event_key=f"turn:{context.turn_id}:{terminal}",
+            aggregate_type="turn",
+            aggregate_id=context.turn_id,
+            event_type=f"turn.{terminal}",
+            payload={
+                "turn_id": context.turn_id,
+                "conversation_id": context.session.conversation_id,
+                "project_id": context.session.project_id,
+                "status": terminal,
+                "artifact_refs": artifact_refs,
+            },
+        )
         await session.flush()
         return terminal
 

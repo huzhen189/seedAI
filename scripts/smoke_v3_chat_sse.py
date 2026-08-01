@@ -107,7 +107,8 @@ def main() -> int:
         if not check("POST /api/auto-start", r.status_code == 200, str(r.status_code)):
             return 1
         conv_id = r.json()["conversation"]["id"]
-        print(f"       conversation_id={conv_id}")
+        proj_id = r.json()["project"]["id"]
+        print(f"       conversation_id={conv_id} project_id={proj_id}")
 
         print("== 3. POST /api/chat 读取 SSE 主链路 ==")
         client_msg_id = f"smoke-{uuid.uuid4().hex[:12]}"
@@ -225,7 +226,16 @@ def main() -> int:
             print(f"       {role}: {snippet!r}")
         cur.execute("SELECT event_type FROM outbox_events WHERE aggregate_id=%s ORDER BY id", (turn_id,))
         obx = [r[0] for r in cur.fetchall()]
-        check("outbox 事件已写", len(obx) > 0, f"{obx}")
+        check("outbox 有受理事件", "turn.accepted" in obx, f"{obx}")
+        check(
+            "outbox 有终态事件",
+            any(e.startswith("turn.") and e != "turn.accepted" for e in obx),
+            f"{obx}",
+        )
+        # artifacts 表按 project 归属(无 turn_id 列)，唯一约束为 project_id+version
+        cur.execute("SELECT version, status FROM artifacts WHERE project_id=%s ORDER BY version", (proj_id,))
+        arts = cur.fetchall()
+        check("artifact 已产出", len(arts) > 0, f"versions={[a[0] for a in arts]} status={[a[1] for a in arts]}")
         conn.close()
 
     print(f"\n==== 结果: {ok} passed, {fail} failed ====")
