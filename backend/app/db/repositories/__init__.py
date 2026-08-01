@@ -18,6 +18,18 @@ from .projects import ProjectsRepo, ProjectStateError, project_repo
 from .purge_jobs import PurgeJobsRepo
 from .qc_scores import QcScoresRepo, qc_score_repo
 from .recycle_bin import RecycleBinRepo
+from .runtime import (
+    ApprovalsRepo,
+    DeploymentsRepo,
+    OutboxEventsRepo,
+    TurnCheckpointsRepo,
+    TurnsRepo,
+    approvals_repo,
+    deployments_repo,
+    outbox_events_repo,
+    turn_checkpoints_repo,
+    turns_repo,
+)
 from .session_audits import SessionAuditsRepo
 from .sir_snapshots import SirSnapshotsRepo
 from .tasks import TasksRepo, TaskStateError
@@ -33,11 +45,13 @@ from .vector_collections import VectorCollectionsRepo
 
 __all__ = [
     "AgentRunsRepo",
+    "ApprovalsRepo",
     "ArtifactsRepo",
     "BaseRepo",
     "ConversationStateError",
     "ConversationsRepo",
     "DegradationsRepo",
+    "DeploymentsRepo",
     "FeedbackRepo",
     "FlowChecksRepo",
     "IntentDecisionsRepo",
@@ -47,6 +61,7 @@ __all__ = [
     "MetricsDailyRepo",
     "MetricsEventsRepo",
     "ModelCallsRepo",
+    "OutboxEventsRepo",
     "OutputGuardLogRepo",
     "PausedTurnsRepo",
     "ProjectStateError",
@@ -60,6 +75,8 @@ __all__ = [
     "TaskStateError",
     "TasksRepo",
     "ToolCallsRepo",
+    "TurnCheckpointsRepo",
+    "TurnsRepo",
     "TraceEventsRepo",
     "TracesRepo",
     "UsageLedgerRepo",
@@ -67,14 +84,19 @@ __all__ = [
     "UserModelKeysRepo",
     "UsersRepo",
     "VectorCollectionsRepo",
+    "approvals_repo",
     "artifact_repo",
     "conv_repo",
+    "deployments_repo",
     "feedback_repo",
     "message_repo",
+    "outbox_events_repo",
     "project_repo",
     "qc_score_repo",
     "trace_event_repo",
     "trace_repo",
+    "turn_checkpoints_repo",
+    "turns_repo",
     "usage_log_repo",
     "user_repo",
 ]

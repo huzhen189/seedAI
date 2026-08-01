@@ -20,6 +20,7 @@ from .content import (
     User,
     UserState,
 )
+from .runtime import Approval, Deployment, OutboxEvent, Turn, TurnCheckpoint
 from .stats import (
     Degradation,
     FlowCheck,
@@ -36,11 +37,13 @@ from .tenant import PausedTurn, UserModelKey, VectorCollection
 
 __all__ = [
     "AgentRun",
+    "Approval",
     "Artifact",
     "Base",
     "ContentPathItem",
     "Conversation",
     "Degradation",
+    "Deployment",
     "Feedback",
     "FlowCheck",
     "IntentDecision",
@@ -51,6 +54,7 @@ __all__ = [
     "MetricsDaily",
     "MetricsEvent",
     "ModelCall",
+    "OutboxEvent",
     "OutputGuardLog",
     "PausedTurn",
     "Project",
@@ -62,6 +66,8 @@ __all__ = [
     "Task",
     "ToolCall",
     "Trace",
+    "Turn",
+    "TurnCheckpoint",
     "TraceEvent",
     "UsageLedger",
     "UsageLog",
