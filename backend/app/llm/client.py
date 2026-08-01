@@ -15,6 +15,7 @@ from typing import List, Optional, Sequence
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.security_circuit import CircuitOpenError, get_breaker
 
 logger = logging.getLogger("app.llm")
 
@@ -88,6 +89,10 @@ class LLMClient:
 
         last_err: Optional[Exception] = None
         for provider in self._providers:
+            breaker = get_breaker(provider.name)
+            if not breaker.allow():
+                logger.warning("LLM 调用 %s 被熔断跳过", provider.name)
+                continue
             try:
                 client = self._client_for(provider)
                 resp = await client.chat.completions.create(
@@ -100,11 +105,18 @@ class LLMClient:
                 content = resp.choices[0].message.content if resp.choices else None
                 if not content:
                     raise LLMError(f"{provider.name} 返回空内容")
+                breaker.record_success()
                 return content.strip()
             except Exception as exc:  # 故障转移到下一个供应商
+                breaker.record_failure()
                 last_err = exc
                 logger.warning("LLM 调用 %s 失败: %s", provider.name, exc)
                 continue
+        # 全部 provider 电路 open → 结构化错误，绝不静默切换平台付费 Key(§14.3)。
+        if get_breaker(self._providers[0].name).state.value == "open" and all(
+            not get_breaker(p.name).allow() for p in self._providers
+        ):
+            raise CircuitOpenError(self._providers[0].name)
         raise LLMError(f"所有模型供应商均不可用: {last_err}")
 
     async def health(self) -> bool:
