@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -25,9 +26,11 @@ from typing import Any
 import httpx
 import pymysql
 
-BASE = "http://127.0.0.1:7101"
-ACCOUNT = "e2e20_seedai_test"
-PASSWORD = "testpass123"
+# 默认直连业务服务(:7101)。设 SMOKE_BASE=http://127.0.0.1:7100 可改走 vite 代理,
+# 用同一套断言验证代理层不缓冲 SSE(前端联调最易踩的坑)。
+BASE = os.environ.get("SMOKE_BASE", "http://127.0.0.1:7101")
+ACCOUNT = os.environ.get("E2E_USER", "e2e20_seedai_test")
+PASSWORD = os.environ.get("E2E_PW", "testpass123")
 STREAM_TIMEOUT = 180.0
 
 ok = 0
