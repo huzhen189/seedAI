@@ -41,8 +41,17 @@ def _project_view(p: Project) -> dict[str, Any]:
         "id": p.id,
         "user_id": p.user_id,
         "name": p.name,
+        "status": p.status,
         "created_at": _iso(p.created_at),
         "updated_at": _iso(p.updated_at),
+        # Artifact/Deployment 分离(规范 §10.4): head 是最新可预览版本,
+        # published 是当前对外线上版本, 两者可以不同 —— 前端据此显示「有未发布改动」。
+        "head_artifact_id": p.head_artifact_id,
+        "published_artifact_id": p.published_artifact_id,
+        "active_deployment_id": p.active_deployment_id,
+        "has_unpublished_changes": bool(
+            p.head_artifact_id is not None and p.head_artifact_id != p.published_artifact_id
+        ),
         # 旧前端字段: 需求文档存于 site_spec.requirement_doc(JSON 字符串)。
         "requirement_doc": spec.get("requirement_doc"),
     }

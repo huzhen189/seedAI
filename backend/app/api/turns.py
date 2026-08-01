@@ -34,7 +34,8 @@ from app.db import get_db, transaction
 from app.db.repositories import approvals as approvals_repo
 from app.db.repositories import outbox as outbox_repo
 from app.db.repositories import turns as turns_repo
-from app.models import Approval, Conversation, Message
+from app.domains.project import OpsOutcome, project_ops
+from app.models import Approval, Conversation, Message, ToolCall, Turn
 from app.security import CurrentUser, get_current_user
 from app.services.turns import turn_service
 from app.transport.stream_broker import broker
@@ -384,6 +385,9 @@ async def decide_approval(
 ) -> dict[str, Any]:
     """审批决策。CAS 单次消费 + nonce 绑定，重放与并发只会有一次生效。"""
     terminal_status: str | None = None
+    reply_text: str = ""
+    output_refs: list[str] = []
+    purge_dispatch: int | None = None
     async with transaction() as session:
         approval = await approvals_repo.by_external_id(session, approval_id)
         if approval is None or approval.created_by != user.id:
@@ -434,7 +438,7 @@ async def decide_approval(
         result = _approval_view(approval)
 
         # 决策即收口: 审批闸门的意义在于「取得用户同意后再落地」。
-        # 同意 -> Turn 推进到终态(操作已记录, 真实执行留待后续版本);
+        # 同意 -> 同一 UoW 内 approved→consumed + 记 operation ledger + 真实执行 ProjectOps;
         # 拒绝 -> Turn 取消。这样 Turn 不会永远卡在 waiting_approval(闭环闭合)。
         # 仅当审批真正到达终态(approved/rejected)时收口; 双人/双段确认仍处于
         # pending_second 的不收口, Turn 继续等待第二段确认。
@@ -444,33 +448,51 @@ async def decide_approval(
             and turn is not None
             and turn.status not in _TERMINAL_TURN_STATUS
         ):
-            terminal_status = (
-                "completed" if approval.status == ApprovalStatus.APPROVED.value else "cancelled"
-            )
-            turn.status = terminal_status
-            turn.last_event_id = f"decision:{payload.decision}"
-            turn.lock_version += 1
-            ack = "已批准" if terminal_status == "completed" else "已拒绝"
             proj_row = (
                 await session.execute(
                     select(Conversation.project_id).where(Conversation.id == turn.conversation_id)
                 )
             ).scalar_one_or_none()
             project_id = proj_row if proj_row is not None else 0
+
+            if approval.status == ApprovalStatus.REJECTED.value:
+                terminal_status = "cancelled"
+                ack_text = (
+                    f"已拒绝操作：{approval.action}"
+                    f"（目标 {approval.target_type}:{approval.target_id or '-'}）。"
+                )
+                content_refs: list[dict[str, Any]] = []
+            else:
+                outcome = await _execute_approved_action(
+                    session,
+                    approval=approval,
+                    turn=turn,
+                    project_id=project_id,
+                    actor_user_id=user.id,
+                    trace_id=trace_id,
+                )
+                purge_dispatch = outcome.details.get("purge_job_id")
+                terminal_status = "completed" if outcome.status == "succeeded" else "failed"
+                ack_text = outcome.text
+                output_refs = list(outcome.output_refs)
+                content_refs = [{"ref": ref} for ref in outcome.output_refs]
+                if outcome.error_code:
+                    turn.terminal_error_code = outcome.error_code[:96]
+
+            turn.status = terminal_status
+            turn.last_event_id = f"decision:{payload.decision}"
+            turn.lock_version += 1
             session.add(
                 Message(
                     conversation_id=turn.conversation_id,
                     project_id=project_id,
                     turn_id=turn.turn_id,
                     role="assistant",
-                    content=(
-                        f"{ack}操作：{approval.action}"
-                        f"（目标 {approval.target_type}:{approval.target_id or '-'}）。"
-                        + ("该操作的真实执行（部署/删除）将在后续版本落地。" if terminal_status == "completed" else "")
-                    ),
-                    content_refs=[],
+                    content=ack_text,
+                    content_refs=content_refs,
                 )
             )
+            reply_text = ack_text
             await outbox_repo.insert(
                 session,
                 event_key=f"turn:{turn.turn_id}:{terminal_status}:decision",
@@ -494,9 +516,86 @@ async def decide_approval(
                 turn_id=approval.turn_id,
                 trace_id=trace_id,
                 type="done",
-                data={"status": terminal_status, "reply": result.get("action"), "artifact_refs": []},
+                data={
+                    "status": terminal_status,
+                    "reply": reply_text or result.get("action"),
+                    "artifact_refs": output_refs,
+                },
             )
+
+    # purge 必须在 HTTP 请求之外分步执行(规范 §8.4)，事务提交后才派发后台 job。
+    if purge_dispatch is not None:
+        asyncio.create_task(_run_purge_job_background(purge_dispatch))
     return result
+
+
+async def _execute_approved_action(
+    session: AsyncSession,
+    *,
+    approval: Approval,
+    turn: Turn,
+    project_id: int,
+    actor_user_id: int,
+    trace_id: str,
+) -> OpsOutcome:
+    """approved→consumed + operation ledger(W0) + 领域真实执行，全部在同一 UoW。"""
+    raw_target = approval.target_id or ""
+    target_project_id = int(raw_target) if raw_target.isdigit() else project_id
+    if not target_project_id:
+        return OpsOutcome(status="failed", text="审批目标项目缺失，无法执行。", error_code="missing_target")
+
+    # 稳定 operation_key: 同一审批重放只会占用同一条账本，不会重复产生副作用。
+    operation_key = f"approval:{approval.approval_id}:{approval.action}"
+    existing = (
+        await session.execute(select(ToolCall).where(ToolCall.operation_key == operation_key))
+    ).scalar_one_or_none()
+    if existing is not None and existing.status == "succeeded":
+        return OpsOutcome(
+            status="succeeded",
+            text="该操作此前已执行完成。",
+            output_refs=[operation_key],
+        )
+    ledger = existing or ToolCall(
+        turn_id=turn.turn_id,
+        task_id=None,
+        tool_name=f"project.{approval.action}"[:64],
+        operation_key=operation_key,
+        status="running",
+        args_hash=approval.args_hash,
+        fencing_token=approval.fencing_token,
+        result_ref=None,
+    )
+    if existing is None:
+        session.add(ledger)
+    else:
+        ledger.status = "running"
+    await session.flush()
+
+    outcome = await project_ops.execute(
+        session,
+        action=approval.action,
+        project_id=target_project_id,
+        user_id=actor_user_id,
+        trace_id=trace_id,
+    )
+
+    ledger.status = "succeeded" if outcome.status == "succeeded" else "failed"
+    ledger.result_ref = ",".join(outcome.output_refs)[:255] or None
+    if outcome.status == "succeeded":
+        approval.status = ApprovalStatus.CONSUMED.value
+        approval.lock_version += 1
+    await session.flush()
+    return outcome
+
+
+async def _run_purge_job_background(job_id: int) -> None:
+    """后台跑 purge 分步 job；失败只记录，job 行保留 failed 状态可重入重试。"""
+    try:
+        # run_purge_job 自己按步开事务，这里不能再包一层外层事务。
+        status = await project_ops.run_purge_job(job_id)
+        logger.info("purge job %s 结束: status=%s", job_id, status)
+    except Exception as exc:  # noqa: BLE001 - 后台任务不得让异常逃逸到事件循环
+        logger.exception("purge job %s 执行异常: %s", job_id, exc)
 
 
 def _approval_view(approval: Approval) -> dict[str, Any]:

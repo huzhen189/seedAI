@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .config import settings
+from app.config import settings
 
 
 def get_artifact_dir() -> Path:

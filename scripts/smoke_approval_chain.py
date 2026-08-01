@@ -94,6 +94,24 @@ def main() -> int:
         proj_id = r.json()["project"]["id"]
         print(f"       conversation_id={conv_id} project_id={proj_id}")
 
+        # 前置: 先生成一版网站产物。发布是对 head artifact 的操作,
+        # 没有产物时 ProjectOps 会正确地拒绝发布(no_artifact), 那样测不到审批放行后的真实执行。
+        print("== 2.5 先生成一版网站(为发布准备 head artifact) ==")
+        with c.stream(
+            "POST",
+            "/api/chat",
+            json={
+                "client_msg_id": f"seed-{uuid.uuid4().hex[:12]}",
+                "conversation_id": conv_id,
+                "message": "帮我做一个咖啡店官网首页",
+            },
+            timeout=STREAM_TIMEOUT,
+        ) as resp:
+            seed_events = parse_sse(resp.iter_text(), STREAM_TIMEOUT) if resp.status_code == 200 else []
+        seed_done = [e for e in seed_events if e.get("_event") == "done"]
+        seed_status = (seed_done[0].get("_data", {}).get("data") or {}).get("status", "") if seed_done else ""
+        check("网站生成 Turn completed", seed_status == "completed", f"status={seed_status}")
+
         # 触发审批: "发布" -> PUBLISH(speech_act) -> S5 needs_approval
         print("== 3. POST /api/chat (触发审批: 发布) ==")
         client_msg_id = f"approve-{uuid.uuid4().hex[:12]}"

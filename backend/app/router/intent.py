@@ -21,6 +21,8 @@ SITE_WORDS = ("网站", "网页", "页面", "首页", "落地页", "官网", "�
 RESEARCH_WORDS = ("搜索", "研究", "调研", "查一下", "资料", "趋势")
 PUBLISH_WORDS = ("发布", "上线", "部署")
 PURGE_WORDS = ("彻底删除", "清空项目", "purge")
+# RESTORE 必须先于 TRASH 判定: "从回收站恢复" 同时含「回收」, 否则会被误判为删除。
+RESTORE_WORDS = ("恢复", "还原", "撤销删除", "restore")
 TRASH_WORDS = ("删除", "回收", "移除")
 EDIT_WORDS = ("修改", "改成", "调整", "优化", "替换")
 CREATE_WORDS = ("创建", "生成", "做一个", "搭建", "帮我做")
@@ -36,6 +38,9 @@ def understand(message: str) -> UnderstandingResult:
 
     if any(word in text for word in PURGE_WORDS):
         domain, speech, executable, target, risk = Domain.PROJECT, SpeechAct.PURGE, True, TargetRef(type=TargetType.PROJECT), RiskLevel.CRITICAL
+    elif any(word in text for word in RESTORE_WORDS):
+        # 恢复是可逆低危动作: 不进审批闸门, 由 S6 直接执行。
+        domain, speech, executable, target, risk = Domain.PROJECT, SpeechAct.RESTORE, True, TargetRef(type=TargetType.PROJECT), RiskLevel.LOW
     elif any(word in text for word in PUBLISH_WORDS):
         domain, speech, executable, target, risk = Domain.PROJECT, SpeechAct.PUBLISH, True, TargetRef(type=TargetType.ARTIFACT), RiskLevel.CRITICAL
     elif any(word in text for word in RESEARCH_WORDS):
