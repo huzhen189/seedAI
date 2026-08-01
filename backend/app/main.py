@@ -30,7 +30,7 @@ VENDOR_DIR = Path(__file__).resolve().parent.parent / "shared" / "vendor"
 # 安全边界: 只允许 /vendor 命中 VENDOR_DIR 内的真实文件, 防路径穿越。
 _VENDOR_ABSPATH = VENDOR_DIR.resolve()
 
-from .api import admin_analytics_router, turns_router, workspace_router
+from .api import admin_analytics_router, preview_router, turns_router, workspace_router
 from .auth import router as auth_router
 from app.config import settings
 from .cache import get_redis
@@ -38,7 +38,6 @@ from .db import engine, init_db
 from .logging_config import setup_logging
 from .metrics import record_request
 from .analytics import record_api_latency, record_api_call
-from .artifacts_auth import router as artifacts_auth_router
 from .reconciler import start_reconciler
 from .services.recovery import reconcile_orphan_turns
 
@@ -163,7 +162,8 @@ app.include_router(auth_router)
 app.include_router(turns_router)
 app.include_router(workspace_router)
 app.include_router(admin_analytics_router)
-app.include_router(artifacts_auth_router)
+# 签名预览(REQ-PREVIEW-001): 取代 v2 的 nginx auth_request + 同源静态直出方案。
+app.include_router(preview_router)
 
 
 if __name__ == "__main__":

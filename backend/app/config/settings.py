@@ -295,6 +295,11 @@ class Settings(BaseSettings):
 
     site_domain: str = "seedai.huzhen.net.cn"
     preview_domain: str = "seedhtml.huzhen.net.cn"
+    # REQ-PREVIEW-001: 预览必须落在「不携带平台凭证」的独立 Origin。
+    # preview_base_url 为空时: production 由 preview_domain 推导 https origin;
+    # 本地开发降级为同源相对路径(签名与 CSP 仍然生效, 只是缺少 Origin 物理隔离)。
+    preview_base_url: str = ""
+    preview_grant_ttl: int = Field(default=600, ge=60, le=3600)
     cookie_domain: str = ""
     cookie_secure: bool = False
     cors_origins: str = "http://localhost:7100,http://seedai.huzhen.net.cn:7100,http://seedai.huzhen.net.cn,https://seedai.huzhen.net.cn"
@@ -381,6 +386,12 @@ class Settings(BaseSettings):
             errors.append("COS_SECRET_ID/COS_SECRET_KEY 缺失，site_deploy 无法运行")
         if "*" in self.cors_origin_list:
             errors.append("生产 CORS_ORIGINS 禁止使用通配符 *")
+        # REQ-PREVIEW-001: 预览 Origin 必须独立于平台 Origin, 否则 iframe 内产物可读平台 Cookie。
+        preview_origin = self.preview_origin
+        if not preview_origin:
+            errors.append("生产 PREVIEW_BASE_URL/PREVIEW_DOMAIN 缺失，预览无法落在独立 Origin")
+        elif preview_origin in self.cors_origin_list:
+            errors.append(f"生产预览 Origin 不得与平台 Origin 重合: {preview_origin}")
         if errors:
             raise ValueError("生产配置校验失败: " + "; ".join(errors))
 
@@ -395,6 +406,15 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def preview_origin(self) -> str:
+        """预览产物的对外 Origin(无尾斜杠); 空串表示同源相对路径(仅本地开发)。"""
+        if self.preview_base_url.strip():
+            return self.preview_base_url.strip().rstrip("/")
+        if self.is_production and self.preview_domain.strip():
+            return f"https://{self.preview_domain.strip().rstrip('/')}"
+        return ""
 
     @property
     def intent_super_fast(self) -> float:
