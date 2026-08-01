@@ -2,6 +2,9 @@
 
 旧业务链仍依赖既有数据库结构，不能在 M2 将新表/新字段变成全局启动硬门。该验证器
 供 M2 隔离数据库与后续迁移/切换门禁使用；M11 切换时再提升为生产 schema 的强制检查。
+
+索引/唯一约束以 ORM 真相模型（Base.metadata）为准推导，避免 v2 硬编码清单漂移——
+与 schema_check.py 的修复保持一致：模型即契约。
 """
 
 from __future__ import annotations
@@ -9,11 +12,12 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Final
 
-from sqlalchemy import inspect
+from sqlalchemy import UniqueConstraint, inspect
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.db.schema_check import SchemaIssue, SchemaReport
+from app.models import Base
 
 
 M2_REQUIRED_TABLES: Final[frozenset[str]] = frozenset(
@@ -46,19 +50,6 @@ M2_REQUIRED_COLUMNS: Final[dict[str, frozenset[str]]] = {
         {"event_key", "aggregate_type", "aggregate_id", "event_type", "payload", "status"}
     ),
 }
-M2_REQUIRED_INDEXES: Final[dict[str, frozenset[str]]] = {
-    "turns": frozenset({"ix_turns_conversation_created", "ix_turns_status_created"}),
-    "turn_checkpoints": frozenset({"ix_turn_checkpoints_turn_epoch"}),
-    "approvals": frozenset({"ix_approvals_turn_status", "ix_approvals_expires"}),
-    "deployments": frozenset({"ix_deployments_project_created", "ix_deployments_artifact_environment"}),
-    "outbox_events": frozenset({"ix_outbox_events_status_created", "ix_outbox_events_aggregate"}),
-}
-M2_REQUIRED_UNIQUES: Final[dict[str, frozenset[str]]] = {
-    "turns": frozenset({"uq_turns_turn_id", "uq_turns_user_client_msg", "uq_turns_stream_id"}),
-    "turn_checkpoints": frozenset({"uq_turn_checkpoints_turn_epoch"}),
-    "approvals": frozenset({"uq_approvals_approval_id"}),
-    "outbox_events": frozenset({"uq_outbox_events_event_key"}),
-}
 
 
 def _check_m2_schema_sync(connection: Connection) -> SchemaReport:
@@ -76,23 +67,30 @@ def _check_m2_schema_sync(connection: Connection) -> SchemaReport:
         for column in sorted(required - actual):
             issues.append(SchemaIssue("missing_column", f"{table}.{column}", "M2 关键字段缺失"))
 
-    for table, required in M2_REQUIRED_INDEXES.items():
-        if table not in existing:
+    # 索引与唯一约束以 ORM 真相模型为准，避免 v2 硬编码清单漂移
+    for table_name in sorted(M2_REQUIRED_TABLES & existing):
+        table = Base.metadata.tables.get(table_name)
+        if table is None:
             continue
-        actual = {index["name"] for index in inspector.get_indexes(table)}
-        for index_name in sorted(required - actual):
-            issues.append(SchemaIssue("missing_index", f"{table}.{index_name}", "M2 关键索引缺失"))
-
-    for table, required in M2_REQUIRED_UNIQUES.items():
-        if table not in existing:
-            continue
-        actual = {
+        actual_idx = {i["name"] for i in inspector.get_indexes(table_name)}
+        for idx in table.indexes:
+            if idx.name and idx.name not in actual_idx:
+                issues.append(
+                    SchemaIssue("missing_index", f"{table_name}.{idx.name}", "M2 关键索引缺失")
+                )
+        actual_uniq = {
             constraint.get("name")
-            for constraint in inspector.get_unique_constraints(table)
+            for constraint in inspector.get_unique_constraints(table_name)
             if constraint.get("name")
         }
-        for constraint_name in sorted(required - actual):
-            issues.append(SchemaIssue("missing_unique", f"{table}.{constraint_name}", "M2 唯一约束缺失"))
+        for constraint in table.constraints:
+            if not isinstance(constraint, UniqueConstraint):
+                continue
+            name = constraint.name
+            if name and name not in actual_uniq:
+                issues.append(
+                    SchemaIssue("missing_unique", f"{table_name}.{name}", "M2 唯一约束缺失")
+                )
 
     return SchemaReport(
         dialect=connection.dialect.name,

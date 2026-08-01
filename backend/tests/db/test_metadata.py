@@ -37,7 +37,7 @@ def test_statistics_have_no_content_fk_but_usage_ledger_does() -> None:
         foreign_key.target_fullname
         for foreign_key in Base.metadata.tables["usage_ledger"].foreign_keys
     }
-    assert usage_fk_targets == {"users.id", "conversations.id"}
+    assert usage_fk_targets == {"users.id", "turns.turn_id"}
 
 
 def test_mysql_engine_pool_guards_are_enabled() -> None:

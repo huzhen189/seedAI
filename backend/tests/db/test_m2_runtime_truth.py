@@ -14,7 +14,12 @@ def test_m2_runtime_truth_models_share_a_single_caller_owned_transaction() -> No
     async def scenario() -> None:
         async with isolated_database() as (engine, session_factory):
             async with session_factory() as session:
-                user = User(email="m2@example.invalid", display_name="M2 User")
+                user = User(
+                    account="m2-user",
+                    email="m2@example.invalid",
+                    password_hash="hashed-secret",
+                    display_name="M2 User",
+                )
                 session.add(user)
                 await session.flush()
                 project = Project(user_id=user.id, name="M2 Project")
@@ -39,13 +44,21 @@ def test_m2_runtime_truth_models_share_a_single_caller_owned_transaction() -> No
                     session,
                     turn_id=turn.turn_id,
                     run_epoch=0,
+                    stage="init",
                 )
                 artifact = Artifact(
                     project_id=project.id,
                     conversation_id=conversation.id,
                     version=1,
-                    name="site-v1",
+                    site_spec_revision=1,
+                    site_spec_hash="a" * 64,
+                    manifest={"files": []},
+                    manifest_digest="c" * 64,
+                    checksums={},
+                    vendor_manifest_version="1.0",
+                    capability_manifest={},
                     status="building",
+                    trace_id="m2-trace",
                 )
                 session.add(artifact)
                 await session.flush()
@@ -60,6 +73,7 @@ def test_m2_runtime_truth_models_share_a_single_caller_owned_transaction() -> No
                     manifest_digest="c" * 64,
                     args_hash="d" * 64,
                     risk_level="critical",
+                    challenge_nonce_hash="e" * 64,
                     expires_at=datetime.now(UTC) + timedelta(minutes=30),
                     created_by=user.id,
                     fencing_token=turn.fencing_token,

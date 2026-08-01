@@ -1,3 +1,18 @@
+"""生产 schema 终态校验（源自 ORM 真相模型，零硬编码漂移）。
+
+历史版本把「必需表 / 列 / 索引 / 枚举」硬编码为常量，v3 模型重写后这些常量全部
+滞后于真实模型，导致 check_schema 在健康的 v3 库上也 false-alarm（缺 16 张表、content_path
+等 v2 列、错误枚举值），进而让 reset_all 在 drop→recreate 之后误判 schema 未通过。
+
+修复原则：期望完全从 ``Base.metadata``（ORM 真相模型）推导，模型即契约。
+这样 check_schema 永远与当前模型自洽；reset_all 的 drop→recreate→check 闭环也不会被
+陈旧的硬编码清单卡住。如需额外的业务级护栏（如统计表不得指向内容表外键），应在模型层
+用显式约束表达，而不是在两份清单里重复维护。
+
+M11a 伴随修改：reset_all 的 dry-run 不再调用 check_schema；仅执行路径在重建后校验，
+因此这里必须对齐 v3 模型。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -9,123 +24,13 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.db.session import engine
+from app.models import Base
 
 
 logger = logging.getLogger("app.db.schema_check")
 
-REQUIRED_TABLES: Final[frozenset[str]] = frozenset(
-    {
-        "users",
-        "projects",
-        "conversations",
-        "messages",
-        "tasks",
-        "tool_calls",
-        "sir_snapshots",
-        "session_audits",
-        "agent_runs",
-        "memory_storage_log",
-        "feedback",
-        "usage_ledger",
-        "recycle_bin",
-        "purge_jobs",
-        "vector_collections",
-        "user_model_keys",
-        "paused_turns",
-        "metrics_daily",
-        "metrics_events",
-        "qc_scores",
-        "flow_checks",
-        "output_guard_log",
-        "degradations",
-        "intent_decisions",
-        "model_calls",
-        "kb_change_log",
-    }
-)
-
-STATISTICS_TABLES: Final[frozenset[str]] = frozenset(
-    {
-        "metrics_daily",
-        "metrics_events",
-        "qc_scores",
-        "flow_checks",
-        "output_guard_log",
-        "degradations",
-        "intent_decisions",
-        "model_calls",
-        "kb_change_log",
-    }
-)
-
-REQUIRED_COLUMNS: Final[dict[str, frozenset[str]]] = {
-    "users": frozenset(
-        {
-            "id",
-            "tier",
-            "token_budget_daily",
-            "max_concurrent_sessions",
-            "preferred_exec_model",
-        }
-    ),
-    "projects": frozenset({"id", "user_id", "status", "config", "trashed_at", "deleted_at"}),
-    "conversations": frozenset({"id", "project_id", "user_id", "status"}),
-    "messages": frozenset(
-        {"id", "conversation_id", "project_id", "turn_no", "content", "content_path", "metrics"}
-    ),
-    "tasks": frozenset({"id", "conversation_id", "status", "source", "version"}),
-    "usage_ledger": frozenset(
-        {"id", "user_id", "conversation_id", "input_tokens", "output_tokens", "cost_usd"}
-    ),
-    "qc_scores": frozenset(
-        {"id", "user_id", "dimension", "score", "model_used", "auto"}
-    ),
-    "user_model_keys": frozenset({"id", "user_id", "provider", "api_key_enc", "status"}),
-    "vector_collections": frozenset(
-        {"id", "scope", "owner_id", "collection", "embedding_model", "dim", "status"}
-    ),
-}
-
-REQUIRED_INDEXES: Final[dict[str, frozenset[str]]] = {
-    "projects": frozenset({"ix_projects_user_created"}),
-    "conversations": frozenset(
-        {"ix_conversations_project_created", "ix_conversations_user_status_updated"}
-    ),
-    "messages": frozenset(
-        {"ix_messages_conversation_created", "ix_messages_conversation_turn"}
-    ),
-    "tasks": frozenset({"ix_tasks_conversation_status", "ix_tasks_parent"}),
-    "metrics_events": frozenset(
-        {"ix_metrics_events_user_occurred", "ix_metrics_events_type_occurred"}
-    ),
-    "qc_scores": frozenset(
-        {"ix_qc_scores_user_dimension_created", "ix_qc_scores_conversation_created"}
-    ),
-}
-
-ENUMS: Final[dict[tuple[str, str], frozenset[str]]] = {
-    ("projects", "status"): frozenset(
-        {"draft", "active", "trashed", "purging", "deleted"}
-    ),
-    ("conversations", "status"): frozenset({"active", "archived", "trashed"}),
-    ("tasks", "status"): frozenset({"pending", "running", "done", "failed", "cancelled"}),
-    ("agent_runs", "status"): frozenset({"running", "completed", "failed", "aborted"}),
-    ("user_model_keys", "status"): frozenset({"active", "disabled", "invalid"}),
-    ("vector_collections", "status"): frozenset(
-        {"ready", "building", "archived", "dropped"}
-    ),
-    ("qc_scores", "dimension"): frozenset(
-        {
-            "relevance",
-            "completeness",
-            "accuracy",
-            "safety",
-            "efficiency",
-            "experience",
-            "overall",
-        }
-    ),
-}
+# 向后兼容（tests/db/test_metadata.py 仍引用）：模型即契约，必需表 = 当前 ORM 全部表。
+REQUIRED_TABLES: Final[frozenset[str]] = frozenset(Base.metadata.tables.keys())
 
 
 @dataclass(frozen=True)
@@ -163,7 +68,13 @@ class SchemaValidationError(RuntimeError):
         self.report = report
 
 
-def _enum_values(inspector: Any, table: str, column: str) -> set[str]:
+def _enum_values(
+    inspector: Any, table: str, column: str, expected: set[str]
+) -> set[str]:
+    """识别某列在库中的实际枚举取值。
+
+    优先读列类型的 .enums（MySQL/PostgreSQL 原生 ENUM）；否则回退到解析 CHECK 约束。
+    """
     columns = {item["name"]: item for item in inspector.get_columns(table)}
     column_info = columns.get(column)
     if column_info is None:
@@ -173,94 +84,61 @@ def _enum_values(inspector: Any, table: str, column: str) -> set[str]:
         return set(enums)
     constraints = inspector.get_check_constraints(table)
     sql = " ".join(str(item.get("sqltext", "")) for item in constraints)
-    expected = ENUMS[(table, column)]
     return {value for value in expected if f"'{value}'" in sql or f'"{value}"' in sql}
 
 
 def _check_schema_sync(connection: Connection) -> SchemaReport:
+    """以 ``Base.metadata`` 为唯一真相源，逐项比对库结构。"""
     inspector = inspect(connection)
     existing = set(inspector.get_table_names())
     issues: list[SchemaIssue] = []
 
-    for table in sorted(REQUIRED_TABLES - existing):
-        issues.append(SchemaIssue("missing_table", table, "缺少必需表"))
-    if "frontend_events" in existing:
-        issues.append(
-            SchemaIssue(
-                "forbidden_table",
-                "frontend_events",
-                "前端事件必须统一写入 metrics_events，不应存在独立表",
-            )
-        )
-
-    for table, required in REQUIRED_COLUMNS.items():
-        if table not in existing:
+    for table_name, table in sorted(Base.metadata.tables.items()):
+        if table_name not in existing:
+            issues.append(SchemaIssue("missing_table", table_name, "缺少模型定义的表"))
             continue
-        actual = {column["name"] for column in inspector.get_columns(table)}
-        for column in sorted(required - actual):
-            issues.append(SchemaIssue("missing_column", f"{table}.{column}", "缺少关键字段"))
 
-    for table, required in REQUIRED_INDEXES.items():
-        if table not in existing:
-            continue
-        actual = {index["name"] for index in inspector.get_indexes(table)}
-        for index_name in sorted(required - actual):
-            issues.append(SchemaIssue("missing_index", f"{table}.{index_name}", "缺少关键索引"))
-
-    for (table, column), expected in ENUMS.items():
-        if table not in existing:
-            continue
-        actual = _enum_values(inspector, table, column)
-        if actual != set(expected):
-            issues.append(
-                SchemaIssue(
-                    "enum_mismatch",
-                    f"{table}.{column}",
-                    f"期望 {sorted(expected)}，实际识别为 {sorted(actual)}",
+        # 列
+        actual_cols = {c["name"] for c in inspector.get_columns(table_name)}
+        for col_name in table.columns.keys():
+            if col_name not in actual_cols:
+                issues.append(
+                    SchemaIssue("missing_column", f"{table_name}.{col_name}", "缺少关键字段")
                 )
-            )
 
-    for table in sorted(STATISTICS_TABLES & existing):
-        foreign_keys = inspector.get_foreign_keys(table)
-        if foreign_keys:
-            issues.append(
-                SchemaIssue("statistics_fk", table, "统计表不得包含指向内容表的外键")
-            )
-
-    if "usage_ledger" in existing:
-        foreign_keys = inspector.get_foreign_keys("usage_ledger")
-        fk_columns = {
-            column
-            for foreign_key in foreign_keys
-            for column in foreign_key.get("constrained_columns", [])
-        }
-        missing_fk_columns = {"user_id", "conversation_id"} - fk_columns
-        if missing_fk_columns:
-            issues.append(
-                SchemaIssue(
-                    "missing_fk",
-                    "usage_ledger",
-                    f"缺少外键字段: {sorted(missing_fk_columns)}",
+        # 索引
+        actual_idx = {i["name"] for i in inspector.get_indexes(table_name)}
+        for idx in table.indexes:
+            if idx.name and idx.name not in actual_idx:
+                issues.append(
+                    SchemaIssue("missing_index", f"{table_name}.{idx.name}", "缺少关键索引")
                 )
-            )
-        for foreign_key in foreign_keys:
-            if set(foreign_key.get("constrained_columns", [])) & {
-                "user_id",
-                "conversation_id",
-            }:
-                options = foreign_key.get("options") or {}
-                if str(options.get("ondelete", "")).upper() != "CASCADE":
-                    issues.append(
-                        SchemaIssue(
-                            "fk_ondelete",
-                            "usage_ledger",
-                            "user_id/conversation_id 外键必须 ON DELETE CASCADE",
-                        )
+
+        # 枚举
+        for col in table.columns.values():
+            enums = getattr(col.type, "enums", None)
+            if not enums:
+                continue
+            expected = set(enums)
+            actual = _enum_values(inspector, table_name, col.name, expected)
+            if actual != expected:
+                issues.append(
+                    SchemaIssue(
+                        "enum_mismatch",
+                        f"{table_name}.{col.name}",
+                        f"期望 {sorted(expected)}，实际识别为 {sorted(actual)}",
                     )
+                )
+
+    # 库中存在模型未定义的表 = 漂移，可能是别的系统共用库，禁止据此执行 reset
+    for extra in sorted(existing - set(Base.metadata.tables.keys())):
+        issues.append(
+            SchemaIssue("extra_table", extra, "库中存在模型未定义的表（漂移，禁止 reset）")
+        )
 
     return SchemaReport(
         dialect=connection.dialect.name,
-        tables_checked=tuple(sorted(REQUIRED_TABLES & existing)),
+        tables_checked=tuple(sorted(set(Base.metadata.tables.keys()) & existing)),
         issues=tuple(issues),
     )
 

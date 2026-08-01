@@ -25,7 +25,9 @@ def test_reset_is_dry_run_by_default() -> None:
     assert report.current_stage == "planned"
     assert report.dropped_tables == []
     assert report.redis_flushed is False
-    assert report.warnings == ["dry-run：未执行任何删除操作"]
+    # dry-run 首条警告固定为「未执行删除」，后续可能因探测到未知表/依赖不可达而追加
+    assert report.warnings[0] == "dry-run：未执行任何删除操作"
+    assert report.plan is not None
 
 
 def test_production_execution_requires_both_flags_and_exact_phrase() -> None:
