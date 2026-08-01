@@ -16,10 +16,25 @@ from typing import Any
 from app.core.contracts import Domain, RiskLevel
 from app.tools.base import BaseTool
 
+import logging
+
+logger = logging.getLogger("app.tools.registry")
+
 
 @dataclass
 class ToolMeta:
-    """单个原子工具的静态契约（启动后不可变）。"""
+    """单个原子工具的静态契约（启动后不可变）。
+
+    §9.2 末段要求 ToolRegistry 必须声明全部 profile,这里用 dataclass 字段承载：
+      - 基础身份: tool_id / risk / domain / description；
+      - 7 个 profile: sandbox_profile(沙箱)/ egress_profile(出口)/
+        filesystem_profile(文件)/ redaction_profile(脱敏)/ max_input_bytes/
+        max_output_bytes / timeout_seconds；
+      - 副作用治理: retry_policy / owner_resolver / idempotency(幂等)/
+        requires_approval(审批)/ reconcile_strategy(对账)/ unknown_timeout_seconds/
+        manual_resolution_policy(人工处置)；
+      - factory: 实现绑定(懒加载,避免 import 期触发业务模块)。
+    """
 
     tool_id: str
     risk: RiskLevel
@@ -50,9 +65,11 @@ class ToolRegistry:
         self._tools: dict[str, ToolMeta] = {}
 
     def register(self, meta: ToolMeta) -> None:
+        """注册一个 ToolMeta。重复 tool_id 直接抛错(注册期容错)。"""
         if meta.tool_id in self._tools:
             raise ValueError(f"tool {meta.tool_id!r} 已注册")
         self._tools[meta.tool_id] = meta
+        logger.debug("[registry] 注册 tool=%s risk=%s domain=%s", meta.tool_id, meta.risk.value, meta.domain.value)
 
     def get(self, tool_id: str) -> ToolMeta:
         meta = self._tools.get(tool_id)
@@ -61,6 +78,7 @@ class ToolRegistry:
         return meta
 
     def build(self, tool_id: str) -> BaseTool:
+        """按 tool_id 构造一个工具实例(调用 factory,惰性触达业务模块)。"""
         meta = self.get(tool_id)
         if meta.factory is None:
             raise RuntimeError(f"tool {tool_id!r} 未绑定实现(factory)")
@@ -70,7 +88,15 @@ class ToolRegistry:
         return list(self._tools.values())
 
     def validate_startup(self) -> list[str]:
-        """返回违规清单；空列表表示所有已注册 Tool 合规（§9.2 启动校验）。"""
+        """返回违规清单；空列表表示所有已注册 Tool 合规（§9.2 启动校验）。
+
+        校验规则(任一命中即记一条违规)：
+          1. risk 必须是 LOW/MID/HIGH/CRITICAL 之一；
+          2. HIGH/CRITICAL 必须 requires_approval=True；
+          3. MID/HIGH/CRITICAL 必须 idempotency=True；
+          4. 有副作用(MID/HIGH/CRITICAL)必须声明 reconcile_strategy；
+          5. 必须绑定实现(factory 非 None)。
+        """
         errors: list[str] = []
         valid_risks = {RiskLevel.LOW, RiskLevel.MID, RiskLevel.HIGH, RiskLevel.CRITICAL}
         for meta in self._tools.values():
@@ -86,6 +112,10 @@ class ToolRegistry:
                 errors.append(f"{meta.tool_id}: 有副作用工具必须声明 reconcile_strategy")
             if not meta.factory:
                 errors.append(f"{meta.tool_id}: 未绑定实现(factory 为 None)")
+        if errors:
+            logger.error("[registry] 启动校验发现 %d 处违规: %s", len(errors), errors)
+        else:
+            logger.info("[registry] 启动校验通过: 共 %d 个 Tool 合规", len(self._tools))
         return errors
 
 

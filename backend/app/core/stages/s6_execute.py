@@ -14,12 +14,24 @@ _GATED_PROJECT_ACTIONS = frozenset({"publish", "trash", "purge"})
 
 
 class S6ExecuteStage(BaseStage):
+    """S6 执行(§5.6,真实副作用唯一落点)。
+
+    前置:必须由 S5 校验通过(``validation.status == "pass"``)才会进入;否则 SKIPPED。
+    按首个 action 的域分派:
+      - 无 plan → 纯聊天(chat_service.respond);
+      - site → site_service.create_or_edit(建站,落不可变 Artifact);
+      - research → research_service.research(当前后端未接,会明确失败);
+      - project → _run_project_action(低危直落 ProjectOps,高危必须由 S5 闸门拦截)。
+    """
+
     stage_id = StageId.S6
 
     async def run(self, context: TurnContext):
         if context.validation is None or context.validation.status != "pass":
+            logger.debug("[S6] 校验未通过,跳过 turn=%s", context.turn_id)
             return self.result(StageStatus.SKIPPED, "validation_not_pass")
         if context.plan is None or not context.plan.action_items:
+            logger.debug("[S6] 纯聊天回复 turn=%s", context.turn_id)
             text = await chat_service.respond(context)
             context.response_fragments.append(ResponseFragment(status="success", text=text, producer_stage=StageId.S6))
             context.execution = ExecutionResult(status="succeeded", committed=True)
@@ -27,10 +39,12 @@ class S6ExecuteStage(BaseStage):
         if self.session is None:
             raise RuntimeError("S6 requires a database session")
         action = context.plan.action_items[0]
+        logger.info("[S6] 执行动作 domain=%s speech=%s turn=%s", action.domain.value, action.speech_act.value, context.turn_id)
         if action.domain.value == "site":
             artifact, text = await site_service.create_or_edit(self.session, context)
             context.execution = ExecutionResult(status="succeeded", committed=True, artifact_refs=[str(artifact.id)], task_results=[TaskResult(task_id=action.id, status="succeeded", output_refs=[str(artifact.id)])])
             context.response_fragments.append(ResponseFragment(status="success", text=text, producer_stage=StageId.S6, output_refs=[str(artifact.id)]))
+            logger.info("[S6] 建站完成 artifact=%s turn=%s", artifact.id, context.turn_id)
             return self.result(StageStatus.COMPLETED, "site_artifact_created", output_refs=[str(artifact.id)])
         if action.domain.value == "research":
             text = await research_service.research(context)

@@ -17,7 +17,12 @@ _SYSTEM_PROMPT = (
 
 class ChatService:
     async def respond(self, context: TurnContext) -> str:
+        """纯聊天回复(S6 无 plan 分支调用)。
+
+        组装 system + user 消息调 LLM;LLM 不可用时降级到本地静态回复,保证对话不中断。
+        """
         user_text = context.clean_message or ""
+        logger.debug("[chat] 生成闲聊回复 msg=%.60s", user_text)
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_text},

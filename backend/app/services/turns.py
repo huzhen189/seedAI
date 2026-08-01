@@ -18,6 +18,10 @@ from app.db.repositories import conversations, outbox, turns, usage_ledger
 from app.models import Conversation, Message, Turn
 from app.security import CurrentUser
 
+import logging
+
+logger = logging.getLogger("app.services.turns")
+
 
 _PII_PATTERNS = (
     (re.compile(r"\b1[3-9]\d{9}\b"), "[PHONE_REDACTED]"),
@@ -57,11 +61,21 @@ class TurnService:
         raw_message: str,
         expected_conversation_version: int | None,
     ) -> AcceptedTurn:
+        """受理一个新 Turn(幂等)。
+
+        幂等键为 ``client_msg_id``：重复提交同一 id 不会新建 Turn，只复用已有流
+        (且 digest 必须一致，否则判为冲突)。新 Turn 会落 user Message、预留用量、写 outbox，
+        并构造 ``TurnContext`` 交给后续 Pipeline。
+
+        Returns:
+            ``AcceptedTurn(context, existing)``；existing=True 表示命中幂等复用。
+        """
         digest = hashlib.sha256(raw_message.encode("utf-8")).hexdigest()
         existing = await turns.by_client_message(session, user.id, client_msg_id)
         if existing is not None:
             if existing.request_digest != digest:
                 raise HTTPException(status_code=409, detail={"code": "IDEMPOTENCY_DIGEST_CONFLICT"})
+            logger.info("[turn] 幂等复用 turn=%s client_msg_id=%s", existing.turn_id, client_msg_id)
             context = self._context_from_existing(existing, user, raw_message)
             return AcceptedTurn(context=context, existing=True)
 
@@ -72,6 +86,10 @@ class TurnService:
         if expected_conversation_version is not None and conversation.version != expected_conversation_version:
             raise HTTPException(status_code=409, detail={"code": "CONVERSATION_VERSION_CONFLICT"})
 
+        logger.info(
+            "[turn] 新受理 turn user=%s conv=%s msg_len=%d pii=%s truncated=%s",
+            user.id, conversation_id, len(clean), trust.pii_redacted, trust.truncated,
+        )
         turn_id = new_ulid()
         stream_id = new_ulid()
         fencing_token = new_ulid()
@@ -127,10 +145,12 @@ class TurnService:
         )
 
     async def snapshot(self, session: AsyncSession, turn_id: str, user_id: int) -> dict[str, Any]:
+        """返回单个 Turn 的快照(状态/流 id/运行 epoch/最后事件),供前端轮询。"""
         result = await session.execute(select(Turn).where(Turn.turn_id == turn_id, Turn.user_id == user_id))
         turn = result.scalar_one_or_none()
         if turn is None:
             raise HTTPException(status_code=404, detail={"code": "TURN_NOT_FOUND"})
+        logger.debug("[turn] 快照 turn=%s status=%s", turn_id, turn.status)
         return {
             "turn_id": turn.turn_id,
             "stream_id": turn.stream_id,

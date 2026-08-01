@@ -175,13 +175,22 @@ class ProjectOpsService:
         user_id: int,
         trace_id: str,
     ) -> OpsOutcome:
-        """按 speech_act 分发。未知动作返回 failed 而非抛异常，便于统一收口。"""
+        """按 speech_act 分发到具体执行器(publish/trash/restore/purge)。
+
+        先以 ``for_update`` 锁住项目行(防并发状态竞争),再校验存在性与状态机合法性
+        (purging 中禁止任何操作);未知动作返回 failed 而非抛异常,便于 S6/Gate 统一收口。
+
+        Returns:
+            ``OpsOutcome``(status/text/output_refs/error_code)。
+        """
+        logger.info("[ops] 执行项目动作 action=%s project=%s user=%s", action, project_id, user_id)
         project = (
             await session.execute(
                 select(Project).where(Project.id == project_id, Project.user_id == user_id).with_for_update()
             )
         ).scalar_one_or_none()
         if project is None:
+            logger.warning("[ops] 项目不存在或越权 project=%s user=%s", project_id, user_id)
             return OpsOutcome(status="failed", text="目标项目不存在或无权访问。", error_code="project_not_found")
         if project.status == "purging":
             return OpsOutcome(status="failed", text="项目正在永久删除中，无法执行该操作。", error_code="project_purging")
@@ -194,6 +203,7 @@ class ProjectOpsService:
         }
         handler = handlers.get(action)
         if handler is None:
+            logger.warning("[ops] 不支持的动作 action=%s", action)
             return OpsOutcome(status="failed", text=f"不支持的项目操作：{action}。", error_code="unsupported_action")
         return await handler(session, project, trace_id=trace_id)
 
@@ -450,7 +460,9 @@ class ProjectOpsService:
         单事务跑完整 job 是错的 —— 任一步 DB 报错会毒化 session，
         连「把 job 标成 failed」这一笔都写不进去，job 会永远停在 queued。
         """
+        logger.info("[purge] job=%s 启动, 共 %d 步", job_id, len(PURGE_STEPS))
         for step in PURGE_STEPS:
+            logger.info("[purge] job=%s 执行步骤 %s", job_id, step)
             try:
                 async with transaction() as session:
                     job = await session.get(PurgeJob, job_id)

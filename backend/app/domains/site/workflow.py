@@ -25,21 +25,39 @@ from app.config import settings
 from app.core.turn_context import TurnContext
 from app.models import Artifact, Project
 
+import logging
+
+logger = logging.getLogger("app.site.workflow")
+
+# 句子切分：用于从用户 prompt 中拆出「要点」作为 feature card 标题/正文。
 _SENTENCE_SPLIT = re.compile(r"[。！？!?；;~\n]+")
+# 词切分：用于从句子首部提取卡片标题（取第一个词，截断到 10 字）。
 _WORD_SPLIT = re.compile(r"[，,、\s]+")
 
 
 def _esc(value: str) -> str:
-    """HTML 正文转义。所有用户内容都经过此处，构造上杜绝 <script> 注入。"""
+    """HTML 正文转义。所有用户内容都经过此处,构造上杜绝 <script> 注入。
+
+    使用标准库 ``html.escape(quote=True)``,既转义 ``&<>`` 也转义引号,
+    保证内容无论落在标签体还是属性值里都不会破坏结构或被当成标签解析。
+    """
     return escape(str(value), quote=True)
 
 
 def _sentences(prompt: str) -> list[str]:
+    """把一段自由文本按中英文标点切成句子列表,丢弃空串。
+
+    Args:
+        prompt: 用户输入的原始/清洗后文本。
+    Returns:
+        非空句子列表(已 strip)。空文本返回 ``[]``。
+    """
     parts = [p.strip() for p in _SENTENCE_SPLIT.split(prompt or "")]
     return [p for p in parts if p]
 
 
 def _truncate(value: str, limit: int) -> str:
+    """超长截断到 ``limit`` 字符(留一位放省略号)。长度不足原样返回。"""
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
@@ -47,18 +65,35 @@ def _verify_html(html: str) -> tuple[bool, str]:
     """结构完整性与注入安全校验（规范 §8.2 Verify）。
 
     模块级函数，供 ``HtmlValidateTool`` 复用，避免逻辑漂移。
+
+    校验项（任一失败即返回 ``(False, reason)``）：
+      1. 必须非空且以 ``<!doctype html>`` 开头；
+      2. 必须含闭合 ``</html>``；
+      3. 字节长度 >= 400（防止半成品/占位页）；
+      4. 不得含危险标签/属性(``iframe/object/embed/javascript:/onerror=/onload=``),
+         作为转义之后的最后一道注入闸门。
+
+    Args:
+        html: 待校验的完整 HTML 文档字符串。
+    Returns:
+        ``(passed, reason)`` —— 通过时 ``reason == "ok"``。
     """
     if not html or not html.strip().lower().startswith("<!doctype html>"):
+        logger.warning("[verify] 校验失败: 缺少 <!doctype html> 或为空")
         return False, "site_verify_missing_doctype"
     if "</html>" not in html.lower():
+        logger.warning("[verify] 校验失败: 缺少 </html> 闭合标签")
         return False, "site_verify_unclosed_html"
     if len(html.encode("utf-8")) < 400:
+        logger.warning("[verify] 校验失败: 产物过小 (%d bytes < 400)", len(html.encode("utf-8")))
         return False, "site_verify_too_small"
     # 危险标签/属性不得在生成产物中出现（用户内容已全量转义，这里做最后一道闸门）。
     lowered = html.lower()
     for forbidden in ("<iframe", "<object", "<embed", "javascript:", "onerror=", "onload="):
         if forbidden in lowered:
+            logger.warning("[verify] 校验失败: 检出危险 token=%s", forbidden)
             return False, "site_verify_unsafe_token"
+    logger.debug("[verify] 校验通过: %d bytes", len(html.encode("utf-8")))
     return True, "ok"
 
 
@@ -68,7 +103,15 @@ class SiteWorkflow:
         """把本轮明确指令合并进 ``projects.site_spec``（SiteSpec）。
 
         低置信要求进入 pending；本轮只持久化已确认的高置信需求文本。
+
+        Args:
+            session: 数据库会话(本方法只改 ``project.site_spec`` 内存对象,提交由调用方控制)。
+            project: 当前项目(``project.site_spec`` 是既有需求 JSON)。
+            context: 本轮 TurnContext,``context.clean_message`` 为清洗后的用户指令。
+        Returns:
+            合并后的 spec dict(也会写回 ``project.site_spec``)。
         """
+        logger.debug("[build_spec] project=%s 合并指令: %.80s", project.id, context.clean_message)
         spec = dict(project.site_spec or {})
         spec["title"] = project.name
         spec["prompt"] = context.clean_message
@@ -78,14 +121,26 @@ class SiteWorkflow:
         spec["history"] = history[-10:]
         spec["theme"] = spec.get("theme", "system")
         project.site_spec = spec
+        logger.info("[build_spec] project=%s 需求历史长度=%d theme=%s", project.id, len(history), spec["theme"])
         return spec
 
     # ---------------------------------------------------------- Produce
     def produce(self, spec: dict) -> str:
+        """按 SiteSpec 确定性生成一份 premium 质感的完整静态站点 HTML（§8.2 Produce）。
+
+        纯函数(无副作用、无 IO),从 ``title/prompt/theme`` 推导 hero/feature/about 区块,
+        全程经 ``_esc`` 转义,无任何外部 CDN(满足 §11.3 隔离与确定性)。
+
+        Args:
+            spec: SiteSpec dict(至少含 ``title/prompt/theme``)。
+        Returns:
+            完整 HTML 文档字符串(以 ``<!doctype html>`` 开头)。
+        """
         title = _esc(spec.get("title") or "我的网站")
         prompt = spec.get("prompt") or ""
         theme = spec.get("theme", "system")
         sentences = _sentences(prompt)
+        logger.debug("[produce] title=%s theme=%s 句子数=%d", title, theme, len(sentences))
 
         hero_subtitle = _esc(sentences[0]) if sentences else _esc("用对话创造的数字体验")
         about_text = _esc(prompt) if prompt else _esc("这是一个由 SeedAI 通过对话生成的站点。")
@@ -99,7 +154,7 @@ class SiteWorkflow:
         </article>""" for f in features
         )
 
-        return f"""<!doctype html>
+        html = f"""<!doctype html>
 <html lang="zh-CN" data-theme="{_esc(theme)}">
 <head>
 <meta charset="utf-8">
@@ -249,6 +304,8 @@ footer.foot {{ border-top:1px solid var(--line); margin-top:40px; }}
 </body>
 </html>
 """
+        logger.info("[produce] 已生成站点 HTML: %d bytes, features=%d", len(html.encode("utf-8")), len(features))
+        return html
 
     @staticmethod
     def _derive_features(sentences: list[str]) -> list[dict[str, str]]:
@@ -272,6 +329,7 @@ footer.foot {{ border-top:1px solid var(--line); margin-top:40px; }}
         self, session: AsyncSession, project: Project, context: TurnContext, html: str
     ) -> tuple[Artifact, str]:
         """原子写入不可变版本目录；委托给模块级 _publish_preview（供 SitePublishTool 复用）。"""
+        logger.debug("[preview] project=%s 写入预览产物 (%d bytes)", project.id, len(html.encode("utf-8")))
         return await _publish_preview(session, project, context, html)
 
 
@@ -281,11 +339,27 @@ async def _publish_preview(
     """原子写入不可变版本目录，生成 manifest/checksum 与 preview 路径（§8.2 Preview）。
 
     模块级函数，供 ``SitePublishTool`` 复用，避免逻辑漂移。
+
+    关键步骤(均幂等,版本号单调递增)：
+      1. 取当前最大 version 计算 next_version；
+      2. 计算 body sha256 + manifest sha256(供后续校验/回滚)；
+      3. 先写 ``index.html.tmp`` 再 fsync 后 atomic rename(防半截文件)；
+      4. 落 ``Artifact``(不可变版本: status=preview_ready, trace_id=context.trace_id),
+         并把 ``project.head_artifact_id`` 指向它、``project.status='active'``、``lock_version+=1``。
+
+    Args:
+        session: 数据库会话(本函数内 ``flush``,提交由调用方控制)。
+        project: 当前项目。
+        context: 本轮 TurnContext(取 user_id / conversation_id / trace_id)。
+        html: 已通过 verify 的完整 HTML。
+    Returns:
+        ``(Artifact, summary_text)``。
     """
     max_version = await session.scalar(
         select(func.max(Artifact.version)).where(Artifact.project_id == project.id)
     )
     version = int(max_version or 0) + 1
+    logger.debug("[publish_preview] project=%s next_version=v%d", project.id, version)
     digest_body = hashlib.sha256(html.encode("utf-8")).hexdigest()
     manifest = {
         "index.html": {
@@ -305,6 +379,7 @@ async def _publish_preview(
         file.flush()
         os.fsync(file.fileno())
     temporary.replace(target)
+    logger.debug("[publish_preview] project=%s 写入文件 %s", project.id, target)
 
     spec_hash = hashlib.sha256(
         json.dumps(project.site_spec, sort_keys=True).encode("utf-8")
@@ -330,6 +405,10 @@ async def _publish_preview(
     project.head_artifact_id = artifact.id
     project.status = "active"
     project.lock_version += 1
+    logger.info(
+        "[publish_preview] project=%s 生成 v%d artifact=%s preview_path=%s",
+        project.id, version, artifact.id, artifact.preview_path,
+    )
     return artifact, f"已生成网站版本 v{version}，预览产物已就绪。"
 
 

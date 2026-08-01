@@ -24,6 +24,10 @@ from app.tools._registry import ToolMeta
 from app.tools.base import BaseTool, ToolContext, ToolResult, ToolStatus
 from app.domains.site import workflow as site_wf
 
+import logging
+
+logger = logging.getLogger("app.tools.site")
+
 
 _ALLOWED_IMAGE_MIME = {
     "image/png": "png",
@@ -54,6 +58,20 @@ class FsWriteTool(BaseTool):
 
     async def run(self, ctx: ToolContext, *, path: str, content: str,
                   idempotency_key: str | None = None) -> ToolResult:
+        """原子写入项目工作区文件(§9.2 fs_write)。
+
+        写入策略：先落 ``<name>.tmp`` → ``fsync`` → ``os.replace`` 原子改名，
+        返回最终路径与 sha256（供上层做幂等/校验）。mid 风险且声明 idempotency=True，
+        幂等键缺省用内容 sha256。
+
+        Args:
+            path: 目标文件相对工作区的文件名(自动 basename 消毒,防越界)。
+            content: 要写入的文本。
+            idempotency_key: 可选外部幂等键。
+        Returns:
+            ``ToolResult.ok({path, sha256, bytes})``；失败返回 failed(绝不抛异常)。
+        """
+        logger.debug("[fs_write] user=%s project=%s path=%s bytes=%d", ctx.user_id, ctx.project_id, path, len(content.encode("utf-8")))
         try:
             safe = _FILENAME_SAFE.sub("_", os.path.basename(path))
             root = Path(settings.artifact_dir) / "workspace" / str(ctx.user_id) / str(ctx.project_id or "0")
@@ -67,6 +85,7 @@ class FsWriteTool(BaseTool):
                 os.fsync(file.fileno())
             temporary.replace(target)
             digest = hashlib.sha256(data).hexdigest()
+            logger.info("[fs_write] 写入成功 user=%s project=%s -> %s sha256=%s", ctx.user_id, ctx.project_id, target, digest[:12])
             return ToolResult.ok(
                 {"path": str(target), "sha256": digest, "bytes": len(data)},
                 idempotency_key=idempotency_key or digest,
@@ -100,6 +119,17 @@ class FsReadTool(BaseTool):
     )
 
     async def run(self, ctx: ToolContext, *, path: str) -> ToolResult:
+        """只读项目工作区文件(§9.2 fs_read, low)。
+
+        安全约束：仅允许读取工作区内文件，越界路径(含 symlink/junction 逃逸)或不存在
+        一律返回 failed，绝不抛裸异常、绝不读取工作区外数据。
+
+        Args:
+            path: 要读取的文件名(自动 basename 消毒)。
+        Returns:
+            ``ToolResult.ok({path, bytes, sha256})``；越界/缺失/异常返回 failed。
+        """
+        logger.debug("[fs_read] user=%s project=%s path=%s", ctx.user_id, ctx.project_id, path)
         try:
             safe = _FILENAME_SAFE.sub("_", os.path.basename(path))
             root = Path(settings.artifact_dir) / "workspace" / str(ctx.user_id) / str(ctx.project_id or "0")
@@ -145,8 +175,15 @@ class HtmlValidateTool(BaseTool):
     )
 
     async def run(self, ctx: ToolContext, *, html: str) -> ToolResult:
+        """HTML 结构完整性与注入安全校验(§9.2 html_validate, low)。
+
+        委托 ``site_wf._verify_html`` 执行 doctype/闭合/最小体积/危险 token 检查。
+        通过返回 ok；失败携带具体失败 code(供上层定位是哪一项没过)。
+        """
+        logger.debug("[html_validate] 校验 %d bytes", len(html.encode("utf-8")))
         ok, code = site_wf._verify_html(html)
         if ok:
+            logger.info("[html_validate] 校验通过 user=%s project=%s", ctx.user_id, ctx.project_id)
             return ToolResult.ok({"passed": True, "code": code})
         return ToolResult.fail(
             ErrorEnvelope(code=code, category="validation",
@@ -175,8 +212,22 @@ class SitePublishTool(BaseTool):
     async def run(self, ctx: ToolContext, *, session: AsyncSession, project: Project,
                   turn_context: TurnContext, html: str,
                   idempotency_key: str | None = None) -> ToolResult:
+        """发布本地不可变预览(§9.2 site_publish, mid)。
+
+        委托 ``site_wf._publish_preview`` 原子写入版本目录 + 落 Artifact，
+        幂等键缺省用 manifest_digest。注意：这只是生成一个本地 preview 版本，
+        不代表生产发布(生产由 site_deploy 负责)。
+
+        Args:
+            session/project/turn_context: 建站上下文(由 S6 执行器注入)。
+            html: 已通过 html_validate 的完整 HTML。
+        Returns:
+            ``ToolResult.ok({artifact_id, version, preview_path, manifest_digest, message})``。
+        """
+        logger.debug("[site_publish] project=%s 发布预览 (%d bytes)", project.id, len(html.encode("utf-8")))
         try:
             artifact, message = await site_wf._publish_preview(session, project, turn_context, html)
+            logger.info("[site_publish] 成功 project=%s artifact=%s v%d path=%s", project.id, artifact.id, artifact.version, artifact.preview_path)
             return ToolResult.ok(
                 {
                     "artifact_id": artifact.id,
@@ -216,8 +267,21 @@ class SiteDeleteTool(BaseTool):
 
     async def run(self, ctx: ToolContext, *, session: AsyncSession, artifact_id: int,
                   idempotency_key: str | None = None) -> ToolResult:
+        """对不可变版本建立 tombstone(§9.2 site_delete, high, 需审批)。
+
+        文件本身不物理删除(不可变版本语义)，仅把 Artifact.status 置为 ``deleted``；
+        high 风险且 requires_approval=True，必须由审批闸门放行后才进入此执行。
+        幂等：重复调用同一 artifact 结果一致。
+
+        Args:
+            artifact_id: 待删除/置 tombstone 的 Artifact id。
+        Returns:
+            ``ToolResult.ok({artifact_id, status: deleted})``；找不到返回 failed。
+        """
+        logger.debug("[site_delete] 尝试删除 artifact=%s", artifact_id)
         artifact = await session.get(Artifact, artifact_id)
         if artifact is None:
+            logger.warning("[site_delete] 未找到 artifact=%s", artifact_id)
             return ToolResult.fail(
                 ErrorEnvelope(code="site_delete_not_found", category="not_found",
                               what="找不到指定版本", why=f"artifact_id={artifact_id}",
@@ -226,6 +290,7 @@ class SiteDeleteTool(BaseTool):
             )
         artifact.status = "deleted"
         await session.flush()
+        logger.info("[site_delete] 已建立 tombstone artifact=%s", artifact_id)
         return ToolResult.ok(
             {"artifact_id": artifact.id, "status": "deleted"},
             idempotency_key=idempotency_key or f"del:{artifact_id}",
@@ -255,7 +320,22 @@ class AssetImportTool(BaseTool):
 
     async def run(self, ctx: ToolContext, *, filename: str, mime: str, size_bytes: int,
                   idempotency_key: str | None = None) -> ToolResult:
+        """资产导入(§9.2 asset_import, mid)—— 本环境只做校验与元数据 manifest。
+
+        MIME 白名单消毒 + 尺寸上限(20MB)校验(当前均同步真实执行)；
+        像素级转码(WebP/AVIF 压缩)依赖图像库,本环境未装,明确标记 ``transcode: deferred``，
+        不静默成功。幂等键缺省用 fingerprint(文件名:尺寸 的 sha256 前 16 位)。
+
+        Args:
+            filename: 原始文件名(自动 basename 消毒)。
+            mime: 资产 MIME,须为图片类型。
+            size_bytes: 资产字节数,须 <= 20MB。
+        Returns:
+            ``ToolResult.ok({manifest, stored_as})``；类型/大小不合规返回 failed。
+        """
+        logger.debug("[asset_import] filename=%s mime=%s size=%d", filename, mime, size_bytes)
         if mime not in _ALLOWED_IMAGE_MIME:
+            logger.warning("[asset_import] 不支持的 MIME: %s", mime)
             return ToolResult.fail(
                 ErrorEnvelope(code="asset_import_bad_mime", category="validation",
                               what="不支持的 MIME 类型", why=mime,
@@ -263,6 +343,7 @@ class AssetImportTool(BaseTool):
                 idempotency_key=idempotency_key,
             )
         if size_bytes > 20_971_520:
+            logger.warning("[asset_import] 超过 20MB: %d", size_bytes)
             return ToolResult.fail(
                 ErrorEnvelope(code="asset_import_too_large", category="validation",
                               what="资产超过 20MB 上限", why=str(size_bytes),
@@ -277,6 +358,7 @@ class AssetImportTool(BaseTool):
             "transcode": "deferred",
             "fingerprint": hashlib.sha256(f"{safe_name}:{size_bytes}".encode()).hexdigest()[:16],
         }
+        logger.info("[asset_import] 通过校验 user=%s project=%s stored_as=%s", ctx.user_id, ctx.project_id, safe_name)
         return ToolResult.ok(
             {"manifest": manifest, "stored_as": safe_name},
             idempotency_key=idempotency_key or manifest["fingerprint"],
@@ -306,7 +388,22 @@ class SiteDeployTool(BaseTool):
     async def run(self, ctx: ToolContext, *, session: AsyncSession, project: Project,
                   artifact_id: int, approved: bool = False,
                   idempotency_key: str | None = None) -> ToolResult:
+        """生产发布(§9.2 site_deploy, CRITICAL, 需审批)。
+
+        前置：必须由审批闸门将 ``approved`` 置 True；否则直接 failed（不静默发布）。
+        流程：取得 Artifact → 健康检查(本环境简化为预览产物存在) → 落 Deployment(
+        status=succeeded) → 把 project.active_deployment_id 指向它、project.status='active'。
+        健康检查失败则保留旧 active，不切换(符合 CRITICAL 回滚语义)。
+
+        Args:
+            project/artifact_id: 目标项目与待发布版本。
+            approved: 是否已通过审批闸门。
+        Returns:
+            ``ToolResult.ok({deployment_id, status, rolled_back})``；未审批/缺失/健康检查失败返回 failed。
+        """
+        logger.debug("[site_deploy] project=%s artifact=%s approved=%s", project.id, artifact_id, approved)
         if not approved:
+            logger.warning("[site_deploy] 未审批,拒绝发布 project=%s", project.id)
             return ToolResult.fail(
                 ErrorEnvelope(code="site_deploy_requires_approval", category="approval",
                               what="生产发布需先审批", why="approved=False",
@@ -315,6 +412,7 @@ class SiteDeployTool(BaseTool):
             )
         artifact = await session.get(Artifact, artifact_id)
         if artifact is None:
+            logger.warning("[site_deploy] 找不到 artifact=%s", artifact_id)
             return ToolResult.fail(
                 ErrorEnvelope(code="site_deploy_no_artifact", category="not_found",
                               what="找不到待发布版本", why=f"artifact_id={artifact_id}",

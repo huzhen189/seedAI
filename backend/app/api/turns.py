@@ -251,6 +251,10 @@ async def create_turn(
 
     幂等：同一 client_msg_id 重复提交不会重复执行，只重新挂接已有流。
     """
+    logger.info(
+        "[chat] 受理 Turn: user=%s conv=%s msg_len=%d client_msg_id=%s",
+        user.id, payload.conversation_id, len(payload.message), payload.client_msg_id,
+    )
     async with transaction() as session:
         accepted = await turn_service.accept(
             session,
@@ -306,6 +310,7 @@ async def control_turn(
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """用户侧控制。状态跃迁一律走 CAS，拒绝覆盖已终态的 Turn。"""
+    logger.info("[control] turn=%s action=%s user=%s", turn_id, payload.action, user.id)
     async with transaction() as session:
         turn = await turns_repo.by_turn_id(session, turn_id)
         if turn is None or turn.user_id != user.id:
@@ -384,6 +389,7 @@ async def decide_approval(
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """审批决策。CAS 单次消费 + nonce 绑定，重放与并发只会有一次生效。"""
+    logger.info("[gate] 审批决策 approval=%s decision=%s user=%s", approval_id, payload.decision, user.id)
     terminal_status: str | None = None
     reply_text: str = ""
     output_refs: list[str] = []
@@ -539,6 +545,7 @@ async def _execute_approved_action(
     trace_id: str,
 ) -> OpsOutcome:
     """approved→consumed + operation ledger(W0) + 领域真实执行，全部在同一 UoW。"""
+    logger.debug("[gate] 执行已审批动作 approval=%s action=%s project=%s", approval.approval_id, approval.action, project_id)
     raw_target = approval.target_id or ""
     target_project_id = int(raw_target) if raw_target.isdigit() else project_id
     if not target_project_id:

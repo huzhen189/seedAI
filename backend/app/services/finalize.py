@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,9 +11,25 @@ from app.core.turn_context import TurnContext
 from app.db.repositories import outbox
 from app.models import Message, Turn, UsageLedger
 
+logger = logging.getLogger("app.services.finalize")
+
 
 class FinalizeService:
     async def finalize(self, session: AsyncSession, context: TurnContext) -> str:
+        """把本轮结果在单一事务内收口(终态唯一写入点)。
+
+        步骤：
+          1. 以 ``for_update`` 锁住 Turn 行,避免并发终态竞争；
+          2. 由 validation 状态决定终态：completed / waiting_approval / blocked；
+          3. completed 时写 assistant 消息(内容来自护栏后的 reply_final,绝不带原始生成文本)；
+          4. 释放用量预留(settled=0, status=released)；
+          5. 同一个事务落 outbox(终态事件,event_key 唯一即幂等护栏)——若不同事务,
+             外部只能看到 accepted、永远等不到收口。
+
+        Returns:
+            终态字符串(completed/waiting_approval/blocked)。
+        """
+        logger.debug("[finalize] 收口开始 turn=%s", context.turn_id)
         turn = (await session.execute(select(Turn).where(Turn.turn_id == context.turn_id).with_for_update())).scalar_one()
         terminal = "completed"
         if context.validation is not None and context.validation.status == "needs_approval":
@@ -54,6 +72,7 @@ class FinalizeService:
             },
         )
         await session.flush()
+        logger.info("[finalize] 收口完成 turn=%s -> %s", context.turn_id, terminal)
         return terminal
 
 

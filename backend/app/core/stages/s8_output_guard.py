@@ -6,6 +6,13 @@ from .base import BaseStage
 
 
 class S8OutputGuardStage(BaseStage):
+    """S8 输出护栏(§5.6,确定性)。
+
+    汇总所有 response_fragments 拼成回复草稿,并按校验状态改写(等待审批/被阻止的专用文案)。
+    最后做确定性清洗:任何 ``<script`` 均转义为 ``&lt;script``,确保模型/provider 原始文本
+    不会绕过护栏进入最终回复(规范:原始生成文本不得直抵此层)。
+    """
+
     stage_id = StageId.S8
 
     async def run(self, context: TurnContext):
@@ -19,4 +26,5 @@ class S8OutputGuardStage(BaseStage):
         # Deterministic output guard: model/provider raw text never reaches this layer.
         context.reply_final = context.reply_draft.replace("<script", "&lt;script")
         context.guard_result = GuardResult(status="passed")
+        logger.debug("[S8] 输出护栏通过, draft 长度=%d", len(context.reply_final))
         return self.result(StageStatus.COMPLETED, "deterministic_output_guard")

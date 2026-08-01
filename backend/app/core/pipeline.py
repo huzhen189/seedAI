@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 
 from .contracts import PIPELINE_STAGES, StageId, StageResult, StageStatus
 from .errors import PipelineContractError
 from .turn_context import TurnContext
+
+logger = logging.getLogger("app.core.pipeline")
 
 
 class Stage(Protocol):
@@ -41,13 +44,20 @@ class Pipeline:
 
     async def run(self, context: TurnContext, observer: StageObserver | None = None) -> tuple[StageResult, ...]:
         results: list[StageResult] = []
+        logger.info("[pipeline] 开始执行 turn=%s 共 %d 阶段", context.turn_id, len(self._stages))
         for stage in self._stages:
             result = await stage.run(context)
+            logger.info(
+                "[pipeline] 阶段 %s -> status=%s reason=%s duration=%dms turn=%s",
+                result.stage.value, result.status.value, result.reason_code,
+                result.duration_ms, context.turn_id,
+            )
             self._validate_result(stage.stage_id, result)
             await self._audit_sink.append(result)
             if observer is not None:
                 await observer(result)
             results.append(result)
+        logger.info("[pipeline] 执行结束 turn=%s", context.turn_id)
         return tuple(results)
 
     @staticmethod

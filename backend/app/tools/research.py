@@ -15,6 +15,10 @@ from app.core.contracts import Domain, ErrorEnvelope, RiskLevel
 from app.tools._registry import ToolMeta
 from app.tools.base import BaseTool, ToolContext, ToolResult
 
+import logging
+
+logger = logging.getLogger("app.tools.research")
+
 _UNAVAILABLE = "backend_unavailable"
 
 
@@ -29,6 +33,12 @@ class WebSearchTool(BaseTool):
     )
 
     async def run(self, ctx: ToolContext, *, query: str) -> ToolResult:
+        """搜索并返回来源元数据(§8.3 web_search, low)。
+
+        本环境无搜索后端,按 §9.2「Tool 必须返回 ToolResult」约束,**明确返回 failed**
+        并说明原因,绝不静默成功或伪造结果。
+        """
+        logger.debug("[web_search] query=%s (后端未接入,返回 unavailable)", query[:80])
         return ToolResult.fail(ErrorEnvelope(
             code=_UNAVAILABLE, category="research",
             what="web_search 暂未接入搜索后端", why="无 search provider 配置",
@@ -46,6 +56,12 @@ class WebFetchTool(BaseTool):
     )
 
     async def run(self, ctx: ToolContext, *, url: str) -> ToolResult:
+        """受限抓取(§8.3 web_fetch, low)。
+
+        本环境无 fetch 客户端后端,返回 failed(不静默)。投产时应在此处做
+        SSRF/DNS rebinding 防护、大小/域名/超时控制。
+        """
+        logger.debug("[web_fetch] url=%s (后端未接入,返回 unavailable)", url[:120])
         return ToolResult.fail(ErrorEnvelope(
             code=_UNAVAILABLE, category="research",
             what="web_fetch 暂未接入抓取后端", why="无 fetch 客户端配置",
@@ -64,6 +80,12 @@ class RagQueryTool(BaseTool):
 
     async def run(self, ctx: ToolContext, *, collection: str, query: str,
                   session: AsyncSession | None = None) -> ToolResult:
+        """Chroma 作用域隔离检索(§8.3 rag_query, low)。
+
+        本环境 memory 层未初始化、无可达向量集合,返回 failed(不静默)。
+        投产时按 collection 做 scope 隔离检索,防止跨租户召回。
+        """
+        logger.debug("[rag_query] collection=%s query=%s (memory 未初始化)", collection, query[:80])
         return ToolResult.fail(ErrorEnvelope(
             code=_UNAVAILABLE, category="memory",
             what="rag_query 暂无可检索的向量集合", why="memory 层未初始化",
@@ -81,6 +103,12 @@ class BrowserCaptureTool(BaseTool):
     )
 
     async def run(self, ctx: ToolContext, *, url: str) -> ToolResult:
+        """隔离浏览器截图/审计(§8.3 browser_capture, low)。
+
+        本环境无隔离浏览器运行时,返回 failed(不静默)。投产时应返回
+        screenshot+console+network+交互审计产物。
+        """
+        logger.debug("[browser_capture] url=%s (后端未接入,返回 unavailable)", url[:120])
         return ToolResult.fail(ErrorEnvelope(
             code=_UNAVAILABLE, category="research",
             what="browser_capture 暂无可隔离浏览器", why="无隔离浏览器运行时",
@@ -100,6 +128,12 @@ class ImgGenerateTool(BaseTool):
 
     async def run(self, ctx: ToolContext, *, prompt: str, session: AsyncSession | None = None
                   ) -> ToolResult:
+        """图像生成(§8.3 img_generate, mid)。
+
+        本环境无 image-gen provider,返回 failed(不静默)。投产时应调用图像生成
+        API 并保存来源/成本元数据(asset_pending reconcile)。
+        """
+        logger.debug("[img_generate] prompt=%s (后端未接入,返回 unavailable)", prompt[:80])
         return ToolResult.fail(ErrorEnvelope(
             code=_UNAVAILABLE, category="research",
             what="img_generate 暂未接入图像生成后端", why="无 image-gen provider 配置",
