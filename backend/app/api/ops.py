@@ -20,9 +20,14 @@ from app.config import settings
 from app.cache import get_redis
 from app.db import engine
 from app.security import CurrentUser, require_admin
+from app.security_alerting import AlertManager
 from app.security_circuit import CircuitState, get_registry
+from app.security_slo import evaluate, summarize
 
 logger = logging.getLogger("app.api.ops")
+
+# 跨请求保持告警生命周期状态（持续 5min 触发 / 5min 解除）。
+_alert_manager = AlertManager()
 
 router = APIRouter(tags=["ops"])
 
@@ -150,6 +155,46 @@ async def metrics() -> Response:
             f'seedai_circuit_breaker_failures{{provider="{b["name"]}"}} {b["total_failures"]}'
         )
     return Response(content="\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
+async def _build_slo_snapshot() -> dict[str, float | None]:
+    """组装 SLO 测量快照；可测量的取真实值，不可测量的标 unknown(None)。
+
+    当前仅对 API 延迟做尽力而为的探测；回放成功率/W0 伪成功/部署不破坏等
+    需要 Outbox/Deployment 对账数据，暂无实时测量路径时返回 unknown，避免误报。
+    """
+    snapshot: dict[str, float | None] = {}
+    try:
+        from app import analytics
+
+        snap = await analytics.analytics_snapshot()
+        api = snap.get("api_latency", {})
+        p99 = api.get("p99")
+        snapshot["api_p99_ms"] = float(p99) if p99 is not None else None
+    except Exception as exc:  # pragma: no cover
+        logger.warning("SLO 快照组装失败(api 延迟): %s", exc)
+        snapshot["api_p99_ms"] = None
+    # 其余 SLO 暂无实时测量路径 → unknown（不误报）。
+    snapshot.setdefault("sse_first_event_p99_ms", None)
+    snapshot.setdefault("replay_success_rate", None)
+    snapshot.setdefault("deploy_no_break", None)
+    snapshot.setdefault("w0_pseudo_success", None)
+    return snapshot
+
+
+@router.get("/ops/slo")
+async def ops_slo(_admin: CurrentUser = Depends(require_admin)) -> dict[str, Any]:
+    """受 admin 鉴权的 SLO 评估与告警状态（§15.2）。"""
+    snapshot = await _build_slo_snapshot()
+    results = evaluate(snapshot)
+    events = _alert_manager.update(results)
+    return {
+        "ts": int(time.time()),
+        "summary": summarize(results),
+        "results": [r.__dict__ for r in results],
+        "active_alerts": _alert_manager.active_alerts(),
+        "recent_events": [e.to_dict() for e in events],
+    }
 
 
 __all__ = ["router"]
