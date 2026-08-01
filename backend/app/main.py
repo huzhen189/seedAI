@@ -59,6 +59,14 @@ async def lifespan(app: FastAPI):
     await init_db()
     # 2) 写失败对账器(Redis 侧, 与十阶段链路解耦)
     start_reconciler()
+    # 2.5) 原子工具注册表：填充 §9.2 的 16 个 Tool 并启动校验（不合规不得上线）
+    from app.tools import build_default_registry
+
+    registry = build_default_registry()
+    violations = registry.validate_startup()
+    if violations:
+        raise RuntimeError(f"[startup] ToolRegistry 启动校验失败: {violations}")
+    logger.info("[startup] ToolRegistry 已注册 %d 个原子工具并通过校验", len(registry.all()))
     # 3) 孤儿 Turn 对账: 进程被强杀会留下 status='running' 的 Turn, 在途 Pipeline 已死。
     #    翻 failed, 否则前端快照永远显示运行中。
     try:

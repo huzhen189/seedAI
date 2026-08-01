@@ -43,6 +43,25 @@ def _truncate(value: str, limit: int) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
+def _verify_html(html: str) -> tuple[bool, str]:
+    """结构完整性与注入安全校验（规范 §8.2 Verify）。
+
+    模块级函数，供 ``HtmlValidateTool`` 复用，避免逻辑漂移。
+    """
+    if not html or not html.strip().lower().startswith("<!doctype html>"):
+        return False, "site_verify_missing_doctype"
+    if "</html>" not in html.lower():
+        return False, "site_verify_unclosed_html"
+    if len(html.encode("utf-8")) < 400:
+        return False, "site_verify_too_small"
+    # 危险标签/属性不得在生成产物中出现（用户内容已全量转义，这里做最后一道闸门）。
+    lowered = html.lower()
+    for forbidden in ("<iframe", "<object", "<embed", "javascript:", "onerror=", "onload="):
+        if forbidden in lowered:
+            return False, "site_verify_unsafe_token"
+    return True, "ok"
+
+
 class SiteWorkflow:
     # ---------------------------------------------------------- Spec
     async def build_spec(self, session: AsyncSession, project: Project, context: TurnContext) -> dict:
@@ -245,74 +264,73 @@ footer.foot {{ border-top:1px solid var(--line); margin-top:40px; }}
     # ---------------------------------------------------------- Verify
     @staticmethod
     def verify(html: str) -> tuple[bool, str]:
-        """结构完整性与注入安全校验（规范 §8.2 Verify）。"""
-        if not html or not html.strip().lower().startswith("<!doctype html>"):
-            return False, "site_verify_missing_doctype"
-        if "</html>" not in html.lower():
-            return False, "site_verify_unclosed_html"
-        if len(html.encode("utf-8")) < 400:
-            return False, "site_verify_too_small"
-        # 危险标签/属性不得在生成产物中出现（用户内容已全量转义，这里做最后一道闸门）。
-        lowered = html.lower()
-        for forbidden in ("<iframe", "<object", "<embed", "javascript:", "onerror=", "onload="):
-            if forbidden in lowered:
-                return False, "site_verify_unsafe_token"
-        return True, "ok"
+        """结构完整性与注入安全校验（规范 §8.2 Verify），委托给模块级 _verify_html。"""
+        return _verify_html(html)
 
     # ---------------------------------------------------------- Preview
     async def preview(
         self, session: AsyncSession, project: Project, context: TurnContext, html: str
     ) -> tuple[Artifact, str]:
-        """原子写入不可变版本目录，生成 manifest/checksum 与 preview 路径。"""
-        max_version = await session.scalar(
-            select(func.max(Artifact.version)).where(Artifact.project_id == project.id)
-        )
-        version = int(max_version or 0) + 1
-        digest_body = hashlib.sha256(html.encode("utf-8")).hexdigest()
-        manifest = {
-            "index.html": {
-                "sha256": digest_body,
-                "bytes": len(html.encode("utf-8")),
-            }
+        """原子写入不可变版本目录；委托给模块级 _publish_preview（供 SitePublishTool 复用）。"""
+        return await _publish_preview(session, project, context, html)
+
+
+async def _publish_preview(
+    session: AsyncSession, project: Project, context: TurnContext, html: str
+) -> tuple[Artifact, str]:
+    """原子写入不可变版本目录，生成 manifest/checksum 与 preview 路径（§8.2 Preview）。
+
+    模块级函数，供 ``SitePublishTool`` 复用，避免逻辑漂移。
+    """
+    max_version = await session.scalar(
+        select(func.max(Artifact.version)).where(Artifact.project_id == project.id)
+    )
+    version = int(max_version or 0) + 1
+    digest_body = hashlib.sha256(html.encode("utf-8")).hexdigest()
+    manifest = {
+        "index.html": {
+            "sha256": digest_body,
+            "bytes": len(html.encode("utf-8")),
         }
-        canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        manifest_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    }
+    canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    manifest_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-        root = Path(settings.artifact_dir) / "previews" / str(context.user.user_id) / str(project.id) / f"v{version}"
-        root.mkdir(parents=True, exist_ok=True)
-        temporary = root / "index.html.tmp"
-        target = root / "index.html"
-        with temporary.open("w", encoding="utf-8", newline="\n") as file:
-            file.write(html)
-            file.flush()
-            os.fsync(file.fileno())
-        temporary.replace(target)
+    root = Path(settings.artifact_dir) / "previews" / str(context.user.user_id) / str(project.id) / f"v{version}"
+    root.mkdir(parents=True, exist_ok=True)
+    temporary = root / "index.html.tmp"
+    target = root / "index.html"
+    with temporary.open("w", encoding="utf-8", newline="\n") as file:
+        file.write(html)
+        file.flush()
+        os.fsync(file.fileno())
+    temporary.replace(target)
 
-        spec_hash = hashlib.sha256(
-            json.dumps(project.site_spec, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        artifact = Artifact(
-            project_id=project.id,
-            conversation_id=context.session.conversation_id,
-            parent_artifact_id=project.head_artifact_id,
-            version=version,
-            site_spec_revision=project.lock_version,
-            site_spec_hash=spec_hash,
-            manifest=manifest,
-            manifest_digest=manifest_digest,
-            checksums={"index.html": digest_body},
-            vendor_manifest_version="seed-premium-v1",
-            capability_manifest={"tier": "L0", "theme_toggle": True, "no_external_request": True},
-            status="preview_ready",
-            preview_path=str(target.relative_to(Path(settings.artifact_dir))),
-            trace_id=context.trace_id,
-        )
-        session.add(artifact)
-        await session.flush()
-        project.head_artifact_id = artifact.id
-        project.status = "active"
-        project.lock_version += 1
-        return artifact, f"已生成网站版本 v{version}，预览产物已就绪。"
+    spec_hash = hashlib.sha256(
+        json.dumps(project.site_spec, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    artifact = Artifact(
+        project_id=project.id,
+        conversation_id=context.session.conversation_id,
+        parent_artifact_id=project.head_artifact_id,
+        version=version,
+        site_spec_revision=project.lock_version,
+        site_spec_hash=spec_hash,
+        manifest=manifest,
+        manifest_digest=manifest_digest,
+        checksums={"index.html": digest_body},
+        vendor_manifest_version="seed-premium-v1",
+        capability_manifest={"tier": "L0", "theme_toggle": True, "no_external_request": True},
+        status="preview_ready",
+        preview_path=str(target.relative_to(Path(settings.artifact_dir))),
+        trace_id=context.trace_id,
+    )
+    session.add(artifact)
+    await session.flush()
+    project.head_artifact_id = artifact.id
+    project.status = "active"
+    project.lock_version += 1
+    return artifact, f"已生成网站版本 v{version}，预览产物已就绪。"
 
 
 site_workflow = SiteWorkflow()
