@@ -333,6 +333,9 @@ class ValidationResult(ContractModel):
     pending_action_id: str | None = Field(default=None, max_length=64)
     approval_id: str | None = Field(default=None, max_length=26)
     reason_codes: list[str] = Field(default_factory=list)
+    # 审批质询明文：仅在本轮进程内传给 SSE 层下发一次，库中只留 sha256。
+    # exclude=True 保证它不随 model_dump 进入任何快照/审计/持久化载荷。
+    decision_nonce: str | None = Field(default=None, max_length=128, exclude=True)
 
 
 class TaskResult(ContractModel):

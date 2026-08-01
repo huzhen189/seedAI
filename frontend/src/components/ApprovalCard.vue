@@ -40,8 +40,8 @@ function stringValue(value: unknown): string {
     <p v-if="expiresAt" class="expiry">有效期至 {{ expiresAt }}</p>
     <p v-if="!approvalId" class="invalid">审批编号缺失，无法提交决定。</p>
     <div class="actions">
-      <button type="button" class="reject" :disabled="submitting || !approvalId" @click="emit('reject')">拒绝</button>
-      <button type="button" class="approve" :disabled="submitting || !approvalId" @click="emit('approve')">
+      <button type="button" class="reject" :disabled="submitting || !approvalId" @click="emit('decision', 'reject')">拒绝</button>
+      <button type="button" class="approve" :disabled="submitting || !approvalId" @click="emit('decision', 'approve')">
         {{ submitting ? '提交中…' : '批准操作' }}
       </button>
     </div>

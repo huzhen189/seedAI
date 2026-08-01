@@ -18,11 +18,13 @@ class S5ValidateStage(BaseStage):
             if self.session is None:
                 raise RuntimeError("S5 requires a database session")
             approval = await project_service.request_approval(self.session, context, action.speech_act.value)
-            nonce = approval.__dict__.pop("_decision_nonce")
             context.validation = ValidationResult(
                 status="needs_approval",
                 approval_id=approval.approval_id,
                 reason_codes=["approval_required"],
+                # 质询明文只在内存里交给 SSE 层下发一次(字段 exclude=True, 不进任何持久化载荷)。
+                # 绝不可放进 response_fragments —— 那会被拼进 assistant 正文并落库到 messages。
+                decision_nonce=approval.__dict__.pop("_decision_nonce"),
                 response_fragments=[
                     ResponseFragment(
                         status="approval",
@@ -33,8 +35,6 @@ class S5ValidateStage(BaseStage):
                 ],
             )
             context.response_fragments.extend(context.validation.response_fragments)
-            # nonce is emitted once; only its hash is persisted.
-            context.response_fragments.append(ResponseFragment(status="approval", text=nonce, producer_stage=StageId.S5, output_refs=[approval.approval_id]))
             return self.result(StageStatus.PAUSED, "approval_created", output_refs=[approval.approval_id])
         context.validation = ValidationResult(status="pass")
         return self.result(StageStatus.COMPLETED, "validation_passed")

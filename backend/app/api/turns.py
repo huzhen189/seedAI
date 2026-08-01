@@ -34,7 +34,7 @@ from app.db import get_db, transaction
 from app.db.repositories import approvals as approvals_repo
 from app.db.repositories import outbox as outbox_repo
 from app.db.repositories import turns as turns_repo
-from app.models import Approval
+from app.models import Approval, Conversation, Message
 from app.security import CurrentUser, get_current_user
 from app.services.turns import turn_service
 from app.transport.stream_broker import broker
@@ -128,6 +128,37 @@ async def _publish(context: TurnContext, event_type: str, data: dict[str, Any]) 
     )
 
 
+async def _publish_approval_card(session: AsyncSession, context: TurnContext) -> None:
+    """把审批卡(含一次性质询明文)推给前端。
+
+    前端 reducer 以 ``approval`` 事件填充审批卡；``decision_nonce`` 只在此下发一次，
+    数据库仅存 sha256，因此刷新页面后 /api/gate/pending 拿不到明文——这是刻意的
+    "非盲审批"约束，不是缺陷。
+    """
+    validation = context.validation
+    if validation is None or not validation.approval_id:
+        return
+    approval = (
+        await session.execute(select(Approval).where(Approval.approval_id == validation.approval_id))
+    ).scalar_one_or_none()
+    if approval is None:
+        return
+    await _publish(
+        context,
+        "approval",
+        {
+            "approval_id": approval.approval_id,
+            "decision_nonce": validation.decision_nonce,
+            "action": approval.action,
+            "status": approval.status,
+            "risk_level": approval.risk_level,
+            "step": approval.step,
+            "target": {"type": approval.target_type, "id": approval.target_id},
+            "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
+        },
+    )
+
+
 def _terminal_of(results: Sequence[StageResult]) -> str:
     """从 S9 的 StageResult 还原终态。
 
@@ -157,6 +188,10 @@ async def _run_pipeline(context: TurnContext) -> None:
                         "duration_ms": result.duration_ms,
                     },
                 )
+                # S5 挂起审批时，紧跟一个 approval 事件把审批卡推给前端。
+                # 质询明文只在此刻下发这一次(库里只有 sha256)，错过即无法再取得。
+                if result.stage is StageId.S5 and result.reason_code == "approval_created":
+                    await _publish_approval_card(session, context)
 
             results = await pipeline.run(context, observe)
             # 终态收口的唯一归属是 S9(内部调 finalize)。此处只读取其结论，
@@ -348,6 +383,7 @@ async def decide_approval(
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """审批决策。CAS 单次消费 + nonce 绑定，重放与并发只会有一次生效。"""
+    terminal_status: str | None = None
     async with transaction() as session:
         approval = await approvals_repo.by_external_id(session, approval_id)
         if approval is None or approval.created_by != user.id:
@@ -356,7 +392,10 @@ async def decide_approval(
             raise HTTPException(status_code=409, detail={"code": "APPROVAL_ALREADY_CONSUMED"})
         if approval.status not in {ApprovalStatus.PENDING_FIRST.value, ApprovalStatus.PENDING_SECOND.value}:
             raise HTTPException(status_code=409, detail={"code": "APPROVAL_NOT_PENDING", "status": approval.status})
-        if approval.expires_at <= datetime.now(UTC):
+        expires_at = approval.expires_at
+        if expires_at.tzinfo is not None:
+            expires_at = expires_at.astimezone(UTC).replace(tzinfo=None)
+        if expires_at <= datetime.now(UTC).replace(tzinfo=None):
             approval.status = ApprovalStatus.EXPIRED.value
             approval.lock_version += 1
             raise HTTPException(status_code=409, detail={"code": "APPROVAL_EXPIRED"})
@@ -394,6 +433,53 @@ async def decide_approval(
         trace_id = turn.trace_id if turn else approval.turn_id
         result = _approval_view(approval)
 
+        # 决策即收口: 审批闸门的意义在于「取得用户同意后再落地」。
+        # 同意 -> Turn 推进到终态(操作已记录, 真实执行留待后续版本);
+        # 拒绝 -> Turn 取消。这样 Turn 不会永远卡在 waiting_approval(闭环闭合)。
+        # 仅当审批真正到达终态(approved/rejected)时收口; 双人/双段确认仍处于
+        # pending_second 的不收口, Turn 继续等待第二段确认。
+        if (
+            approval.status
+            in {ApprovalStatus.APPROVED.value, ApprovalStatus.REJECTED.value}
+            and turn is not None
+            and turn.status not in _TERMINAL_TURN_STATUS
+        ):
+            terminal_status = (
+                "completed" if approval.status == ApprovalStatus.APPROVED.value else "cancelled"
+            )
+            turn.status = terminal_status
+            turn.last_event_id = f"decision:{payload.decision}"
+            turn.lock_version += 1
+            ack = "已批准" if terminal_status == "completed" else "已拒绝"
+            proj_row = (
+                await session.execute(
+                    select(Conversation.project_id).where(Conversation.id == turn.conversation_id)
+                )
+            ).scalar_one_or_none()
+            project_id = proj_row if proj_row is not None else 0
+            session.add(
+                Message(
+                    conversation_id=turn.conversation_id,
+                    project_id=project_id,
+                    turn_id=turn.turn_id,
+                    role="assistant",
+                    content=(
+                        f"{ack}操作：{approval.action}"
+                        f"（目标 {approval.target_type}:{approval.target_id or '-'}）。"
+                        + ("该操作的真实执行（部署/删除）将在后续版本落地。" if terminal_status == "completed" else "")
+                    ),
+                    content_refs=[],
+                )
+            )
+            await outbox_repo.insert(
+                session,
+                event_key=f"turn:{turn.turn_id}:{terminal_status}:decision",
+                aggregate_type="turn",
+                aggregate_id=turn.turn_id,
+                event_type=f"turn.{terminal_status}",
+                payload={"turn_id": turn.turn_id, "status": terminal_status, "decision": payload.decision},
+            )
+
     if stream_id:
         await broker.publish(
             stream_id=stream_id,
@@ -402,6 +488,14 @@ async def decide_approval(
             type="approval",
             data=result,
         )
+        if terminal_status is not None:
+            await broker.publish(
+                stream_id=stream_id,
+                turn_id=approval.turn_id,
+                trace_id=trace_id,
+                type="done",
+                data={"status": terminal_status, "reply": result.get("action"), "artifact_refs": []},
+            )
     return result
 
 
