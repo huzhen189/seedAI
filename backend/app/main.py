@@ -11,29 +11,38 @@
 
 import asyncio
 import logging
+import mimetypes
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy import text
 
-from .admin import router as admin_router
+# 本地组件库根目录(相对此文件: backend/app/main.py -> backend/shared/vendor)。
+# 生成站点引用 /vendor/libs/... 作为域名根绝对路径, 本路由让单进程后端直接静态托管该目录 ——
+# 无论部署在 docker /opt/seedai 还是 home /home/huzhen/seedai, 都能用 __file__ 解析真实路径,
+# 与 /api 反代解耦, 根绝对路径稳定可用。
+VENDOR_DIR = Path(__file__).resolve().parent.parent / "shared" / "vendor"
+# 安全边界: 只允许 /vendor 命中 VENDOR_DIR 内的真实文件, 防路径穿越。
+_VENDOR_ABSPATH = VENDOR_DIR.resolve()
+
+from .api import admin_analytics_router, turns_router, workspace_router
 from .auth import router as auth_router
-from .config import settings
+from app.config import settings
 from .cache import get_redis
 from .db import engine, init_db
 from .logging_config import setup_logging
 from .metrics import record_request
 from .analytics import record_api_latency, record_api_call
-from .projects import router as projects_router
-from .proxy import router as proxy_router
 from .artifacts_auth import router as artifacts_auth_router
 from .reconciler import start_reconciler
-from .agent.events import to_sse
+from .services.recovery import reconcile_orphan_turns
 from .agent.providers import list_providers
-from .agent.core.queue import get_queue, worker_loop
 from .agent.registry import SkillRegistry, ToolRegistry
 
 # 引导注册: 触发 @register_skill / @tool 装饰器(原 ai_service 启动时 import 两个包)。
@@ -48,12 +57,11 @@ setup_logging("app")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1) 业务层 schema 初始化 + 超管种子
+    # 1) 新库 schema 初始化(只建缺失表, 不迁移不重置)
     await init_db()
-    # 2) 推理层: 确保队列单例、重建 Chroma 集合
+    # 2) 知识层: 重建 Chroma 集合
     #    注: 意图向量索引(ensure_intent_index) 已移至 scripts/reset_all.py 在重置阶段构建,
     #        启动时不再每次重嵌 82 句, 仅做轻量检查, 缺失则告警提示运行重置脚本。
-    get_queue()
     try:
         from .agent.knowledge.chroma import ensure_collections
         ensure_collections()
@@ -70,36 +78,16 @@ async def lifespan(app: FastAPI):
             logger.info("[startup] 意图向量索引检测就绪(集合=intents, 跳过重建)")
     except Exception as e:
         logger.warning("lifespan: 检查意图索引失败(可忽略): %s", e)
-    # 3) 启动 Worker 池(消费 queue:generate, 发布进度)
-    try:
-        loop = asyncio.get_running_loop()
-        worker_task = loop.create_task(worker_loop(concurrency=settings.worker_concurrency))
-        logger.info("[startup] Worker 池已提交到事件循环 (concurrency=%s)", settings.worker_concurrency)
-    except Exception as e:
-        logger.error("[startup] Worker 池启动失败: %s", e)
-    # 4) 业务层对账器
+    # 3) 写失败对账器(Redis 侧, 与十阶段链路解耦)
     start_reconciler()
-    # 5) 启动孤儿运行对账: 进程被强杀(重启/杀端口)会留下 status='running' 的孤儿 Trace
-    #    (在途 Worker 已死, 无 checkpoint 可续), 以及 user_states 孤儿 running/paused、
-    #    Redis 残留 pause:* 标志。翻 aborted / 清脏值, 否则 /status 与 /my-info 谎报 running,
-    #    前端误 resume 已死 Worker。
-    #    启动时先跑一轮(立即清理历史僵尸), 随后挂一个 30s 周期任务持续自愈——
-    #    避免「Worker 跑完但翻状态失败」的僵尸在进程存活期间无限 replay 旧流。
+    # 4) 孤儿 Turn 对账: 进程被强杀会留下 status='running' 的 Turn, 在途 Pipeline 已死。
+    #    翻 failed, 否则前端快照永远显示运行中。
     try:
-        from .proxy import reconcile_orphaned_runs, run_orphan_reconciler
-        await reconcile_orphaned_runs()
-        logger.info("[startup] 孤儿运行一次性对账完成")
+        await reconcile_orphan_turns()
     except Exception as e:  # noqa: BLE001
-        logger.error("[startup] 孤儿运行一次性对账失败(可忽略, 不阻断启动): %s", e)
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(run_orphan_reconciler(interval=30.0))
-        logger.info("[startup] 孤儿运行周期对账已挂后台(30s)")
-    except Exception as e:  # noqa: BLE001
-        logger.error("[startup] 孤儿运行周期对账启动失败(可忽略): %s", e)
-    logger.info("统一应用启动完成(单进程 v2.0)")
+        logger.error("[startup] 孤儿 Turn 对账失败(不阻断启动): %s", e)
+    logger.info("统一应用启动完成(十阶段链路 v3.0)")
     yield
-    worker_task.cancel()
 
 
 app = FastAPI(title=settings.app_title, lifespan=lifespan)
@@ -205,22 +193,6 @@ async def list_agents():
     return SkillRegistry.list_agents()
 
 
-@app.post("/cancel")
-async def cancel(req: Request):
-    """级联取消(C1): 标记 cancel:<trace_id>, Worker 在下个 token/阶段前中断。"""
-    try:
-        body = await req.json()
-    except Exception:
-        body = {}
-    trace_id = body.get("trace_id")
-    if trace_id:
-        await get_queue().set_cancel(trace_id)
-        logger.info("[cancel] 标记取消 trace=%s", trace_id)
-        return {"ok": True, "trace_id": trace_id}
-    logger.warning("[cancel] 缺少 trace_id, 忽略")
-    return {"ok": False, "error": "missing trace_id"}
-
-
 @app.post("/retry-upload")
 async def retry_upload(req: Request):
     """业务端触发: 对本地暂存的产物重新上传 COS, 返回线上 URL。
@@ -303,11 +275,30 @@ async def ready():
     }, 200 if all_ok else 503
 
 
-# ---------- 路由装配(业务层) ----------
+# ---------- 本地组件库静态托管(/vendor/) ----------
+# 生成站点一律以 /vendor/libs/<name>/<file> 根绝对路径引用预置库(见 shared.vendor.LIBS_REFERENCE),
+# 本路由让后端直接托管 backend/shared/vendor, 确保「域名/vendor/libs/...」在任何部署形态下都可用,
+# 不依赖 nginx alias 的真实主机路径。nginx / 前端容器只需把 /vendor/ 透传反代到 7101 即可。
+@app.get("/vendor/{path:path}")
+async def serve_vendor(path: str):
+    if not path or ".." in path.split("/"):
+        raise HTTPException(status_code=400, detail="invalid vendor path")
+    target = (_VENDOR_ABSPATH / path).resolve()
+    # 路径穿越防护: 必须仍在 VENDOR_DIR 内
+    if target != _VENDOR_ABSPATH and _VENDOR_ABSPATH not in target.parents:
+        raise HTTPException(status_code=403, detail="forbidden")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    media = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    return FileResponse(str(target), media_type=media, headers={"Cache-Control": "public, max-age=86400"})
+
+
+# ---------- 路由装配 ----------
+# 十阶段链路唯一入口(turns_router)取代旧 proxy/projects/admin 三件套。
 app.include_router(auth_router)
-app.include_router(proxy_router)
-app.include_router(projects_router)
-app.include_router(admin_router)
+app.include_router(turns_router)
+app.include_router(workspace_router)
+app.include_router(admin_analytics_router)
 app.include_router(artifacts_auth_router)
 
 

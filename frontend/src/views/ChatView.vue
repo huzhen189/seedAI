@@ -1,3395 +1,410 @@
 <script setup lang="ts">
-defineOptions({ name: 'ChatView' })
-// ChatView —— 对话主页面(核心组件)。
-// 职责:
-//   1. 组装「项目 → 会话 → 消息」三级数据(经 project / conversation 两个 Pinia store);
-//   2. 发送:校验登录态与项目/会话,调用 startChat 建立 SSE 流,把流事件映射为本地状态;
-//   3. 思考面板:每个 agent 节点作为时间线的一步(精准分步反馈),Planner 的「计划/目标」
-//      作为特殊节点卡片渲染;think 文本按阶段分别累积;
-//   4. 断线续传 / 重连:用 sessionStorage 记录 active trace(convId+traceId),发送时写入、
-//      done/aborted/error 清除;刷新或切换会话时若仍有未完成的 trace,以同一 traceId 重开
-//      SSE 全量回放 + 续活(后端 stream_exists 命中则续接,Worker 后台独立继续);
-//   5. 鉴权门禁:未登录时点发送 -> 记 pendingSend 并弹登录框;登录成功后自动重发;
-//   6. 取消:stop() 级联 cancelChat -> 业务 -> AI 中断生成(C1);
-//   7. 评价:生成完成后可对本次 trace 投 👍/👎。
-// 左栏是对话区 + 思考轨迹,右栏是实时预览(PreviewPane)。
-import { computed, onMounted, onUnmounted, ref, reactive, watch, nextTick } from 'vue'
-import Icon from '../components/Icon.vue'
-import ThoughtTrail from '../components/ThoughtTrail.vue'
-import RightPanel from '../components/RightPanel.vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import ActivityPanel from '../components/ActivityPanel.vue'
+import ApprovalCard from '../components/ApprovalCard.vue'
 import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
-import SubTaskTrack from '../components/SubTaskTrack.vue'
-import MergedResult from '../components/MergedResult.vue'
-import { startChat, cancelChat, myInfo, fetchModels, sendFeedback, type ChatCallbacks, type MyInfoResp } from '../api/chat'
-import { getConversation, listArtifacts, renameProject, patch, autoStart } from '../api/projects'
+import RightPanel from '../components/RightPanel.vue'
+import StageRail from '../components/StageRail.vue'
+import {
+  controlTurn,
+  getPendingApprovals,
+  getTurn,
+  replayStream,
+  startChat,
+  submitApproval,
+  type StreamSubscription,
+} from '../api/chat'
+import { createProject, listArtifacts } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
-import { useProjectStore } from '../stores/project'
 import { useConversationStore } from '../stores/conversation'
-import type { Artifact, Message, ModelInfo, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThoughtStep, BlockEvent, ConfirmEvent, QcResult, RatingDims, SubTaskView, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, FailedSubTask, CancelSummaryEvent, PlanPreviewEvent, ToolTrailEntry } from '../types'
-import { SKILL_TO_ROLE, SOP_ROLES } from '../types'
+import { useProjectStore } from '../stores/project'
+import {
+  createStreamUiState,
+  reduceStreamEvent,
+  resetStreamUiState,
+  type StreamUiState,
+} from '../stream/reducer'
+import type { Artifact, Message, ModelInfo } from '../types'
+import type { StreamEvent } from '../types/contracts.generated'
 
-const STAGE_LABELS: Record<string, string> = {
-  received: '系统已收到你的需求',
-  enter_router: '意图路由 — 识别你的需求类型，匹配最合适的处理流程',
-  dispatch: '技能调度 — 加载所需的 AI 能力和工具链',
-  doc_plan: '规划结构 — 梳理文档大纲与章节安排',
-  doc_write: '撰写正文 — 正在填充各章节内容',
-  doc_proofread: '校对格式 — 统一 Markdown 规范与排版',
-  writing: '撰写文档 — 正在生成结构化的 Markdown 文档',
-  enter_planner: '需求规划 — 拆解任务、制定执行步骤和产出目标',
-  enter_coder: '代码生成 — 正在为你编写/构建代码',
-  enter_reviewer: '评审校验 — 检查生成结果的完整性和正确性',
-  previewing: '投递预览 — 将生成产物上传到预览环境',
-  preview: '生成预览 — 正在生成可预览的网页',
-  // 用户体感关键工序: 与需求一致的中文分步反馈
-  analyzing: '系统正在分析你的需求',
-  orchestration: '系统正在对你的需求进行拆分',
-  merge: '任务执行完毕，正在进行结果汇总',
-  refined: '已生成结果摘要',
-  // 后置 QC 实时反馈: 每个意图(含闲聊/子任务)打分前的提示(用户诉求)
-  qc_checking: '系统正在核对本次对话生成质量...',
-  generating: '正在生成回复中',
-  done: '任务执行完毕',
+interface ResumeRef {
+  streamId: string
+  turnId: string
+  after: number
 }
 
-// 未知工序的中文回退标签(后端可能随时新增节点, 不希望前端显示裸 snake_case)
-const STAGE_FALLBACK: Record<string, string> = {
-  enter_planner_done: '规划完成 — 任务拆解已定稿',
-  resume_coder: '恢复编码 — 从中断点继续生成',
-  resume_reviewer: '恢复评审 — 从中断点继续校验',
-  subtask_start: '子任务启动 — 派发独立 AI 工序',
-  orchestration: '编排总览 — 拆解并调度多道工序',
-  merge: '结果合并 — 汇总各工序产出',
-  refined: '生成摘要 — 整理交付说明',
-  analyzing: '需求分析中 — 解读你的诉求',
-  doc_ready: '需求文档就绪 — 已生成结构化文档',
-  unsupported: '暂不支持 — 请换个说法试试',
-}
-// 兜底: 把未知 snake_case 阶段转成「首字母大写 + 空格」可读标签
-function humanizeStage(stage: string): string {
-  return stage
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, (c) => c.toUpperCase())
-    .trim()
-}
-function labelFor(stage: string): string {
-  return STAGE_LABELS[stage] || STAGE_FALLBACK[stage] || humanizeStage(stage)
-}
-
-// ---- 本地 UI 状态 ----
-const models = ref<ModelInfo[]>([])
-const model = ref('deepseek')
+const RESUME_KEY = 'seedai:stream-resume'
+const auth = useAuth()
+const projectStore = useProjectStore()
+const convStore = useConversationStore()
+const stream = reactive(createStreamUiState()) as StreamUiState
 const input = ref('')
+const model = ref('deepseek')
+const models = ref<ModelInfo[]>([])
 const generating = ref(false)
-const finished = ref(false)
-const sending = ref(false)   // 防双击重复发送
-const cancelling = ref(false) // 取消中状态(按钮反馈)
+const stopping = ref(false)
+const replaying = ref(false)
+const approvalSubmitting = ref(false)
+const errorMessage = ref('')
+const activeAssistant = ref<Message | null>(null)
+const subscription = ref<StreamSubscription | null>(null)
+const replaySubscription = ref<StreamSubscription | null>(null)
+const convRef = ref<HTMLElement | null>(null)
+const artifacts = ref<Artifact[]>([])
 
-// v4 断点复联: 手动停止 / 断连 触发的「已暂停」态(区别于 await_confirm 方案确认)。
-// 置位后输入框保持可输入, 用户发送即带 checkpoint 续跑。
-const v4Pause = ref<{ tid: string; reason: string; stage: string } | null>(null)
-
-// 思考时间线(每步一个 agent 节点)+ 计划特殊节点;替代旧版混成一坨的 thinks 字符串。
-const thoughtSteps = ref<ThoughtStep[]>([])
-const planNodes = ref<PlanEvent[]>([])
-// Phase 1(WorkBuddy 式 think→call→observe): 工具调用可见化视图模型。
-// 含 reasoning / tool_call(pending→done, 折叠结果) 三类, 单意图归一条流, 多意图按 sub_task_id 分泳道。
-const toolTrail = ref<ToolTrailEntry[]>([])
-// §9: 执行前计划预览(头部卡) + §6 D 取消结构化摘要 + 当前 SOP 阶段
-const planPreview = ref<PlanPreviewEvent | null>(null)
-const cancelSummary = ref<CancelSummaryEvent | null>(null)
-const sopCurrentRole = ref<string | undefined>(undefined)
-const currentStage = ref('')
-
-// §9: 把 plan-preview 卡渲染成与 SubTaskTrack 同款「单元素子任务泳道」视觉:
-// 数据仍来自 PlanPreviewEvent(标题/备注/SOP 角色), 但额外把「正在执行的意图」灌进一条 lane,
-// 让单意图看起来和多意图的子任务列表风格统一。goal=意图两级标签, role=SOP 当前阶段,
-// status 跟随 generating(running→done)。
-const INTENT_L1_LABELS: Record<string, string> = {
-  learn: '学习理解', code: '编码实战', build: '建站生成', doc: '文档方案', translate: '翻译转换',
-}
-const INTENT_L2_LABELS: Record<string, string> = {
-  explain: '概念解释', debug: '排查报错', compare: '技术对比', casual: '日常闲聊',
-  snippet: '函数片段', component: 'UI组件', fix: '修复Bug', refactor: '重构优化',
-  page: '单页/落地页', site: '完整网站', modify: '修改已有', game: '互动游戏',
-  readme: 'README', tutorial: '教程指南', plan: '方案设计',
-  text: '文本翻译', code_lang: '代码翻译',
-}
-const previewLane = computed(() => {
-  if (!planPreview.value) return null
-  const l1 = currentIntent.value.level1
-  const l2 = currentIntent.value.level2
-  const goal = (l1 && l2)
-    ? `${INTENT_L1_LABELS[l1] || l1} · ${INTENT_L2_LABELS[l2] || l2}`
-    : (execIntentLabel.value || planPreview.value.title || '执行计划')
-  const role = SOP_ROLES.find((r) => r.key === sopCurrentRole.value)
-  return {
-    goal,
-    roleLabel: role ? role.label : '',
-    status: generating.value ? 'running' : 'done',
-  }
-})
-
-const degraded = ref(false)
-const degradedReason = ref<'model_switch' | 'timeout' | 'pm' | null>(null)
-// 真降级时记录实际切换的模型序(原始 → 备用), 供时间线精确展示
-const switchModelInfo = ref<string | null>(null)
-const requirementDoc = ref<Record<string, any> | null>(null)
-const previewUrl = ref<string | null>(null)
-const errorMsg = ref('')
-
-// 断点续跑(§7): 检测到 status=paused 的会话
-const pausedConv = computed(() =>
-  convStore.conversations.find(c => c.status === 'paused'),
+const hasLivePanel = computed(() =>
+  generating.value
+  || stream.lastSeq > 0
+  || !!stream.approval
+  || !!stream.suspended
+  || !!stream.error,
 )
 
-// 消息队列: 生成中用户输入排队, 完成后自动发下一条
-const msgQueue = ref<{ text: string; editing: boolean }[]>([])
-const queueVisible = ref(false)
+const streamErrorText = computed(() => readText(stream.error, ['message', 'detail', 'code']))
+const suspendedText = computed(() => readText(stream.suspended, ['message', 'reason', 'status']) || '本轮已暂停，等待下一步操作。')
 
-function enqueue(text: string) {
-  msgQueue.value.push({ text, editing: false })
-  queueVisible.value = true
-  input.value = ''
+function createClientMessageId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
+  return `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`
 }
 
-function dequeueAndSend() {
-  const next = msgQueue.value.shift()
-  if (!next) { queueVisible.value = false; return }
-  // 同步置位 generating: 关闭 onDone(false)→doSend 内部 await 之间的竞态窗口,
-  // 确保此期间用户输入仍走 enqueue(而非误判为「未生成中」直接并发发送)。
-  generating.value = true
-  input.value = next.text
-  doSend(next.text)
-  // 队列已全部取出发送完: 立即隐藏等待条(避免停在「等待发送 (0)」)
-  if (msgQueue.value.length === 0) queueVisible.value = false
-}
-
-function editQueueItem(idx: number) {
-  const item = msgQueue.value[idx]
-  if (!item) return
-  item.editing = true
-}
-
-function saveQueueItem(idx: number, newText: string) {
-  const item = msgQueue.value[idx]
-  if (!item || !newText.trim()) return
-  item.text = newText.trim()
-  item.editing = false
-}
-
-function deleteQueueItem(idx: number) {
-  msgQueue.value.splice(idx, 1)
-  if (msgQueue.value.length === 0) queueVisible.value = false
-}
-
-function sendNowQueueItem(idx: number) {
-  const item = msgQueue.value[idx]
-  if (!item) return
-  msgQueue.value.splice(idx, 1)
-  input.value = item.text
-  doSend(item.text)
-}
-
-async function resumeConversation() {
-  const pc = pausedConv.value
-  if (!pc || !projectStore.currentProjectId) return
-  resetGenState()
-  traceId.value = genTraceId()
-  convStore.currentConvId = pc.id
-  setActiveGen(pc.id, traceId.value)
-  generating.value = true
-  openEs({ model: model.value, traceId: traceId.value, conversationId: pc.id, cb: makeCallbacks(0), resume: true })
-}
-
-async function abortPaused() {
-  const pc = pausedConv.value
-  if (!pc) return
-  await patch(`/api/conversations/${pc.id}`, { status: 'aborted', checkpoint_data: null })
-  // 刷新会话列表
-  if (projectStore.currentProjectId) await convStore.loadConversations(projectStore.currentProjectId)
-}
-
-// 意图识别(由 AI intent 事件设置; 控制右侧面板显示)
-const currentIntent = ref<{ level1: string; level2: string }>({ level1: '', level2: '' })
-// exec-head 丰富化: 由 intent 事件携带的展示字段(agent/行业/置信度)
-const execIntentLabel = ref('')
-const execIndustry = ref('')
-const execSkill = ref('')
-const execConfidence = ref<number | null>(null)
-// exec-head 实时计时(从生成开始累计, 增强过程可见性)
-const execStartTs = ref<number | null>(null)
-const execElapsed = ref(0)
-let _execTimer: number | null = null
-function startExecTimer() {
-  execStartTs.value = Date.now()
-  execElapsed.value = 0
-  if (_execTimer == null) {
-    _execTimer = window.setInterval(() => {
-      if (execStartTs.value) execElapsed.value = Math.floor((Date.now() - execStartTs.value) / 1000)
-    }, 500)
+async function ensureConversation(message: string): Promise<number> {
+  let projectId = projectStore.currentProjectId
+  if (projectId == null) {
+    const project = await createProject(message.slice(0, 24) || '新项目')
+    await projectStore.load()
+    projectStore.currentProjectId = project.id
+    projectId = project.id
   }
-}
-function stopExecTimer() {
-  execStartTs.value = null
-  execElapsed.value = 0
-  if (_execTimer != null) {
-    clearInterval(_execTimer)
-    _execTimer = null
+  if (convStore.currentConvId == null) {
+    await convStore.create(projectId, message.slice(0, 24) || '新对话')
   }
-}
-function industryLabel(ind: string): string {
-  const MAP: Record<string, string> = {
-    ecommerce: '电商', restaurant: '餐饮', personal: '个人', corp: '企业',
-    edu: '教育', health: '健康', game: '游戏', travel: '旅游', tech: '科技',
-    media: '媒体', gov: '政务', finance: '金融', other: '通用',
-  }
-  return MAP[ind] || ind || '通用'
+  return convStore.currentConvId!
 }
 
-// q-2: 预设模板卡 —— 一键带结构化需求填充输入框(site 意图)。
-// 点击即把预填文本灌入 input 并聚焦, 用户可微调后发送; 后端仍按正常建站流程生成。
-const SITE_TEMPLATES: { key: string; title: string; icon: string; desc: string; prompt: string }[] = [
-  {
-    key: 'corp',
-    title: '企业官网',
-    icon: '🏢',
-    desc: '品牌展示 / 公司介绍 / 联系方式',
-    prompt: '帮我做一个企业官网，包含首页、关于我们、产品与服务、新闻动态、联系我们 5 个页面。风格专业大气、科技感，主色用深蓝。需要响应式布局，顶部统一导航可在各页面间跳转。',
-  },
-  {
-    key: 'portfolio',
-    title: '个人作品集',
-    icon: '🎨',
-    desc: '设计师 / 摄影师 / 开发者简历',
-    prompt: '帮我做一个个人作品集网站，包含首页（个人简介+精选作品）、作品展示、关于我、联系方式 4 个页面。风格极简有设计感，突出作品图片，支持点击放大查看。',
-  },
-  {
-    key: 'landing',
-    title: '营销落地页',
-    icon: '🚀',
-    desc: '活动推广 / 产品发售 / 收集线索',
-    prompt: '帮我做一个单页营销落地页，用于推广一款新产品。要包含醒目的主视觉 banner、产品卖点、用户评价、价格方案、常见问题、底部立即购买/预约表单，整体转化导向、视觉冲击力强的配色。',
-  },
-  {
-    key: 'ecommerce',
-    title: '电商商城',
-    icon: '🛒',
-    desc: '商品展示 / 购物车 / 下单',
-    prompt: '帮我做一个电商网站，包含首页（banner+商品分类+热销）、商品列表、商品详情、购物车、结算 5 个页面。风格清爽现代，主色橙红，商品卡片网格布局，各页面顶部统一导航。',
-  },
-  {
-    key: 'blog',
-    title: '博客 / 资讯',
-    icon: '📝',
-    desc: '文章列表 / 详情 / 分类',
-    prompt: '帮我做一个博客网站，包含首页（最新文章+分类）、文章列表、文章详情、关于博主 4 个页面。风格清爽阅读友好，正文排版舒适，支持目录与代码高亮。',
-  },
-  {
-    key: 'game',
-    title: '互动小游戏',
-    icon: '🎮',
-    desc: 'HTML5 小游戏 / 互动体验',
-    prompt: '帮我做一个网页互动小游戏（用纯 HTML/CSS/JS 实现，无需后端），要有完整的开始、玩法、得分与结束逻辑，画面生动有趣，键盘或鼠标可操作。',
-  },
-]
-// 仅当用户尚未选中任何项目、且输入框为空时展示模板卡(降低干扰)。
-// 选中项目后即可直接对话建站, 不需要模板引导。
-const showTemplates = computed(() => !projectStore.currentProjectId && !input.value.trim())
-function applyTemplate(t: { prompt: string }) {
-  // 模版=完整需求文档: 点击即填充并自动触发生成(不再仅填框等用户发送)
-  input.value = t.prompt
-  nextTick(() => send())
-}
-const execElapsedText = computed(() => {
-  const s = execElapsed.value
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  return `${m}m${s % 60}s`
-})
-const rightCollapsed = ref(false)
-// 可拖拽分栏
-const colGrip = ref<HTMLElement | null>(null)
-const gripActive = ref(false)
-let gripStartX = 0
-let gripStartW = 0
-// autoStart 内部建项目时置位, 让 currentProjectId watcher 跳过整段重载(避免清掉乐观消息/进行中 trail)
-let skipProjectWatch = false
-function onGripDown(e: MouseEvent) {
-  gripActive.value = true
-  gripStartX = e.clientX
-  const pane = document.querySelector('.right-pane') as HTMLElement
-  gripStartW = pane?.offsetWidth || 0
-  document.addEventListener('mousemove', onGripMove)
-  document.addEventListener('mouseup', onGripUp)
-}
-function onGripMove(e: MouseEvent) {
-  const dx = gripStartX - e.clientX  // 左拖=放大右侧
-  const newW = gripStartW + dx
-  const maxW = window.innerWidth * 0.7
-  const minW = 280
-  const w = Math.max(minW, Math.min(maxW, newW))
-  const pct = ((w / window.innerWidth) * 100).toFixed(1)
-  document.documentElement.style.setProperty('--right-pane-width', pct + '%')
-}
-function onGripUp() {
-  gripActive.value = false
-  document.removeEventListener('mousemove', onGripMove)
-  document.removeEventListener('mouseup', onGripUp)
-}
-// 方案选择(options 事件): 选项直接内嵌进 AI 气泡, 用户在下方的对话框用文字(如「选A」)确认
-const optionsData = ref<OptionEvent | null>(null)
-// 非阻塞候选提示(管道级 alternatives 事件): 系统已自行决定 top-1, 列出可切换候选
-const alternativesData = ref<AlternativesEvent | null>(null)
-// SIR 澄清卡(CLARIFY 事件): 意图模糊/缺规格时下发动态最少必要追问 + 结构化选项
-const clarifyData = ref<{
-  questions: string[]
-  rounds: number
-  options: { label: string; recommended?: boolean }[]
-  multi: boolean
-  freeTextHint: string
-} | null>(null)
-// 用户在澄清卡中的选择(选项索引数组)与自由输入
-const clarifySelected = ref<number[]>([])
-const clarifyFreeText = ref('')
-
-// 把用户输入解析为候选项索引(A-H / 1-9 / 中文数字 / 选X / 用X / 切换X / 第X个);
-// 不是选择则返 null。对齐后端 intent/selection.parse_selection。
-const _SELECT_RE = /^\s*(?:([A-Ha-h])\s*|([1-9])\s*|([一二两三四五六七八九十])\s*|(?:选|用|切换|改成|改为)\s*([A-Ha-h1-9一二两三四五六七八九十])\s*|第\s*([一二两三四五六七八九十])\s*个)\s*$/
-const _CN_NUM: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 }
-function parseSelectionToken(text: string): number | null {
-  const m = _SELECT_RE.exec(text.trim())
-  if (!m) return null
-  const [, letter, digit, cn, pick, nth] = m
-  if (letter) return letter.toUpperCase().charCodeAt(0) - 65
-  if (digit) return parseInt(digit, 10) - 1
-  if (cn) return _CN_NUM[cn] - 1
-  if (pick) return /[A-Ha-h]/.test(pick) ? pick.toUpperCase().charCodeAt(0) - 65 : _CN_NUM[pick] - 1
-  if (nth) return _CN_NUM[nth] - 1
-  return null
-}
-// 安全二次确认(删除项目 / 高危拦截, 来自后端 confirm 事件): 详情内嵌进 AI 气泡, 用户用文字(如「确认」)继续。
-// 注: 建站「方案确认」(await_confirm) 已在后端移除(D #500/#502), 不再使用本状态。
-const pendingConfirm = ref<{ reason: string; skill: string; riskLevel?: string; target?: string } | null>(null)
-// 高危拦截提示(安全 critical, 不可绕过)
-const blockReason = ref('')
-
-// 文字选择方案选项(无弹窗): 解析用户输入是否为选项 token(选A/方案B/1...),
-// 命中则直接走原确认逻辑; 未命中返回 false(交由后续正常发送流程, 同时清掉卡片)。
-function chooseOption(text: string): boolean {
-  if (!optionsData.value) return false
-  const idx = parseSelectionToken(text)
-  const choices = optionsData.value.choices || []
-  if (idx === null || idx < 0 || idx >= choices.length) return false
-  const chosen = choices[idx]
-  const mode = optionsData.value.mode
-  optionsData.value = null
-  upsertStep('option_selected', 'done', `已选择: ${chosen.id}. ${chosen.title}`)
-  if (mode === 'skill') {
-    // 管道级多选项: 选中即带 skill 参数重发(不拼文本)
-    resendWithSkill(chosen.id)
-  } else {
-    // requirement_agent 级: 拼结构化文本当普通消息发送, 后端靠历史路由识别
-    doSend(`方案确认: 选择了 ${chosen.id}: ${chosen.title}`)
-  }
-  return true
-}
-
-// 安全/删除二次确认回执: 后端 confirm 事件要求文字确认, 用户回复「确认」即带 confirmed=true 重发原 skill
-async function resendConfirmed() {
-  if (!pendingConfirm.value) return
-  const p = pendingConfirm.value
-  const skill = p.skill || ''
-  pendingConfirm.value = null
-
-  resetGenState()
-  traceId.value = genTraceId()
-  const cid = convStore.currentConvId!
-  setActiveGen(cid, traceId.value)
-  generating.value = true
-  const assistantIdx = convStore.messages.length - 1
-
-  // confirmed=true 跳过拦截, 原 skill 重新执行(删除/高危操作需显式确认)
-  openEs({
-    model: model.value,
-    traceId: traceId.value,
-    conversationId: cid,
-    confirmed: true,
-    skill: skill || undefined,
-    cb: makeCallbacks(assistantIdx),
-  })
-}
-
-// 多选项选中: 带 skill 参数重发(Worker 直接执行该 skill)
-function resendWithSkill(skillName: string) {
-  resetGenState()
-  traceId.value = genTraceId()
-  const cid = convStore.currentConvId!
-  setActiveGen(cid, traceId.value)
-  generating.value = true
-  const assistantIdx = convStore.messages.length - 1
-  openEs({
-    model: model.value,
-    traceId: traceId.value,
-    conversationId: cid,
-    skill: skillName,
-    cb: makeCallbacks(assistantIdx),
-  })
-}
-
-// 多意图中风险子任务确认后重发:把该 id 加入已确认集合,以同一原始请求重跑(让 MEDIUM 子任务放行)。
-function confirmSubTask(subTaskId: string) {
-  if (!confirmedSubtaskIds.value.includes(subTaskId)) confirmedSubtaskIds.value.push(subTaskId)
-  // 清空上一轮 assistant 占位内容, 避免合并结果重复累积
-  const idx = findAssistantIdx()
-  if (idx >= 0) convStore.messages[idx].content = ''
-  resetGenState()
-  traceId.value = genTraceId()
-  const cid = convStore.currentConvId!
-  setActiveGen(cid, traceId.value)
-  generating.value = true
-  openEs({
-    model: model.value,
-    traceId: traceId.value,
-    conversationId: cid,
-    confirmedSubtasks: confirmedSubtaskIds.value,
-    cb: makeCallbacks(idx),
-  })
-}
-
-// 澄清卡确认: 汇总用户选择(选项 + 自由文本)为答案文本, 带 clarified=1 重发。
-// 后端跳过意图分类, 用首轮已存意图直接路由执行(补齐槽位, 不走 2 轮对话)。
-function confirmClarify() {
-  if (!clarifyData.value) return
-  const labels = clarifyData.value.options.map((o) => o.label)
-  const chosen = clarifySelected.value
-    .filter((i) => i >= 0 && i < labels.length)
-    .map((i) => labels[i])
-  const free = clarifyFreeText.value.trim()
-  // 必须至少选一项或填了自由文本, 否则禁用确认按钮(见模板 :disabled)
-  if (!chosen.length && !free) return
-  const parts: string[] = []
-  if (chosen.length) parts.push('已选: ' + chosen.join('、'))
-  if (free) parts.push('补充说明: ' + free)
-  const summary = parts.join('；')
-  clarifyData.value = null
-  clarifySelected.value = []
-  clarifyFreeText.value = ''
-  void doSendClarified(summary)
-}
-
-// 澄清续跑发送: 复用 doSend 的落库/占位逻辑, 但带 clarified=1 让后端跳过二次分类。
-async function doSendClarified(text: string) {
-  let pid = projectStore.currentProjectId
-  if (pid == null) {
-    try {
-      const res = await autoStart(text)
-      // 同样修复(#508): 先置位 + 设好 currentProjectId, 再 load(), 避免 load() 自动选旧项目触发 watcher 重载
-      skipProjectWatch = true
-      projectStore.currentProjectId = res.project.id
-      await projectStore.load()
-      await convStore.loadConversations(res.project.id)
-      pid = res.project.id
-    } catch {
-      alert('创建项目失败，请稍后重试')
-      return
-    }
-  }
-  if (convStore.currentConvId == null || convStore.messages.length === 0) {
-    if (!convStore.creating) {
-      await convStore.create(pid, text.slice(0, 20))
-    }
-  }
-  resetGenState()
-  traceId.value = genTraceId()
-  const cid = convStore.currentConvId!
-  setActiveGen(cid, traceId.value)
-  confirmedSubtaskIds.value = []
-  convStore.messages.push({
-    role: 'user', content: text,
-    conversation_id: cid, id: 0, created_at: '', model_id: model.value,
-  } as any)
-  convStore.messages.push({
-    role: 'assistant', content: '',
-    conversation_id: cid, id: 0, created_at: '', model_id: model.value,
-  } as any)
-  const assistantIdx = convStore.messages.length - 1
-  generating.value = true
-  lastSentText.value = text
-  input.value = ''
-  openEs({
-    model: model.value,
-    traceId: traceId.value,
-    conversationId: cid,
-    q: text,
-    clarified: true,
-    cb: makeCallbacks(assistantIdx),
-  })
-}
-
-// ---- 上翻加载更早会话 ----
-const convRef = ref<HTMLElement | null>(null)
-const sentinel = ref<HTMLElement | null>(null)
-let scrollObserver: IntersectionObserver | null = null
-
-function setupScrollLoading() {
-  if (!sentinel.value) return
-  // C14 修复: 重建前先断开旧 observer, 否则每次切会话/加载都泄漏一个 IntersectionObserver
-  teardownScrollLoading()
-  scrollObserver = new IntersectionObserver(
-    async (entries) => {
-      if (entries[0].isIntersecting && !convStore.loadingMore) {
-        const scroller = convRef.value
-        const prevHeight = scroller?.scrollHeight || 0
-        const hasMore = await convStore.loadMoreHistory()
-        if (hasMore && scroller) {
-          await nextTick()
-          scroller.scrollTop = scroller.scrollHeight - prevHeight
-        }
-      }
-    },
-    { threshold: 0.1 },
-  )
-  scrollObserver.observe(sentinel.value)
-}
-function teardownScrollLoading() {
-  scrollObserver?.disconnect()
-  scrollObserver = null
-}
-
-// ---- 自动滚动到底部(微信风格) ----
-// 仅当用户本就贴在底部时才自动追随新内容; 用户上滚看历史时保持原位不滚动。
-const BOTTOM_THRESHOLD = 48 // 距底 <= 该值视为"贴底"(宽容亚像素/差一截)
-let autoScroll = true // 用户手动上滚离开底部后暂停自动追底
-let suppressScrollHandler = false // 程序触发滚动期间抑制 onConvScroll 误改写 autoScroll
-let rafScrollId = 0
-
-function isAtBottom(el: HTMLElement): boolean {
-  return el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_THRESHOLD
-}
-
-// force=true: 进入/切换会话、自己发消息等离散事件, 无视是否贴底都滚到底;
-// force=false: 流式内容增量, 仅当用户当前贴底才跟随(用户正在看中间则不滚动)。
-function scrollToBottom(smooth = true, force = false) {
-  const el = convRef.value
-  if (!el) return
-  if (!force && !isAtBottom(el)) {
-    autoScroll = false
+async function send(): Promise<void> {
+  const message = input.value.trim()
+  if (!message || generating.value) return
+  if (!auth.user.value) {
+    auth.openLogin()
     return
   }
-  autoScroll = true
-  suppressScrollHandler = true
-  cancelAnimationFrame(rafScrollId)
-  const startHeight = el.scrollHeight
-  // 平滑定位(离散事件)或瞬间贴合(流式中途)
-  el.scrollTo({ top: startHeight, behavior: smooth ? 'smooth' : 'instant' })
-  // rAF 补偿异步渲染(图片/Markdown/代码高亮)导致的高度增长, 直到真正贴底,
-  // 仅在内容确实又长高时才用 instant 追底, 绝不打断 smooth 动画本身。
-  const compensate = () => {
-    const target = el.scrollHeight
-    if (target > startHeight + 1 && el.scrollTop + el.clientHeight < target - 1) {
-      el.scrollTo({ top: target, behavior: 'instant' })
-      rafScrollId = requestAnimationFrame(compensate)
-    } else {
-      // 内容未增长: 让 smooth 动画自然收尾; 已贴底则直接定位确保无亚像素差
-      if (isAtBottom(el)) el.scrollTop = target
-      suppressScrollHandler = false
-    }
+
+  errorMessage.value = ''
+  try {
+    const conversationId = await ensureConversation(message)
+    resetStreamUiState(stream)
+    const userMessage = optimisticMessage('user', message, conversationId)
+    const assistantMessage = optimisticMessage('assistant', '', conversationId)
+    convStore.messages.push(userMessage, assistantMessage)
+    activeAssistant.value = assistantMessage
+    input.value = ''
+    generating.value = true
+
+    subscription.value?.abort()
+    subscription.value = startChat({
+      client_msg_id: createClientMessageId(),
+      conversation_id: conversationId,
+      message,
+    }, streamHandlers)
+    void subscription.value.finished
+    scrollToBottom()
+  } catch (error) {
+    generating.value = false
+    errorMessage.value = error instanceof Error ? error.message : '无法创建对话'
   }
-  rafScrollId = requestAnimationFrame(compensate)
 }
 
-function onConvScroll() {
-  const el = convRef.value
-  if (!el || suppressScrollHandler) return
-  // 用户手动滚动: 距底部 > 阈值 视为上滚看历史, 暂停自动追底; 滚回底部则恢复跟随
-  autoScroll = isAtBottom(el)
+const streamHandlers = {
+  onEvent(event: StreamEvent) {
+    const result = reduceStreamEvent(stream, event)
+    if (!result.applied) return
+
+    if (activeAssistant.value) activeAssistant.value.content = stream.response
+    saveResumeRef()
+    if (result.gapAfter !== null && stream.streamId) void recoverGap(result.gapAfter)
+
+    if (event.type === 'error') {
+      generating.value = false
+      stopping.value = false
+      errorMessage.value = streamErrorText.value || '本轮执行失败'
+      clearResumeRef()
+      void reconcileTerminal()
+    } else if (event.type === 'done') {
+      generating.value = false
+      stopping.value = false
+      clearResumeRef()
+      void reconcileTerminal()
+    } else if (event.type === 'suspended') {
+      generating.value = false
+      stopping.value = false
+    }
+    scrollToBottom()
+  },
+  onError(error: Error) {
+    if (replaying.value) return
+    generating.value = false
+    stopping.value = false
+    errorMessage.value = error.message
+  },
 }
 
-async function loadArtifacts() {
-  const pid = projectStore.currentProjectId
-  if (pid == null) {
-    projectArtifacts.value = []
-    requirementDoc.value = null
+async function recoverGap(after: number): Promise<void> {
+  if (!stream.streamId || replaying.value) return
+  replaying.value = true
+  replaySubscription.value?.abort()
+  replaySubscription.value = replayStream(stream.streamId, after, {
+    onEvent: streamHandlers.onEvent,
+    onError: (error) => { errorMessage.value = error.message },
+  })
+  await replaySubscription.value.finished
+  replaying.value = false
+}
+
+async function replaySavedStream(): Promise<void> {
+  const resume = loadResumeRef()
+  if (!resume || generating.value) return
+  resetStreamUiState(stream)
+  generating.value = true
+  const lastMessage = [...convStore.messages].reverse().find((message) => message.role === 'assistant')
+  if (lastMessage) activeAssistant.value = lastMessage
+  replaySubscription.value?.abort()
+  replaySubscription.value = replayStream(resume.streamId, resume.after, streamHandlers)
+  await replaySubscription.value.finished
+}
+
+async function stop(): Promise<void> {
+  if (!stream.turnId || stopping.value) return
+  stopping.value = true
+  try {
+    await controlTurn(stream.turnId, 'stop')
+  } catch (error) {
+    stopping.value = false
+    errorMessage.value = error instanceof Error ? error.message : '无法停止任务'
+  }
+}
+
+async function decideApproval(decision: 'approve' | 'reject'): Promise<void> {
+  const approvalId = readText(stream.approval, ['approval_id'])
+  const decisionNonce = readText(stream.approval, ['decision_nonce', 'challenge_nonce'])
+  if (!approvalId || !decisionNonce) {
+    errorMessage.value = '审批事件缺少 approval_id 或 decision_nonce'
+    return
+  }
+  approvalSubmitting.value = true
+  try {
+    await submitApproval(approvalId, decision, decisionNonce)
+    if (stream.approval) stream.approval = { ...stream.approval, status: decision === 'approve' ? 'submitted' : 'rejected' }
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '提交审批决定失败'
+  } finally {
+    approvalSubmitting.value = false
+  }
+}
+
+async function reconcileTerminal(): Promise<void> {
+  if (!stream.turnId) return
+  try {
+    const turn = await getTurn(stream.turnId)
+    const response = typeof turn.response === 'string'
+      ? turn.response
+      : typeof turn.final_response === 'string'
+        ? turn.final_response
+        : ''
+    if (response && activeAssistant.value) activeAssistant.value.content = response
+  } catch {
+    // 终态对账失败不覆盖已收到的可靠流内容。
+  }
+}
+
+async function loadArtifacts(): Promise<void> {
+  if (projectStore.currentProjectId == null) {
+    artifacts.value = []
     return
   }
   try {
-    projectArtifacts.value = await listArtifacts(pid)
+    artifacts.value = await listArtifacts(projectStore.currentProjectId)
   } catch {
-    projectArtifacts.value = []
-  }
-  // 还原需求文档: 后端已落库到 projects.requirement_doc, 重启后仍能展示右侧条目。
-  // 不覆盖本轮已流式下发(live)的值, 避免 _do_persist 落库延迟导致被清空。
-  if (requirementDoc.value == null) {
-    const proj = projectStore.projects.find((p) => p.id === pid)
-    if (proj?.requirement_doc) {
-      try {
-        requirementDoc.value = JSON.parse(proj.requirement_doc)
-      } catch {
-        requirementDoc.value = null
-      }
-    }
-  }
-  // 恢复完成态: 刷新后 SSE 事件丢失, 但产物已落 MySQL → 前端据此判断任务已完成
-  if (projectArtifacts.value.length > 0) {
-    if (!finished.value) finished.value = true
-    // previewUrl 也恢复: 取最新 artifact 的直链, 供「打开线上预览」「复制预览链接」使用
-    if (!previewUrl.value) {
-      const latest = projectArtifacts.value[projectArtifacts.value.length - 1]
-      previewUrl.value = latest?.preview_url || null
-    }
-  }
-  // 查询会话状态: 若无产物且后台有活跃 trace → 启动续接
-  if (projectArtifacts.value.length === 0 && convStore.currentConvId != null && !generating.value) {
-    try {
-      const resp = await fetch(`/api/conversations/${convStore.currentConvId}/status`)
-      const s = await resp.json()
-      if (s.status === 'running' && s.active_trace_id) {
-        // 续接(F5 刷新/重开)走 resumeStream: 内部自管 generating, 不再前置 generating=true,
-        // 避免旧逻辑「先 generating=true 再调 resume() 被其守卫 self-return」死锁(续联永不发起)。
-        // 不带 resume 语义 → 仅回放/续接在途流, 不对孤儿 trace(无 checkpoint)无脑重跑,
-        // 流已消失时由后端续接守卫发 done 干净收尾(2026-07-29 修复刷新后无限转圈无反馈)。
-        const us = loadUserStatus()
-        resumeStream(convStore.currentConvId, s.active_trace_id, us?.after || null)
-      }
-    } catch { /* 状态查询失败不影响主流程 */ }
+    artifacts.value = []
   }
 }
-const traceId = ref('')
-const esRef = ref<EventSource | null>(null)
 
-// S10 修复: 预览链接可能来自后端/模型输出, 必须过滤危险协议(javascript: 等),
-// 仅放行 http/https。供模板 :href 使用, 防止 XSS 类协议注入。
-function safeHref(url: string | null): string {
-  if (!url) return ''
+async function restorePendingApproval(): Promise<void> {
   try {
-    const u = new URL(url, window.location.origin)
-    if (u.protocol === 'http:' || u.protocol === 'https:') return u.href
+    const pending = await getPendingApprovals()
+    const approval = Array.isArray(pending) ? pending[0] : pending.approvals?.[0]
+    if (approval && typeof approval === 'object' && !Array.isArray(approval)) stream.approval = approval as Record<string, unknown>
   } catch {
-    /* 相对路径或非法 → 放行(站内相对路径安全) */
-    if (!/^\s*[a-z]+:/i.test(url)) return url
+    // 断网或没有待审批项时不影响正常聊天。
+  }
+}
+
+function optimisticMessage(role: 'user' | 'assistant', content: string, conversationId: number): Message {
+  return {
+    id: 0,
+    conversation_id: conversationId,
+    role,
+    content,
+    model_id: role === 'assistant' ? model.value : null,
+    created_at: new Date().toISOString(),
+  }
+}
+
+function scrollToBottom(): void {
+  void nextTick(() => {
+    if (convRef.value) convRef.value.scrollTop = convRef.value.scrollHeight
+  })
+}
+
+function saveResumeRef(): void {
+  if (!stream.streamId || !stream.turnId) return
+  const resume: ResumeRef = { streamId: stream.streamId, turnId: stream.turnId, after: stream.lastSeq }
+  sessionStorage.setItem(RESUME_KEY, JSON.stringify(resume))
+}
+
+function loadResumeRef(): ResumeRef | null {
+  try {
+    const raw = sessionStorage.getItem(RESUME_KEY)
+    if (!raw) return null
+    const value = JSON.parse(raw) as ResumeRef
+    return typeof value.streamId === 'string' && typeof value.turnId === 'string' && typeof value.after === 'number' ? value : null
+  } catch {
+    return null
+  }
+}
+
+function clearResumeRef(): void {
+  sessionStorage.removeItem(RESUME_KEY)
+}
+
+function readText(source: Record<string, unknown> | null, keys: string[]): string {
+  if (!source) return ''
+  for (const key of keys) {
+    const value = source[key]
+    if (typeof value === 'string' && value) return value
   }
   return ''
 }
 
-// B8 修复: 打开新 SSE 前先关闭上一个 EventSource, 避免重发/重连/切换 skill 时
-// 旧连接泄漏(浏览器持续重试 + 占用连接数)。统一经此入口, 不再裸调 startChat。
-function openEs(opts: Parameters<typeof startChat>[0]) {
-  esRef.value?.close()
-  esRef.value = null
-  esRef.value = startChat(opts)
-}
-
-// 续联兜底: 刷新/重开后续接一个已死流(孤儿 running trace)时, SSE 可能既不回放也不发 done,
-// 导致 UI 永久 generating 转圈、零反馈。发起续联后若 15s 内无任何真事件/收尾到达, 主动收尾。
-let _reconnectGuard: ReturnType<typeof setTimeout> | null = null
-function disarmReconnectGuard() {
-  if (_reconnectGuard) { clearTimeout(_reconnectGuard); _reconnectGuard = null }
-}
-function armReconnectGuard() {
-  disarmReconnectGuard()
-  _reconnectGuard = setTimeout(() => {
-    _reconnectGuard = null
-    if (!generating.value) return
-    // 续联超时: 给出明确中断反馈, 不再静默转圈(2026-07-29 修复刷新后无反馈)
-    generating.value = false
-    finished.value = true
-    errorMsg.value = '生成连接已中断（刷新或网络断开后未能恢复），请重新发起这条对话。'
-    clearActiveGen()
-    clearUserStatus()
-    clearTrailSnapshot(traceId.value)
-    v4Pause.value = null
-    if (projectStore.currentProjectId) {
-      convStore.loadConversations(projectStore.currentProjectId).then(() => scrollToBottom(false))
-    }
-    dequeueAndSend()
-  }, 15000)
-}
-// 右侧预览面板实例(ChatView 通过它联动选中文件并打开预览)
-const rightPanel = ref<InstanceType<typeof RightPanel> | null>(null)
-// 后置 QC 单裁判结果 / 用户评价, 均按 trace_id 索引(气泡内展示, v2.3.0 单裁判)
-const qcMap = reactive<Record<string, QcResult>>({})
-const ratedMap = reactive<Record<string, { rating: number; dims: RatingDims; comment: string }>>({})
-const projectArtifacts = ref<Artifact[]>([])
-
-// ---------- COS 上传状态(trail-wrap-inline 内显示) ----------
-const cosUploadingList = computed(() => projectArtifacts.value.filter((a) => a.status === 'uploading'))
-const cosFailedList = computed(() => projectArtifacts.value.filter((a) => a.status === 'failed'))
-const cosUploading = computed(() => cosUploadingList.value.length > 0)
-const cosFailed = computed(() => cosFailedList.value.length > 0)
-
-// B(#488): 生成阶段实时上传进度(0~100), 驱动 exec-head 的「📤 上传中 NN%」进度条
-const cosUploadPct = ref(0)
-const cosUploadFile = ref('')
-const cosUploadingActive = ref(false)
-
-// 正在生成中的文件: 后端提前补发的文件名(跑马灯占位) + loading 骨架屏状态
-const genFileName = ref('')
-const genLoading = ref(false)
-
-async function retryCosUpload() {
-  const pid = projectStore.currentProjectId
-  if (pid == null) return
-  try {
-    await fetch(`/api/projects/${pid}/retry-upload`, { method: 'POST' })
-    await loadArtifacts()
-  } catch {
-    /* 网络错误忽略, 等待轮询补偿 */
-  }
-}
-
-let cosPollTimer: ReturnType<typeof setInterval> | null = null
-async function cosPollTick() {
-  await loadArtifacts()
-  if (!cosUploading.value && !cosFailed.value) stopCosPoll()
-}
-function startCosPoll() {
-  if (cosPollTimer) return
-  cosPollTimer = setInterval(cosPollTick, 3000)
-}
-function stopCosPoll() {
-  if (cosPollTimer) {
-    clearInterval(cosPollTimer)
-    cosPollTimer = null
-  }
-}
-watch([cosUploading, cosFailed], ([u, f]) => {
-  if (u || f) startCosPoll()
-  else stopCosPoll()
-})
-onUnmounted(() => stopCosPoll())
-
-// ---- 文字产物链接(替代确认模态框): 需求文档 + 所有生成文件, 点击联动右侧预览 ----
-function iconForFile(name: string) {
-  const map: Record<string, string> = {
-    html: '🌐', css: '🎨', js: '⚡', json: '📋', svg: '🖼️',
-    png: '🖼️', jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', webp: '🖼️',
-    md: '📝', txt: '📄', py: '🐍', ts: '🔷', zip: '📦',
-  }
-  const i = name.lastIndexOf('.')
-  const e = i > 0 ? name.slice(i + 1).toLowerCase() : ''
-  return map[e] || '📄'
-}
-
-// 与右侧 req-tree / file-tree 保持一致的产物清单(需求文档 + 全部文件)
-const artifactLinks = computed(() => {
-  const links: { name: string; icon: string; kind: 'requirement' | 'file' }[] = []
-  if (requirementDoc.value) {
-    links.push({ name: requirementDoc.value.brand?.name || '需求文档', icon: '📄', kind: 'requirement' })
-  }
-  if (projectArtifacts.value.length === 0) return links
-  // 只展示最新一次生成的产物文件(避免把历史 artifact 全列出)
-  const latest = projectArtifacts.value[projectArtifacts.value.length - 1]
-  if (latest.files) {
-    const names = Array.isArray(latest.files)
-      ? (latest.files as any[]).map((f: any) => f.name)
-      : Object.keys(latest.files)
-    for (const name of names) {
-      links.push({ name, icon: iconForFile(name), kind: 'file' })
-    }
-  }
-  // 若有多版, 显示数量提示
-  if (projectArtifacts.value.length > 1) {
-    const tail = links[links.length - 1] as any
-    if (tail) tail.totalVersions = projectArtifacts.value.length
-  }
-  return links
-})
-
-// 点击文字产物链接: 展开右侧面板并联动选中对应文件 + 打开预览
-function openArtifact(name: string, kind: 'requirement' | 'file') {
-  if (rightCollapsed.value) rightCollapsed.value = false
-  const target = kind === 'requirement' ? '__requirement_doc__' : name
-  nextTick(() => rightPanel.value?.selectFile(target))
-}
-
-// 需求文档下载统一为 .md(走后端 /api/projects/{id}/requirement-doc)
-async function downloadReqDoc() {
-  const pid = projectStore.currentProjectId
-  if (pid == null) return
-  try {
-    const resp = await fetch(`/api/projects/${pid}/requirement-doc`)
-    if (!resp.ok) return
-    const text = await resp.text()
-    const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `requirement_doc_${pid}.md`
-    a.click()
-    URL.revokeObjectURL(a.href)
-  } catch { /* 下载失败忽略 */ }
-}
-
-const pendingSend = ref(false)
-const pendingRetry = ref<{ suggested: string[]; message: string } | null>(null)
-const lastSentText = ref('')
-
-// ---- 多意图编排(P3): 泳道进度 + 合并结果 ----
-const isMultiIntent = ref(false)
-const orchStrategy = ref<'parallel' | 'mixed'>('parallel')
-const subTasks = ref<SubTaskView[]>([])
-const mergeResult = ref<{ success_count: number; fail_count: number; failed_tasks: FailedSubTask[] } | null>(null)
-// L2 对话精炼终版文本(v0.9.0, #235): 覆盖主气泡冗余内容
-const refinedText = ref('')
-// 已确认放行的子任务 id(中风险确认后重发时带上, 跨重发保留)
-const confirmedSubtaskIds = ref<string[]>([])
-
-const auth = useAuth()
-const projectStore = useProjectStore()
-const convStore = useConversationStore()
-
-// 仅当当前会话(被渲染为真实 DOM 的会话)的消息数变化时才可能追底,
-// 避免激活历史折叠会话时其子列表突变误触发当前列表滚动。
-function currentConvHasContent(): boolean {
-  try {
-    const curId = convStore.currentConvId
-    const msgs = convStore.messages
-    if (curId == null || !Array.isArray(msgs)) return false
-    if (msgs.length > 0) return true
-    if (!allSessions.value) return false
-    return allSessions.value.some((s) => s.conv.id === curId && Array.isArray(s.msgs) && s.msgs.length > 0)
-  } catch {
-    return false
-  }
-}
-
-// 新消息/节点步骤等离散出现 → 跟随滚动(用户贴底才跟, 看中间不动)
-watch(
-  () => (currentConvHasContent() ? convStore.messages.length : -1),
-  () => {
-    if (autoScroll) scrollToBottom(true, false)
-  },
-)
-// 内容持续增量(任意气泡 token 追加 / 长文非 build 意图 / 子任务泳道): content 变化即触发
-watch(
-  () => {
-    const msgs = convStore.messages
-    if (!currentConvHasContent() || !Array.isArray(msgs)) return ''
-    return msgs.map((m) => (m && m.content ? m.content.length : 0)).join(',')
-  },
-  () => {
-    if (autoScroll && generating.value) scrollToBottom(false, false)
-  },
-)
-
-// 所有会话统一消息流(微信风格: 最老的在上方, 最新的在最下方)
-// 数组顺序: [oldest_session, ..., current_session], 配合 flex-direction: column 渲染
-const allSessions = computed(() => {
-  // #556: 防卫 —— pastSessions / messages 在 store 初始化瞬间可能未就绪(keep-alive 切换或首帧),
-  // 一律回退到空数组, 避免 watcher/computed getter 在读 s.conv / s.msgs 时报 Unhandled error。
-  const pastSessions = Array.isArray(convStore.pastSessions) ? convStore.pastSessions : []
-  const conversations = Array.isArray(convStore.conversations) ? convStore.conversations : []
-  const curId = convStore.currentConvId
-  const curMsgs = Array.isArray(convStore.messages) ? convStore.messages : []
-  // 历史会话(折叠):排除「当前会话」自身——当前会话一律走下方 convStore.messages(实时乐观数组)。
-  // 旧实现依赖 conversations[0] === currentConvId 才渲染实时消息, 在「打开非最新会话发消息」/
-  // autoStart 后会话重排等场景下该假设失效, 导致乐观推送的用户气泡被瞬间摘掉,
-  // 直到 onDone 重排会话才随助手回复重新出现(用户气泡闪一下就消失的 Bug)。
-  const past = pastSessions
-    .map((s) => ({ conv: s.conv, loading: s.loading, msgs: Array.isArray(s.messages) && s.messages.length ? s.messages : [] }))
-    .filter((s) => s.conv && s.conv.id !== curId)
-  if (curId != null) {
-    const curConv = conversations.find((c) => c.id === curId)
-    past.unshift({
-      conv: curConv || ({ id: curId } as any),
-      loading: false,
-      msgs: curMsgs,
-    })
-  }
-  // 逆转: pastSessions 是降序(新→旧)追加的, 需要反转为升序(旧→新)以符合微信风格
-  return past.reverse()
-})
-
-const currentProjectName = computed(
-  () =>
-    projectStore.projects.find((p) => p.id === projectStore.currentProjectId)?.name || '未选择项目',
-)
-const currentProjectDate = computed(
-  () =>
-    projectStore.projects.find((p) => p.id === projectStore.currentProjectId)?.created_at?.slice(0, 10) || '',
-)
-
-// 项目名行内编辑
-const editingProject = ref(false)
-const editProjectName = ref('')
-const projInput = ref<HTMLInputElement | null>(null)
-function startEditProject() {
-  editProjectName.value = currentProjectName.value
-  editingProject.value = true
-  nextTick(() => projInput.value?.focus())
-}
-async function saveProjectName() {
-  if (!editingProject.value) return
-  const name = editProjectName.value.trim()
-  if (name && name !== currentProjectName.value && projectStore.currentProjectId) {
-    await renameProject(projectStore.currentProjectId, name)
-    await projectStore.load()
-  }
-  editingProject.value = false
-}
-
-// 生成本次对话的链路 id(trace_id):
-// 优先用 crypto.randomUUID(安全随机);老浏览器无该 API 时退化为"时间戳+随机"拼接。
-function genTraceId(): string {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
-  return 't' + Date.now().toString(16) + Math.random().toString(16).slice(2)
-}
-
-// ---- 重连状态(sessionStorage,刷新同标签页可恢复) ----
-const ACTIVE_KEY = 'seedai:active-gen'
-function setActiveGen(convId: number, tid: string) {
-  try {
-    sessionStorage.setItem(ACTIVE_KEY, JSON.stringify({ convId, traceId: tid }))
-  } catch {
-    /* 忽略 */
-  }
-}
-function clearActiveGen() {
-  try {
-    sessionStorage.removeItem(ACTIVE_KEY)
-  } catch {
-    /* 忽略 */
-  }
-}
-function getActiveGen(): { convId: number; traceId: string } | null {
-  try {
-    const raw = sessionStorage.getItem(ACTIVE_KEY)
-    if (!raw) return null
-    const o = JSON.parse(raw)
-    if (o && typeof o.convId === 'number' && o.traceId) return o
-  } catch {
-    /* 忽略 */
-  }
-  return null
-}
-
-// ---- 用户级生成状态(localStorage, 跨标签持久化, 供 F5 刷新后判定是否续接) ----
-const USER_STATUS_KEY = 'seedai:userStatus'
-interface UserStatus {
-  convId: number
-  traceId: string
-  status: 'running' | 'paused' | 'idle'
-  after: string | null
-}
-function loadUserStatus(): UserStatus | null {
-  try {
-    const raw = localStorage.getItem(USER_STATUS_KEY)
-    if (!raw) return null
-    const o = JSON.parse(raw)
-    if (o && typeof o.convId === 'number' && o.traceId) return o
-  } catch {
-    /* 忽略 */
-  }
-  return null
-}
-function saveUserStatus(s: UserStatus) {
-  try { localStorage.setItem(USER_STATUS_KEY, JSON.stringify(s)) } catch { /* 忽略 */ }
-}
-function clearUserStatus() {
-  try { localStorage.removeItem(USER_STATUS_KEY) } catch { /* 忽略 */ }
-}
-
-// ---- 执行轨迹 UI 快照(localStorage, 关页/重开后可恢复 trail-wrap 进度, P5) ----
-// 生成中的执行 UI(思考步骤/计划预览/子任务 track/取消摘要/二次确认)原本只在内存,
-// 关页即失。按 trace_id 把这份 UI 状态快照到 localStorage, 重开页面(同标签刷新或新标签)
-// 时若流已结束无法回放, 可据此立即还原进度展示。
-const TRAIL_KEY = (tid: string) => `seedai:trail:${tid}`
-interface TrailSnapshot {
-  convId: number
-  thoughtSteps: any[]
-  toolTrail: any[]
-  planNodes: any[]
-  currentStage: string
-  currentIntent: { level1: string; level2: string }
-  isMultiIntent: boolean
-  subTasks: any[]
-  mergeResult: any
-  planPreview: any
-  cancelSummary: any
-  cosUploading: any
-  cosFailed: any
-  pendingConfirm: any
-  generating: boolean
-  finished: boolean
-  sopCurrentRole: any
-}
-function saveTrailSnapshot() {
-  const tid = traceId.value
-  if (!tid) return
-  const live =
-    generating.value || planPreview.value || cancelSummary.value ||
-    subTasks.value.length || mergeResult.value ||
-    cosUploading.value || cosFailed.value || pendingConfirm.value
-  if (!live) return
-  const snap: TrailSnapshot = {
-    convId: convStore.currentConvId ?? -1,
-    thoughtSteps: thoughtSteps.value,
-    toolTrail: toolTrail.value,
-    planNodes: planNodes.value,
-    currentStage: currentStage.value,
-    currentIntent: currentIntent.value,
-    isMultiIntent: isMultiIntent.value,
-    subTasks: subTasks.value,
-    mergeResult: mergeResult.value,
-    planPreview: planPreview.value,
-    cancelSummary: cancelSummary.value,
-    cosUploading: cosUploading.value,
-    cosFailed: cosFailed.value,
-    pendingConfirm: pendingConfirm.value,
-    generating: generating.value,
-    finished: finished.value,
-    sopCurrentRole: sopCurrentRole.value,
-  }
-  try { localStorage.setItem(TRAIL_KEY(tid), JSON.stringify(snap)) } catch { /* 忽略 */ }
-}
-function loadTrailSnapshot(tid: string): TrailSnapshot | null {
-  try {
-    const raw = localStorage.getItem(TRAIL_KEY(tid))
-    if (!raw) return null
-    return JSON.parse(raw) as TrailSnapshot
-  } catch { return null }
-}
-function clearTrailSnapshot(tid?: string) {
-  try {
-    if (tid) localStorage.removeItem(TRAIL_KEY(tid))
-    else if (traceId.value) localStorage.removeItem(TRAIL_KEY(traceId.value))
-  } catch { /* 忽略 */ }
-}
-function applyTrailSnapshot(tid: string) {
-  const snap = loadTrailSnapshot(tid)
-  if (!snap) return
-  thoughtSteps.value = snap.thoughtSteps || []
-  toolTrail.value = snap.toolTrail || []
-  planNodes.value = snap.planNodes || []
-  currentStage.value = snap.currentStage || ''
-  currentIntent.value = snap.currentIntent || { level1: '', level2: '' }
-  isMultiIntent.value = !!snap.isMultiIntent
-  subTasks.value = snap.subTasks || []
-  mergeResult.value = snap.mergeResult ?? null
-  planPreview.value = snap.planPreview ?? null
-  cancelSummary.value = snap.cancelSummary ?? null
-  // 注: cosUploading/cosFailed 为 computed(由 projectArtifacts 派生), 不可直接赋值;
-  // 关页重开后经 resume → loadArtifacts() 重新拉取产物, watch 会自动重启 COS 轮询。
-  pendingConfirm.value = snap.pendingConfirm ?? null
-  sopCurrentRole.value = snap.sopCurrentRole
-  // 快照恢复: 若项目已有产物落库(说明任务早已跑完), 绝不据旧快照把 generating 顶回 true,
-  // 否则"已完成卡片"与"仍在跑/raw-stream"会同时出现, 状态自相矛盾。无产物才信任快照的 running。
-  if (projectArtifacts.value.length > 0) {
-    generating.value = false
-    finished.value = true
-  } else {
-    generating.value = !!snap.generating
-    finished.value = !!snap.finished
-  }
-  // P5 健壮性: 关页重开(新标签)时可能无本地草稿气泡, 保证有宿主 assistant 气泡承载 in-bubble trail
-  const live =
-    generating.value || planPreview.value || cancelSummary.value ||
-    subTasks.value.length || mergeResult.value || pendingConfirm.value
-  if (live) {
-    const msgs = convStore.messages
-    const last = msgs[msgs.length - 1]
-    if (!last || last.role !== 'assistant') {
-      msgs.push({
-        role: 'assistant', content: '', conversation_id: snap.convId, id: 0,
-        created_at: '', model_id: model.value,
-      } as any)
-    }
-  }
-}
-
-// 生成中执行 UI 变化 → 防抖快照到 localStorage(P5: 关页/重开可恢复 trail-wrap 进度)
-let _trailSaveTimer: ReturnType<typeof setTimeout> | null = null
-watch(
-  [thoughtSteps, planPreview, cancelSummary, subTasks, mergeResult, cosUploading, cosFailed, pendingConfirm, generating, isMultiIntent, currentStage, sopCurrentRole],
-  () => {
-    if (_trailSaveTimer) clearTimeout(_trailSaveTimer)
-    _trailSaveTimer = setTimeout(saveTrailSnapshot, 400)
-  },
-  { deep: true },
-)
-
-// ---- 生成中消息本地快照(刷新/崩溃恢复) ----
-const DRAFT_KEY_PREFIX = 'seedai:draft:'
-
-function saveDraft(convId: number) {
-  try {
-    const msgs = convStore.messages.filter(m => m.content)
-    if (msgs.length) {
-      sessionStorage.setItem(DRAFT_KEY_PREFIX + convId, JSON.stringify(msgs))
-    }
-  } catch { /* 忽略 */ }
-}
-
-function clearDraft() {
-  if (convStore.currentConvId) {
-    sessionStorage.removeItem(DRAFT_KEY_PREFIX + convStore.currentConvId)
-  }
-}
-
-function loadDraft(): boolean {
-  if (!convStore.currentConvId) return false
-  try {
-    const raw = sessionStorage.getItem(DRAFT_KEY_PREFIX + convStore.currentConvId)
-    if (!raw) return false
-    const msgs = JSON.parse(raw) as Message[]
-    if (msgs.length > convStore.messages.length) {
-      convStore.messages = msgs
-      return true
-    }
-  } catch { /* 忽略 */ }
-  return false
-}
-
-// 重置「本轮生成」的展示态(不含 messages 数组,数组在 send/resume 各自处理)。
-function resetGenState() {
-  thoughtSteps.value = []
-  planNodes.value = []
-  currentStage.value = ''
-  degraded.value = false
-  degradedReason.value = null
-  switchModelInfo.value = null
-  previewUrl.value = null
-  // 重置「正在生成」文件占位状态
-  genFileName.value = ''
-  genLoading.value = false
-  errorMsg.value = ''
-  finished.value = false
-  currentIntent.value = { level1: '', level2: '' }
-  pendingRetry.value = null
-  // Phase 1: 重置工具调用可见化流
-  toolTrail.value = []
-  // 多意图编排状态(新请求时重置;confirmedSubtaskIds 在 doSend 单独清)
-  isMultiIntent.value = false
-  subTasks.value = []
-  mergeResult.value = null
-  // §9 / §6 D: 执行前预览 + 取消摘要 + 当前 SOP 阶段(新请求时清空, 避免上轮残留)
-  planPreview.value = null
-  cancelSummary.value = null
-  sopCurrentRole.value = undefined
-  // 非阻塞候选提示(新请求时清除)
-  alternativesData.value = null
-  // SIR 澄清卡(新请求时清除)
-  clarifyData.value = null
-  clarifySelected.value = []
-  clarifyFreeText.value = ''
-  // B7 修复: 任何新请求/重连/重发都先解除 sending 锁, 避免上一轮 error/abort/retry/
-  // clarify/block/confirm/paused 等终态未解锁导致输入框永久卡死(此前仅 onDone 解锁)。
-  sending.value = false
-  lastSentText.value = ''
-}
-
-function upsertStep(stage: string, status: ThoughtStep['status'], customLabel?: string) {
-  const label = customLabel || labelFor(stage)
-  const existing = thoughtSteps.value.find((s) => s.stage === stage)
-  if (existing) existing.status = status
-  else thoughtSteps.value.push({ stage, label, status, think: '' })
-  // [DEBUG] 打印 upsertStep 收到的数据及调用后的时间线, 便于排查步骤是否进入
-  const _ts = new Date()
-  const _tsStr = `${_ts.toLocaleTimeString('zh-CN', { hour12: false })}.${String(_ts.getMilliseconds()).padStart(3, '0')}`
-  console.log(`[upsertStep] [${_tsStr}]`, { stage, status, label: customLabel || label, existed: !!existing },
-    '=> timeline:', thoughtSteps.value.map((s) => `${s.stage}:${s.status}`).join(' | '))
-}
-function appendThink(stage: string, content: string) {
-  let step = thoughtSteps.value.find((s) => s.stage === stage)
-  // 后端可能在「尚无对应 node」时下发 think(如 doc_write 按章节流式产出的进度反馈),
-  // 此时自动补一个占位步, 确保任何思考反馈都不被丢弃
-  if (!step) {
-    upsertStep(stage, 'active')
-    step = thoughtSteps.value.find((s) => s.stage === stage)
-  }
-  if (step) step.think += content
-}
-function findAssistantIdx(): number {
-  for (let i = convStore.messages.length - 1; i >= 0; i--) {
-    if (convStore.messages[i].role === 'assistant') return i
-  }
-  return -1
-}
-
-// ── 气泡内实时思考(Problem 2): 标识当前正在生成的那条 assistant 气泡, 并暴露实时阶段/思考文本 ──
-const streamingMsgKey = computed<string | null>(() => {
-  if (!generating.value) return null
-  const sessions = allSessions.value
-  for (let si = sessions.length - 1; si >= 0; si--) {
-    const msgs = sessions[si].msgs
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i].role === 'assistant') return `s${si}-${i}`
-    }
-  }
-  return null
-})
-
-// ── 宿主气泡 key(P1/P2): 当前会话「正在生成 / 待确认 / 取消摘要 / 子任务」的执行 UI 应内嵌进
-//    哪一条 assistant 气泡。取当前会话最后一条 assistant 气泡;没有则 null(此时回退由弹窗兜底)。 ──
-const activeTrailKey = computed<string | null>(() => {
-  const show =
-    generating.value || planPreview.value || cancelSummary.value ||
-    subTasks.value.length || mergeResult.value ||
-    cosUploading.value || cosFailed.value || pendingConfirm.value ||
-    degraded.value ||
-    (optionsData.value) || thoughtSteps.value.length > 0
-  if (!show) return null
-  const sessions = allSessions.value
-  for (let si = sessions.length - 1; si >= 0; si--) {
-    if (sessions[si].conv.id !== convStore.currentConvId) continue
-    const msgs = sessions[si].msgs
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i].role === 'assistant') return `s${si}-${i}`
-    }
-  }
-  return null
-})
-// 实时思考文本: 优先取「进行中」步骤的思考, 否则取最近一个有思考文本的步骤
-const liveThinkText = computed(() => {
-  const active = thoughtSteps.value.find((s) => s.status === 'active' && s.think)
-  if (active) return active.think
-  const withThink = thoughtSteps.value.filter((s) => s.think)
-  return withThink.length ? withThink[withThink.length - 1].think : ''
-})
-const streamingStageLabel = computed(
-  () => labelFor(currentStage.value) || currentStage.value || '思考中',
-)
-// 是否路由到产品经理(PM)进行需求澄清/分析: build/requirement 即 PM 路径
-const isPMIntent = computed(
-  () => currentIntent.value.level1 === 'build' && currentIntent.value.level2 === 'requirement',
-)
-
-// 统一的 SSE 事件回调:把 node/think/plan/token 映射到本地状态。
-function makeCallbacks(assistantIdx: number): ChatCallbacks {
-  return {
-    onNode: (d) => {
-      disarmReconnectGuard()
-      if (!d.stage) return
-      // 内部产物交付事件(doc_file 等)不是用户可见的过程步骤, 不进轨迹, 避免污染过程展示
-      if (d.stage === 'doc_file' || d.stage === 'previewing') return
-      currentStage.value = d.stage
-      // 之前进行中的步骤标记为完成
-      thoughtSteps.value.forEach((s) => {
-        if (s.status === 'active') s.status = 'done'
-      })
-      if (d.stage === 'done') {
-        thoughtSteps.value.forEach((s) => (s.status = 'done'))
-      } else {
-        upsertStep(d.stage, 'active')
-      }
-    },
-    onThink: (d) => {
-      disarmReconnectGuard()
-      // think 事件的阶段名不带 enter_ 前缀(planner / reviewer),
-      // 需映射到时间线里的节点步名(enter_planner / enter_reviewer)。
-      const THINK_TO_STEP: Record<string, string> = {
-        planner: 'enter_planner',
-        reviewer: 'enter_reviewer',
-      }
-      const stage = d.stage || currentStage.value
-      const stepStage = THINK_TO_STEP[stage] || stage
-      if (stepStage) appendThink(stepStage, d.content || '')
-      if (stage === 'reviewer') {
-        const step = thoughtSteps.value.find((s) => s.stage === 'enter_reviewer')
-        if (step) {
-          step.passed = d.passed
-          step.comment = d.comment
-        }
-      }
-    },
-    onPlan: (d) => {
-      disarmReconnectGuard()
-      planNodes.value.push({ title: d.title, goal: d.goal, steps: d.steps })
-    },
-    onToken: (t, subTaskId) => {
-      disarmReconnectGuard()
-      // 多意图: 合并结果(__merge__)进入主气泡; 子任务自身 token 进入对应泳道流式预览
-      if (subTaskId === '__merge__') {
-        const m = convStore.messages[assistantIdx]
-        if (m) {
-          m.content += t
-          if (m.content.length % 40 === 0) saveDraft(convStore.currentConvId!)
-        }
-        return
-      }
-      if (subTaskId) {
-        const st = subTasks.value.find((s) => s.id === subTaskId)
-        if (st) {
-          st.tokens += t
-          return
-        }
-      }
-      // 单意图遗留路径(无 sub_task_id): 同原行为
-      const m = convStore.messages[assistantIdx]
-      if (m) {
-        // 首个 token 亮起「正在生成回复中」步骤(用户诉求: 生成阶段也要有反馈)
-        if (!thoughtSteps.value.some((s) => s.stage === 'generating')) {
-          upsertStep('generating', 'active')
-        }
-        m.content += t
-        // 每 10 个 token 存一次本地快照(减开销)
-        if (m.content.length % 40 === 0) saveDraft(convStore.currentConvId!)
-      }
-    },
-    onPreview: (d) => {
-      if (d.url) previewUrl.value = d.url as string
-    },
-    onGenFile: (d) => {
-      // 后端提前告知正在生成的文件名: 展示跑马灯占位 + loading 骨架屏
-      genFileName.value = (d.name as string) || 'index.html'
-      genLoading.value = true
-    },
-    // Phase 1: think→call→observe 循环可见化。把 reasoning / tool_call / tool_result
-    // 归一成 toolTrail(单意图即主气泡流; 多意图按 sub_task_id 分泳道)。
-    onReasoning: (d) => {
-      disarmReconnectGuard()
-      if (!d.text) return
-      toolTrail.value.push({ kind: 'reasoning', text: d.text, sub_task_id: d.sub_task_id })
-    },
-    onToolCall: (d) => {
-      disarmReconnectGuard()
-      const id = (d.tool_call_id as string) || `tc_${toolTrail.value.length}`
-      toolTrail.value.push({
-        kind: 'tool',
-        call_id: id,
-        name: (d.name as string) || 'tool',
-        args: (d.args as Record<string, any>) || {},
-        status: 'pending',
-        sub_task_id: d.sub_task_id,
-      })
-    },
-    onToolResult: (d) => {
-      disarmReconnectGuard()
-      const id = (d.tool_call_id as string) || ''
-      // 回粘到最近一个同 call_id(否则按 name 兜底最近待完成项)的工具卡片
-      let idx = -1
-      for (let i = toolTrail.value.length - 1; i >= 0; i--) {
-        const t = toolTrail.value[i]
-        if (t.kind === 'tool' && t.status === 'pending' && (t.call_id === id || !id || t.name === d.name)) {
-          idx = i
-          break
-        }
-      }
-      if (idx >= 0) {
-        const t = toolTrail.value[idx] as Extract<ToolTrailEntry, { kind: 'tool' }>
-        t.status = 'done'
-        t.ok = d.ok
-        t.summary = d.summary
-      }
-    },
-    onProgress: (d) => {
-      // B(#488): 实时上传进度 → exec-head 进度条
-      cosUploadPct.value = Math.max(0, Math.min(100, Number(d.pct) || 0))
-      cosUploadFile.value = (d.file as string) || ''
-      cosUploadingActive.value = true
-    },
-    onCosUpload: (d) => {
-      cosUploadFile.value = (d.filename as string) || ''
-      if (typeof d.index === 'number' && typeof d.total === 'number' && d.total > 0) {
-        cosUploadPct.value = Math.round((d.index / d.total) * 100)
-      }
-    },
-    onDegraded: (d) => {
-      // 后端仅在真的降级到非主模型时才发 degraded(携带实际使用模型 model 与原始模型 requested)。
-      // 在此之前视为正常完成, 不应误报"已切换备用"。
-      degraded.value = true
-      degradedReason.value = 'model_switch'
-      const dd = (d || {}) as Record<string, any>
-      if (dd.model && dd.requested && dd.model !== dd.requested) {
-        switchModelInfo.value = `${dd.requested} → ${dd.model}`
-      }
-    },
-    onRequirement: (d) => {
-      console.log('[SSE] 收到需求文档:', (d.data as any)?.brand?.name)
-      requirementDoc.value = (d.data as Record<string, any>) || null
-      // 主动在预览页展示需求文档(若面板折叠则先展开)
-      if (rightCollapsed.value) rightCollapsed.value = false
-      nextTick(() => rightPanel.value?.selectFile('__requirement_doc__'))
-    },
-    onDone: () => {
-      disarmReconnectGuard()
-      generating.value = false
-      sending.value = false
-      finished.value = true
-      // 检测"空结果": done 到达但主气泡无正文、无产物、无子任务产出 → 视为模型超时/兜底。
-      // 置 degraded 并保留轨迹(追加降级警告步), 让用户看到明确反馈而非误以为 bug。
-      const m = convStore.messages[assistantIdx]
-      const hasContent = !!(m && m.content && m.content.trim().length > 0)
-      const hasArtifacts = projectArtifacts.value.length > 0
-      const hasSub = subTasks.value.some((s) => s.status === 'done' && s.result_summary)
-      const emptyResult = !hasContent && !hasArtifacts && !hasSub
-      // 🔧 暂停态防御: 后端任何"正常暂停、等待用户输入"的决策都会先发明确的暂停事件
-      //   (clarify / confirm / block / paused) 再补发 done(队列收尾)。这些轮次本来就没有
-      //   正文/产物/子任务, 不应误判为"模型超时"(否则会出现"弹了确认框却同时显示超时"的矛盾 UI)。
-      //   真超时轮次不会携带上述任一暂停态, 仍会正常报超时。
-      const pauseState = !!clarifyData.value || !!pendingConfirm.value || !!blockReason.value || !!v4Pause.value
-      if (pauseState) {
-        thoughtSteps.value.forEach((s) => { if (s.status === 'active') s.status = 'done' })
-      } else if (emptyResult) {
-        degraded.value = true
-        degradedReason.value = isPMIntent.value ? 'pm' : 'timeout'
-        // 保留时间线并给出明确可见结论
-        thoughtSteps.value.forEach((s) => { if (s.status === 'active') s.status = 'done' })
-        // PM 路径: pm_summon 步骤已在 onIntent 实时播报, 不再追加错误式警告
-        if (degradedReason.value !== 'pm' && !thoughtSteps.value.some((s) => s.stage === 'degraded_warn')) {
-          thoughtSteps.value.push({ stage: 'degraded_warn', label: '⚠ 模型响应超时，本次未能生成内容', status: 'done', think: '' })
-        }
-      } else {
-        // 成功: 保留完整时间线, 供用户复盘每一步(不再清空)
-        thoughtSteps.value.forEach((s) => { if (s.status === 'active') s.status = 'done' })
-      }
-      planNodes.value = []
-      planPreview.value = null
-      cancelSummary.value = null
-      cosUploadingActive.value = false
-      cosUploadPct.value = 0
-      genLoading.value = false
-      stopExecTimer()
-      clearActiveGen()
-      clearUserStatus()
-      clearTrailSnapshot(traceId.value)  // P5: 终止态清理快照, 避免陈旧轨迹复活
-      v4Pause.value = null
-      clearDraft()
-      loadArtifacts()
-      // 从 DB 同步当前会话消息(替换乐观更新的 id:0)
-      if (projectStore.currentProjectId) {
-        convStore.loadConversations(projectStore.currentProjectId).then(() => scrollToBottom(false))
-      }
-      dequeueAndSend()
-    },
-    onAborted: () => {
-      generating.value = false
-      finished.value = true
-      thoughtSteps.value = []
-      toolTrail.value = []
-      planNodes.value = []
-      genLoading.value = false
-      errorMsg.value = '已取消'
-      stopExecTimer()
-      clearActiveGen()
-      clearUserStatus()
-      clearTrailSnapshot(traceId.value)
-      v4Pause.value = null
-      if (projectStore.currentProjectId) {
-        convStore.loadConversations(projectStore.currentProjectId).then(() => scrollToBottom(false))
-      }
-      dequeueAndSend()
-    },
-    onRetry: (d: RetryEvent) => {
-      generating.value = false
-      finished.value = true
-      stopExecTimer()
-      clearActiveGen()
-      pendingRetry.value = {
-        suggested: d.suggested || [],
-        message: d.message || '模型不可用',
-      }
-    },
-    onIntent: (d) => {
-      currentIntent.value = { level1: d.level1 || '', level2: d.level2 || '' }
-      // exec-head 丰富化: 捕获意图展示字段(agent/行业/置信度)
-      execIntentLabel.value = d.label || (d.level2_label ? `${d.level1_label || ''} · ${d.level2_label}` : '') || ''
-      execIndustry.value = d.industry || ''
-      execSkill.value = d.selected_skill || ''
-      execConfidence.value = typeof d.confidence === 'number' ? d.confidence : null
-      // 每次新生成开始重置计时
-      startExecTimer()
-      // 意图分析步骤收尾: 发送瞬间已以 active 播报, 待 intent 事件到达转正为 done
-      if (thoughtSteps.value.some((s) => s.stage === 'analyzing')) {
-        upsertStep('analyzing', 'done')
-      }
-      // 在思考时间线顶部插入意图识别步骤(两级显示)
-      const lbl = d.level2_label ? `${d.level1_label || ''} → ${d.level2_label}` : (d.label || '')
-      if (lbl) upsertStep('intent_recognized', 'done', lbl)
-      // PM 路径(build/requirement): 实时播报"召唤产品经理", 而非错误提示
-      if (isPMIntent.value) {
-        upsertStep('pm_summon', 'done', '🧠 系统分析到您缺少开发方向，已自动为您召唤产品经理进行分析')
-      }
-    },
-    onOptions: (d: OptionEvent) => {
-      // 保底: 确保存在宿主 assistant 气泡, 选项卡内嵌其中(任意时刻气泡可见)
-      const msgs = convStore.messages
-      const last = msgs[msgs.length - 1]
-      if (!last || last.role !== 'assistant') {
-        msgs.push({ role: 'assistant', content: '', conversation_id: convStore.currentConvId, id: 0, created_at: '', model_id: model.value } as any)
-      }
-      optionsData.value = d
-      // 本轮(产出方案选项)已结束、进入「等待用户选择」态: 显式关闭生成中态,
-      // 否则 generating 持续为 true → 停止按钮常驻、输入框被锁、确认选项会被误入队且永不发送。
-      // 后端 requirement_agent 在 options 后直接 return 不 yield done, 故此处主动收尾(兜底 done 到达前也已正确)。
-      generating.value = false
-      finished.value = true
-    },
-    onAlternatives: (d: AlternativesEvent) => {
-      // 非阻塞: 系统已自决 top-1 并继续生成; 仅记录候选供用户随时切换
-      alternativesData.value = d
-      console.log('[SSE] alternatives 已选=%s 可切换=%s', d.selected, d.skills)
-    },
-    onUnsupported: () => {
-      generating.value = false
-      finished.value = true
-      errorMsg.value = '暂不支持此功能，请尝试其他类型请求'
-      clearActiveGen()
-      clearUserStatus()
-    },
-    onClarify: (d) => {
-      // SIR 澄清: 意图模糊/缺规格 → 底部浮动卡片, 含结构化选项 + 自由输入 + 确认按钮
-      generating.value = false
-      finished.value = true
-      // 清掉触发轮留下的空 assistant 占位气泡, 避免界面出现空白气泡
-      const msgs = convStore.messages
-      if (msgs.length && msgs[msgs.length - 1].role === 'assistant' && !msgs[msgs.length - 1].content) {
-        msgs.pop()
-      }
-      clarifyData.value = {
-        questions: d.questions || [],
-        rounds: d.rounds || 0,
-        options: d.options || [],
-        multi: !!d.multi,
-        freeTextHint: d.freeTextHint || '',
-      }
-      clarifySelected.value = []
-      clarifyFreeText.value = ''
-      clearActiveGen()
-      clearUserStatus()
-    },
-    onBlock: (d: BlockEvent) => {
-      generating.value = false
-      finished.value = true
-      blockReason.value = d.reason || '该操作存在高风险，已被安全策略拦截'
-      clearActiveGen()
-      clearUserStatus()
-      clearTrailSnapshot(traceId.value)
-    },
-    onConfirm: (d: ConfirmEvent) => {
-      generating.value = false
-      finished.value = true
-      pendingConfirm.value = {
-        reason: d.reason || '该操作需二次确认',
-        skill: d.skill || '',
-        riskLevel: (d as any).risk_level || 'high',
-        target: (d as any).target || '',
-      }
-      clearActiveGen()
-    },
-    onPaused: (d: any) => {
-      // v4 断点复联: 手动停止 / 断连 → 暂存, 等用户指令(可续跑)
-      if (d.reason === 'user_interrupt' || d.reason === 'offline_timeout') {
-        generating.value = false
-        finished.value = false
-        sending.value = false
-        // 保留 traceId 供 resume 续跑(后端 resume 复用同一 tid 重新入队)
-        v4Pause.value = { tid: traceId.value, reason: d.reason, stage: d.stage || currentStage.value || '?' }
-        return
-      }
-      // 注: 建站「方案确认」(await_confirm) 已在后端移除(D #500/#502), 不再经此暂停,
-      // 因此此处无需处理 await_confirm。其余 paused 阶段(coder_done / reviewer_rN)
-      // 由 Worker 正常 resume, 不会落到前端 pendingConfirm。
-    },
-    onError: (m) => {
-      generating.value = false
-      finished.value = true
-      thoughtSteps.value = []
-      toolTrail.value = []
-      planNodes.value = []
-      errorMsg.value = m
-      clearActiveGen()
-      clearUserStatus()
-      clearTrailSnapshot(traceId.value)
-      v4Pause.value = null
-    },
-    // F5 续接游标: 每个 SSE 事件回传 lastEventId → 存 localStorage 供刷新后 after 续接
-    onEventId: (id: string) => {
-      const us = loadUserStatus()
-      if (us) saveUserStatus({ ...us, after: id })
-    },
-    onQc: (data: QcResult) => {
-      // per-sub-task QC: 带 sub_task_id → 写入对应子任务的 qc 字段(泳道展示 per-sub-task 打分)
-      if (data.sub_task_id) {
-        const st = subTasks.value.find((s) => s.id === data.sub_task_id)
-        if (st) st.qc = data
-        return
-      }
-      // 整体 / 编排 QC: 按当前 trace_id 存入 qcMap, 气泡徽标读取
-      if (traceId.value) qcMap[traceId.value] = data
-    },
-    // ---- 多意图编排事件(P3) ----
-    onOrchestration: (d: OrchestrationEvent) => {
-      isMultiIntent.value = true
-      orchStrategy.value = d.strategy
-      subTasks.value = d.tasks.map((t) => ({ ...t, tokens: '', artifacts: [] }))
-      mergeResult.value = null
-    },
-    onSubtaskStart: (d: SubTaskStartEvent) => {
-      const st = subTasks.value.find((s) => s.id === d.sub_task_id)
-      if (st) {
-        st.status = 'running'
-        st.layer = d.layer
-        st.goal = d.goal
-        st.skill = d.skill
-        st.risk = d.risk
-        // §9: 高亮当前 SOP 阶段(按 skill 映射角色)
-        sopCurrentRole.value = SKILL_TO_ROLE[d.skill] || sopCurrentRole.value
-      }
-    },
-    onSubtaskDone: (d: SubTaskDoneEvent) => {
-      const st = subTasks.value.find((s) => s.id === d.sub_task_id)
-      if (st) {
-        st.status = 'done'
-        st.result_summary = d.result_summary
-        st.artifacts = d.artifacts || []
-      }
-    },
-    onSubtaskFail: (d: SubTaskFailEvent) => {
-      const st = subTasks.value.find((s) => s.id === d.sub_task_id)
-      if (st) {
-        // 状态按原因细分(兜底 5: 风险分级)
-        if (d.reason.includes('高风险')) st.status = 'blocked'
-        else if (d.reason.includes('中风险')) st.status = 'skipped'
-        else st.status = 'failed'
-        st.fail_reason = d.reason
-        st.recoverable = d.recoverable
-      }
-    },
-    onMerge: (d: MergeEvent) => {
-      // 合并正文已在 __merge__ token 流中累积到主气泡; 此处仅记录部分失败清单
-      mergeResult.value = {
-        success_count: d.success_count,
-        fail_count: d.fail_count,
-        failed_tasks: d.failed_tasks,
-      }
-    },
-    // §9: 执行前计划预览(含 SOP 角色链路 badge)
-    onPlanPreview: (d: PlanPreviewEvent) => {
-      planPreview.value = d
-      if (d.roles && d.roles.length) sopCurrentRole.value = d.roles[0]
-    },
-    // §6 D: 取消结构化摘要 → 修正子任务泳道状态 + 渲染摘要卡
-    onCancelSummary: (d: CancelSummaryEvent) => {
-      cancelSummary.value = d
-      for (const st of subTasks.value) {
-        if (d.cancelled.includes(st.id)) st.status = 'cancelled'
-        else if (d.skipped.includes(st.id)) st.status = 'skipped'
-        else if (d.completed.includes(st.id)) st.status = 'done'
-      }
-    },
-    // ---- L2 对话精炼(v0.9.0, #235) ----
-    onRefined: (text: string) => {
-      // refined 事件在 done 前到达: 携带 LLM 去冗余后的终版助手文本。
-      // 用其覆盖主气泡累积内容(站点产物走 artifacts/preview, 此处仅为对话正文精炼),
-      // 避免合并流中的重复/口头禅进入最终展示。
-      const clean = (text || '').trim()
-      if (!clean) return
-      const m = convStore.messages[assistantIdx]
-      if (m) {
-        m.content = clean
-        refinedText.value = clean
-        if (convStore.currentConvId != null) saveDraft(convStore.currentConvId)
-      }
-      console.log('[SSE] refined 终版文本已应用(len=%d)', clean.length)
-    },
-  }
-}
-
-async function loadCurrentProject() {
-  const pid = projectStore.currentProjectId
-  if (pid == null) return
-  await convStore.loadConversations(pid)
-}
-
-async function send() {
-  let text = input.value.trim()
-  if (!text) return
-  // v4 断点复联: 处于「已暂停」态时, 当前输入即续跑指令(从 checkpoint 恢复并带新指令)
-  if (v4Pause.value && !generating.value) {
-    const tid = v4Pause.value.tid
-    v4Pause.value = null
-    if (convStore.currentConvId != null) {
-      await resume(convStore.currentConvId, tid, text)
-    }
-    return
-  }
-  // 防双击重复发送: 仅当内容与上次完全相同 且 sending 锁未释放时才拦截
-  if (sending.value && text === lastSentText.value) return
-  sending.value = true
-  lastSentText.value = text
-  // 非阻塞候选提示激活时, 若输入是选择 token(如 "B"/"2"/"选B") → 直接切换 skill
-  // 对齐后端 pending_options(完整候选列表: [已选top1, ...alts]); "A"=重新确认当前(忽略), "B"=alts[0]
-  if (alternativesData.value && alternativesData.value.skills.length) {
-    const full = [alternativesData.value.selected, ...alternativesData.value.skills]
-    const idx = parseSelectionToken(text)
-    if (idx !== null && idx > 0 && idx < full.length) {
-      const skill = full[idx]
-      input.value = ''
-      alternativesData.value = null
-      console.log('[发送] 命中候选切换 token=%s → skill=%s', text, skill)
-      resendWithSkill(skill)
-      return
-    }
-  }
-  // 方案选项激活中: 解析用户输入是否为选项 token(选A/方案B/1...); 命中直接确认, 否则清卡片后正常发送
-  if (optionsData.value) {
-    if (chooseOption(text)) return
-    optionsData.value = null
-  }
-  // 生成中: 加入队列
-  if (generating.value) { enqueue(text); return }
-  // 安全二次确认激活中(无弹窗, 详情已在气泡内): 用户回复即带 confirmed 重发原 skill(见 resendConfirmed)
-  if (pendingConfirm.value) {
-    pendingConfirm.value = null
-    input.value = ''
-    await resendConfirmed()
-    return
-  }
-  // 鉴权
-  if (!auth.user.value) { pendingSend.value = true; auth.openLogin(); return }
-  input.value = ''
-  await doSend(text)
-}
-
-async function doSend(text: string) {
-  // 同步置位生成态: 必须在首个 await(自动建项目/建会话)之前,
-  // 否则 onDone→dequeueAndSend 的窗口期内 generating 仍为 false, 用户输入会绕过队列直接并发发送。
-  generating.value = true
-  let pid = projectStore.currentProjectId
-
-  // ── Phase 1: 首条对话无项目时, 先走「创建项目」接口, 建好项目+会话 ──
-  // 关键修复(#508): 必须先把 skipProjectWatch 置位、并把 currentProjectId 设好,
-  // 再 await projectStore.load()。否则 load() 发现 currentProjectId 仍为 null 会【自动选中列表里某个旧项目】,
-  // 触发 currentProjectId watcher 重载并清空消息, 把稍后乐观推送的首条消息覆盖掉。
-  // 乐观推送延后到 Phase 2(项目/会话全部就绪之后), 无论 watcher 怎么抢跑, 最后推上去的消息都不会被清掉。
-  let autoStartedConvId: number | null = null
-  if (pid == null) {
-    try {
-      const res = await autoStart(text)
-      // 先置位 + 设好 currentProjectId, 再 load(): 此时 currentProjectId 已非 null,
-      // load() 不会自动选旧项目; 且本处 currentProjectId 变更被 skipProjectWatch 屏蔽, 不触发重载。
-      skipProjectWatch = true
-      projectStore.currentProjectId = res.project.id
-      await projectStore.load()
-      pid = res.project.id
-      autoStartedConvId = res.conversation.id
-      // 直接用 autoStart 返回的会话, 避免重复 create, 也避免 loadConversations 覆盖乐观消息
-      const conv = res.conversation
-      if (!convStore.conversations.some((c) => c.id === conv.id)) {
-        convStore.conversations.unshift(conv)
-      }
-      convStore.currentConvId = conv.id
-      sessionStorage.setItem('activeConv_' + pid, String(conv.id))
-      await loadArtifacts().catch(() => {})
-    } catch {
-      alert('创建项目失败，请稍后重试')
-      return
-    }
-  }
-
-  // ── Phase 2: 项目/会话已就绪, 再乐观推送用户气泡 + assistant 占位, 发真实对话 ──
-  // 判定是否需新建会话: autoStart 已建好会话则不重复 create;
-  // 该判定必须在 push 之前(推送后 messages 永远非空, 无法再用其判断)。
-  const needCreate =
-    autoStartedConvId == null &&
-    (convStore.currentConvId == null || convStore.messages.length === 0)
-  const OPT_CID = -1
-  const baseCid = convStore.currentConvId ?? OPT_CID
-  convStore.currentConvId = baseCid
-  convStore.messages.push({
-    role: 'user',
-    content: text,
-    conversation_id: baseCid,
-    id: 0,
-    created_at: '',
-    model_id: model.value,
-  } as any)
-  convStore.messages.push({
-    role: 'assistant',
-    content: '',
-    conversation_id: baseCid,
-    id: 0,
-    created_at: '',
-    model_id: model.value,
-  } as any)
-
-  if (needCreate) {
-    // 已有项目、需要新建会话: 乐观气泡已先推入, 传 keepMessages=true 让 create 保留并修正 cid,
-    // 否则 create 的网络延迟 + messages.value=[] 会清空气泡。
-    if (!convStore.creating) {
-      await convStore.create(pid, text.slice(0, 20), true)
-    }
-  }
-
-  resetGenState()
-  // 系统收到: 发送瞬间立即反馈, 消除"卡死"焦虑(用户体感第一步, 始终完成态)
-  currentStage.value = 'received'
-  upsertStep('received', 'done')
-  // 发送瞬间即播「正在进行意图分析」(active), 待后端 intent 事件到达再转已识别;
-  // 后端闲聊/casual 路径不会发 analyzing 节点(仅建站/需求类发), 故前端在此统一补齐,
-  // 保证任意意图都有"意图分析"反馈(用户诉求)。
-  upsertStep('analyzing', 'active')
-  traceId.value = genTraceId()
-  const cid = convStore.currentConvId!
-  setActiveGen(cid, traceId.value)
-  // v4 续接: 发送即记录本地 userStatus(running), 供 F5 后据 after 游标续接
-  saveUserStatus({ convId: cid, traceId: traceId.value, status: 'running', after: null })
-
-  // C13 清理: 本地 WebLLM 推理已弃用(v1.0 起统一走服务端), 原死代码块已删除。
-  // 若未来需恢复, 历史实现见 git 历史(src/webllm/* 已一并移除)。
-
-  // 多意图: 全新用户请求, 清空之前累计的已确认子任务
-  confirmedSubtaskIds.value = []
-
-  // assistant 占位已在发送瞬间前置推入(见上方 OPT_CID 段), 这里直接指向最后一条(空 assistant)
-  const assistantIdx = convStore.messages.length - 1
-  generating.value = true
-  lastSentText.value = text
-  input.value = ''
-
-  openEs({
-    model: model.value,
-    traceId: traceId.value,
-    conversationId: cid,
-    q: text,
-    cb: makeCallbacks(assistantIdx),
-  })
-}
-
-// 重连:以同一 traceId 重开 SSE 全量回放(后端命中 stream_exists 则续接,不重新生成)。
-// q 可选: 断点续跑时附带的新指令(手动停止后用户继续输入),后端从 checkpoint 恢复并衔接该指令。
-async function resume(convId: number, tid: string, q?: string) {
-  if (generating.value) return  // 防重复调用(初始挂载的双路径可能触发两次)
-  resetGenState()
-  // 已加载的 assistant 消息内容清空,交由回放重新累积(避免重复)。
-  const idx = findAssistantIdx()
-  if (idx >= 0) convStore.messages[idx].content = ''
-  generating.value = true
-  traceId.value = tid
-  setActiveGen(convId, tid)
-  // 续跑带新指令: 乐观追加用户气泡 + 新的 assistant 占位(回放会重新累积)
-  let assistantIdx = idx
-  if (q) {
-    convStore.messages.push({
-      role: 'user',
-      content: q,
-      conversation_id: convId,
-      id: 0,
-      created_at: '',
-      model_id: model.value,
-    } as any)
-    convStore.messages.push({
-      role: 'assistant',
-      content: '',
-      conversation_id: convId,
-      id: 0,
-      created_at: '',
-      model_id: model.value,
-    } as any)
-    assistantIdx = convStore.messages.length - 1
-    input.value = ''
-  }
-  openEs({
-    model: model.value,
-    traceId: tid,
-    conversationId: convId,
-    ...(q ? { q } : {}),
-    resume: true,
-    cb: makeCallbacks(assistantIdx),
-  })
-  armReconnectGuard()
-}
-
-// 若当前存在未完成的 active 生成,则重连恢复(刷新/切会话时调用)。
-// v4 续接: 刷新不暂停后端 —— 据 localStorage 的 userStatus 判定, 若仍在 running/paused,
-// 用记录的 after 游标重新订阅 /api/chat(不带 q/resume), 后端命中 stream_exists 则回放+续实时。
-async function maybeResume() {
-  const us = loadUserStatus()
-  if (!us || generating.value) return
-  if (us.status !== 'running' && us.status !== 'paused') { clearUserStatus(); return }
-  if (convStore.currentConvId !== us.convId && projectStore.currentProjectId != null) {
-    await convStore.loadConversations(projectStore.currentProjectId)
-  }
-  // 后端最终核定: 以防 localStorage 残留 running 但任务早已跑完(产物已落库 / trace 已终态)。
-  // 不核实直接 resumeStream 会拉起「死流回放」, 导致刷新后永远显示"还在跑"且 raw-stream 占位卡死。
-  // 后端说已不 running → 清残留态、判完成, 不续播。
-  try {
-    const resp = await fetch(`/api/conversations/${us.convId}/status`)
-    const s = await resp.json()
-    if (s.status !== 'running' || !s.active_trace_id) {
-      clearUserStatus()
-      const aIdx = findAssistantIdx()
-      if (aIdx >= 0 && !convStore.messages[aIdx].content) {
-        // 无正文又无在途流: 不残留空白占位, 直接判完成态
-      }
-      finished.value = true
-      return
-    }
-  } catch { /* 核实失败: 退化为原续接行为, 不阻断 */ }
-  resumeStream(us.convId, us.traceId, us.after)
-  // P5: 关页后重开, 先按 trace_id 恢复执行轨迹 UI 快照, 等 SSE 续接事件到来后再增量更新
-  applyTrailSnapshot(us.traceId)
-  // 重新拉取产物, 让 COS 上传状态经 watch(cosUploading/cosFailed) 自动恢复轮询
-  void loadArtifacts().catch(() => {})
-}
-
-// 续接在跑的流(F5 刷新/重开/切会话): 不带 q/resume, 后端 stream_exists 命中则回放历史并续接实时。
-// 区别于 resume()(断点续跑: resume:true 删旧流重新入队, 用于用户主动暂停后继续)。
-async function resumeStream(convId: number, tid: string, after?: string | null) {
-  if (generating.value) return
-  resetGenState()
-  const idx = findAssistantIdx()
-  // v5 续接修复: 带 after 游标 = 增量回放(后端只回放 after 之后的内容),
-  // 必须保留已收到的本地草稿内容并追加, 严禁先清空 —— 否则流已消失时空 done
-  // 会把消息清成空白(根因: 刷新时生成的 assistant 内容只在死进程内存/本地草稿,
-  // 后端 proxy.py:1174 流消失守卫只发空 done 不带历史, store 合并保护依赖本地内容未被清)。
-  // 仅当 after 为空(全量回放)才清空占位, 避免重复渲染。
-  if (idx >= 0 && !after) convStore.messages[idx].content = ''
-  generating.value = true
-  traceId.value = tid
-  setActiveGen(convId, tid)
-  let assistantIdx = idx
-  if (assistantIdx < 0) {
-    convStore.messages.push({
-      role: 'assistant', content: '', conversation_id: convId, id: 0,
-      created_at: '', model_id: model.value,
-    } as any)
-    assistantIdx = convStore.messages.length - 1
-  }
-  openEs({
-    model: model.value,
-    traceId: tid,
-    conversationId: convId,
-    ...(after ? { after } : {}),
-    cb: makeCallbacks(assistantIdx),
-  })
-  armReconnectGuard()
-}
-
-// v4 断点复联: 离开页面(新标签)后重开, 据 my-info 恢复「已暂停」横幅(区别于同标签刷新的 maybeResume)。
-// 同标签刷新: sessionStorage 仍有 activeGen → 走 maybeResume 无缝续跑; 此处仅处理新标签场景。
-async function restoreFromMyInfo() {
-  if (!auth.user.value) return
-  if (loadUserStatus()) return  // 已由 maybeResume(localStorage)处理, 避免重复续跑
-  if (getActiveGen()) return  // 同标签刷新: 交由 maybeResume 处理, 避免重复续跑
-  let info: MyInfoResp
-  try {
-    info = await myInfo()
-  } catch {
-    return
-  }
-  if (!info.needs_resume) return
-  const { current_project_id: pid, current_conversation_id: cid, active_trace_id: tid, status } = info
-  if (pid == null || cid == null || !tid) return
-  // 定位到上次操作的项目/会话
-  if (projectStore.currentProjectId !== pid) {
-    projectStore.currentProjectId = pid
-    await convStore.loadConversations(pid)
-  } else if (convStore.currentConvId !== cid) {
-    await convStore.loadConversations(pid)
-  }
-  convStore.currentConvId = cid
-  // 加载该会话历史消息, 便于用户看到暂停前的上下文
-  try {
-    const c = await getConversation(cid)
-    if (c?.messages) convStore.messages = c.messages
-  } catch { /* 忽略 */ }
-  if (status === 'paused') {
-    // 展示「已暂停」横幅, 等用户输入指令续跑(不自动重连执行, 避免意外继续)
-    v4Pause.value = { tid, reason: info.pause_reason || 'offline_timeout', stage: info.current_stage || '?' }
-  } else if (status === 'running') {
-    // 极端竞态(断连尚未翻 paused): 直接续跑
-    await resume(cid, tid)
-  }
-  // P5: 新标签重开, 据 trace_id 恢复执行轨迹 UI 快照(含 await_confirm 方案卡)
-  applyTrailSnapshot(tid)
-}
-
-// v4 断点复联: 「已暂停」横幅「继续」按钮 —— 带当前输入(或仅续跑)从 checkpoint 恢复
-async function continueV4Pause() {
-  const p = v4Pause.value
-  if (!p) return
-  const text = input.value.trim()
-  v4Pause.value = null
-  if (convStore.currentConvId == null) return
-  if (text) await resume(convStore.currentConvId, p.tid, text)
-  else await resume(convStore.currentConvId, p.tid)
-}
-
-// v4 断点复联: 「已暂停」横幅「放弃」按钮 —— 级联取消 Worker + 标记会话已放弃
-async function abortV4Pause() {
-  const p = v4Pause.value
-  if (!p) return
-  try { if (p.tid) await cancelChat(p.tid) } catch { /* 忽略 */ }
-  v4Pause.value = null
-  generating.value = false
-  if (convStore.currentConvId != null) {
-    try {
-      await patch(`/api/conversations/${convStore.currentConvId}`, { status: 'aborted', checkpoint_data: null })
-    } catch { /* 忽略 */ }
-    if (projectStore.currentProjectId) await convStore.loadConversations(projectStore.currentProjectId)
-  }
-}
-
-async function stop() {
-  if (!generating.value) return
-  // 立即停止生成: 通知后端 cancel(Worker 在 token/阶段前立即中断),
-  // 并立即收口前端 UI —— 不等待后端 aborted 事件, 保证「点击即停」的反馈。
-  cancelling.value = true
-  try { if (traceId.value) await cancelChat(traceId.value) } catch { /* 忽略取消请求失败 */ }
-  generating.value = false
-  sending.value = false
-  finished.value = true
-  esRef.value?.close()
-  esRef.value = null
-  clearActiveGen()
-  clearUserStatus()
-  v4Pause.value = null
-  cancelling.value = false
-  if (projectStore.currentProjectId) {
-    convStore.loadConversations(projectStore.currentProjectId).then(() => scrollToBottom(false))
-  }
-  dequeueAndSend()
-}
-
-// v4 生成中「放弃」入口已移除: 与「停止」(pause 可续跑)语义重复, 仅保留「停止」。
-// 已暂停会话的「放弃」保留在 v4 横幅(abortV4Pause)。
-
-// 气泡内多维度评价提交(v0.8.5 M1): 按 trace_id 存储, 落库 + 前端即时反馈
-async function onRate(tid: string, p: { rating: number; comment: string; dimensions: RatingDims }) {
-  if (!tid) return
-  const ok = await sendFeedback(
-    tid,
-    p.rating,
-    convStore.currentConvId ?? undefined,
-    p.comment || undefined,
-    p.dimensions,
-  )
-  if (ok) {
-    ratedMap[tid] = { rating: p.rating, dims: p.dimensions || {}, comment: p.comment || '' }
-  }
-}
-
-function copyPreviewLink() {
-  const url = previewUrl.value
-  if (!url) return
-  navigator.clipboard.writeText(url).catch(() => {
-    // fallback: select and copy
-    const t = document.createElement('textarea')
-    t.value = url
-    document.body.appendChild(t)
-    t.select()
-    document.execCommand('copy')
-    document.body.removeChild(t)
-  })
-  alert('预览链接已复制到剪贴板')
-}
-
 onMounted(async () => {
   await auth.init()
-  const m = await fetchModels()
-  if (m.length) models.value = m
-  // WebLLM 后台预热 —— v1.0 弃用, 跳过
-  // import('../webllm/engine').then(({ initEngine }) => {
-  //   initEngine((pct) => {
-  //     if (pct === 100) console.log('[WebLLM] 就绪')
-  //     else if (pct % 10 === 0) console.log(`[WebLLM] 下载 ${pct}%`)
-  //   })
-  // }).catch(() => {})
-  if (auth.user.value) {
-    await projectStore.load()
-    await loadCurrentProject()
-    await loadArtifacts()
-    await nextTick(() => { setupScrollLoading(); scrollToBottom(false); handleSearchNav() })
-    // 恢复未完成的本地草稿(刷新/崩溃后)
-    if (loadDraft()) scrollToBottom(false)
-    await maybeResume()
-    // v4 断点复联: 离开页面后重开(新标签)时, 据 my-info 恢复「已暂停」横幅(不自动重连执行)
-    await restoreFromMyInfo()
-  }
+  if (!auth.user.value) return
+  await projectStore.load()
+  if (projectStore.currentProjectId != null) await convStore.loadConversations(projectStore.currentProjectId)
+  await loadArtifacts()
+  await restorePendingApproval()
+  await replaySavedStream()
+  scrollToBottom()
 })
-onUnmounted(() => { teardownScrollLoading() })
 
-watch(
-  () => projectStore.currentProjectId,
-  async (id) => {
-    // autoStart 内部建项目: 本轮变更由 doSend/doSendClarified 自行设置好 convStore,
-    // 跳过整段重载, 避免 loadConversations 的 switching 分支清空刚乐观推送的用户气泡,
-    // 也避免 resetGenState 误清掉进行中的 trail-wrap(导致首条消息闪一下才出现)。
-    if (skipProjectWatch) { skipProjectWatch = false; return }
-    if (id != null) {
-      // 记录旧项目的 active gen(供跨项目判断, 不在本 watch 内 clear——留到 maybeResume 使用)
-      const prevAg = getActiveGen()
-
-      // 清理旧项目的生成 UI 状态(trail-wrap 等), 但不碰 sessionStorage 的 active gen
-      resetGenState()
-      generating.value = false
-
-      requirementDoc.value = null  // 切换项目, 先清空旧项目的需求文档
-      await convStore.loadConversations(id)
-      // 空项目: 没有会话则清空消息和当前会话 id, 确保干净渲染
-      if (convStore.conversations.length === 0) {
-        convStore.messages = []
-        convStore.currentConvId = null
-      }
-      await loadArtifacts()
-      await nextTick(() => { setupScrollLoading(); scrollToBottom(false); handleSearchNav() })
-
-      // 跨项目恢复: 仅当 active gen 属于当前项目时才断点续传; 不属于则安全关闭旧 SSE 并清除
-      if (prevAg) {
-        const belongsToCurrent = convStore.conversations.some(c => c.id === prevAg.convId)
-        if (belongsToCurrent) {
-          await resume(prevAg.convId, prevAg.traceId)
-        } else {
-          esRef.value?.close()
-          clearActiveGen()
-        }
-      }
-    }
-  },
-)
-
-/* 搜索跳转: 从 sessionStorage 读取导航目标, 滚动到指定消息 */
-function handleSearchNav() {
-  const convId = sessionStorage.getItem('nav_conv')
-  const msgId = sessionStorage.getItem('nav_msg')
-  if (!convId) return
-  sessionStorage.removeItem('nav_conv')
-  sessionStorage.removeItem('nav_msg')
-  // 切换到目标会话(如果不在当前会话)
-  if (convStore.currentConvId !== Number(convId)) {
-    convStore.currentConvId = Number(convId)
-    // 加载该会话的消息
-    const conv = convStore.conversations.find(c => c.id === Number(convId))
-    if (conv) {
-      getConversation(conv.id).then(c => {
-        if (c.messages) convStore.messages = c.messages
-        scrollToMsgId(msgId)
-      })
-    }
-    return
-  }
-  scrollToMsgId(msgId)
-}
-
-function scrollToMsgId(msgId: string | null) {
-  if (!msgId) return
-  nextTick(() => {
-    const el = document.querySelector(`[data-msg-id="${msgId}"]`)
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      el.classList.add('highlight-flash')
-      setTimeout(() => el.classList.remove('highlight-flash'), 2000)
-    }
-  })
-}
-
-watch(
-  () => convStore.pendingConvId,
-  async (id) => {
-    if (id != null && projectStore.currentProjectId != null) {
-      await convStore.loadConversations(projectStore.currentProjectId)
-      convStore.pendingConvId = null
-      autoScroll = true
-      scrollToBottom(false, true)
-      await maybeResume()
-    }
-  },
-)
-
-watch(
-  () => auth.user,
-  (u) => {
-    // 登录成功后关闭登录框,加载项目/会话;若此前是"未登录点发送"则自动重发
-    if (u) {
-      auth.closeLogin()
-      projectStore.load().then(() => loadCurrentProject())
-      if (pendingSend.value) {
-        pendingSend.value = false
-        send()
-      }
-    } else {
-      // 软登出: 关闭进行中的 SSE,避免带着旧身份继续流;清空会话/消息态
-      esRef.value?.close()
-      esRef.value = null
-      convStore.reset?.()
-    }
-  },
-)
-
-// 模型不可用时弹框让用户选替代模型
-async function handleRetryChoice(newModel: string) {
-  if (!pendingRetry.value) return
-  pendingRetry.value = null
-  // 移除上次发送失败的消息(user + 空 assistant)
-  const msgs = convStore.messages
-  while (msgs.length && msgs[msgs.length - 1].role === 'assistant') msgs.pop()
-  if (msgs.length && msgs[msgs.length - 1].role === 'user') msgs.pop()
-  model.value = newModel
-  // 恢复原输入并重新发送
-  const text = lastSentText.value
-  if (!text) return
-  input.value = text
-  send()
-}
-
-watch(pendingRetry, (r) => {
-  if (!r || !r.suggested.length) return
-  const first = r.suggested[0]
-  const show = window.confirm(
-    `${r.message}\n\n是否切换到「${first}」重试？` +
-    (r.suggested.length > 1 ? `\n(也可手动选择: ${r.suggested.join(', ')})` : ''),
-  )
-  if (show) handleRetryChoice(first)
-  else pendingRetry.value = null
+onUnmounted(() => {
+  subscription.value?.abort()
+  replaySubscription.value?.abort()
 })
+
+watch(() => projectStore.currentProjectId, async (projectId) => {
+  if (projectId == null) return
+  await convStore.loadConversations(projectId)
+  await loadArtifacts()
+  activeAssistant.value = null
+  scrollToBottom()
+})
+
+watch(() => stream.response, scrollToBottom)
 </script>
 
 <template>
   <div class="chat">
-    <div class="left-col" :class="{ full: rightCollapsed }">
-      <div class="conv-bar">
-        <span class="proj"><Icon name="folder" :size="16" /></span>
-        <span v-if="!editingProject" class="proj-name">{{ currentProjectName }}</span>
-        <input
-          v-else
-          ref="projInput"
-          v-model="editProjectName"
-          class="proj-input"
-          @keyup.enter="saveProjectName"
-          @blur="saveProjectName"
-          @keyup.escape="editingProject = false"
-        />
-        <button class="proj-edit" title="修改项目名" data-track="重命名项目" @click="startEditProject"><Icon name="edit" :size="15" /></button>
-        <span class="proj-date">{{ currentProjectDate }}</span>
-      </div>
-
-      <!-- 断点续跑横幅(§7, await_confirm 方案确认场景) -->
-      <div v-if="pausedConv" class="paused-banner">
-        <span>⚠ 未完成的生成 · {{ pausedConv.checkpoint_stage || '?' }} · 已完成 {{ pausedConv.progress_pct || 0 }}%</span>
-        <button class="paused-resume" @click="resumeConversation">继续生成</button>
-        <button class="paused-abort" @click="abortPaused">放弃</button>
-      </div>
-
-      <!-- v4 断点复联横幅: 手动停止 / 断连 后的「已暂停」态 -->
-      <div v-if="v4Pause" class="paused-banner v4-pause">
-        <span>⏸ 已暂停{{ v4Pause.reason === 'user_interrupt' ? '（手动停止）' : '（连接中断）' }} · 阶段 {{ v4Pause.stage }} · 在下方输入指令可继续</span>
-        <button class="paused-resume" @click="continueV4Pause">继续</button>
-        <button class="paused-abort" @click="abortV4Pause">放弃</button>
-      </div>
-
-      <div ref="convRef" class="conv" @scroll="onConvScroll">
-        <div v-if="convStore.loadingMore" class="loading-more">加载更早的会话…</div>
-        <div ref="sentinel" class="sentinel"></div>
-
-        <!-- 全新项目无任何会话 -->
-        <div v-if="convStore.conversations.length === 0" class="empty">
-          在下方输入你想做的事，AI 会智能识别意图并给出回复。
+    <section class="thread-panel">
+      <header class="chat-header">
+        <div>
+          <span class="eyebrow">{{ projectStore.currentProjectId ? '当前项目' : '新对话' }}</span>
+          <h1>{{ projectStore.projects.find((project) => project.id === projectStore.currentProjectId)?.name || '开始构建' }}</h1>
         </div>
+        <span v-if="stream.turnId" class="turn-id">Turn {{ stream.turnId.slice(0, 8) }}</span>
+      </header>
 
-        <!-- 所有会话统一消息流(当前+历史同一格式, 会话间仅 thin 分割线) -->
-        <template v-for="(s, si) in allSessions" :key="s.conv.id">
-          <div v-if="si > 0" class="session-divider">
-            <span>{{ s.conv.name || '会话' }} · {{ s.conv.updated_at?.slice(0, 10) || '' }}</span>
-          </div>
-          <div v-if="s.loading" class="loading-more">加载中…</div>
-          <MessageBubble
-            v-for="(m, i) in s.msgs"
-            :key="`s${si}-${i}`"
-            :data-msg-id="m.id"
-            :role="m.role"
-            :content="m.content"
-            :time="m.role === 'user' ? (m.created_at || '') : ''"
-            :trace-id="m.trace_id || undefined"
-            :qc="m.trace_id ? (qcMap[m.trace_id] ?? null) : null"
-            :my-rating="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].rating : null"
-            :my-dims="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].dims : null"
-            :my-comment="m.trace_id && ratedMap[m.trace_id] ? ratedMap[m.trace_id].comment : null"
-            :can-rate="!!auth.user"
-            :streaming="streamingMsgKey === 's' + si + '-' + i"
-            @rate="(p) => m.trace_id && onRate(m.trace_id, p)"
-            @open-file="(name) => openArtifact(name, 'file')"
-          >
-            <!-- P1/P2: 执行轨迹 / 子任务 track / 取消摘要 / COS / 二次确认详情 全部内嵌进宿主 assistant 气泡 -->
-            <template v-if="activeTrailKey === 's' + si + '-' + i" #trail>
-              <div class="trail-wrap-inline">
-                <!-- 合并: 实时阶段头 + 思考(原 live-think 块) 与下方 ThoughtTrail 合成一块连贯执行面板 -->
-                <div v-if="streamingMsgKey === 's' + si + '-' + i" class="exec-head">
-                  <div class="exec-row">
-                    <span class="recv-chip">✅ 已收到</span>
-                    <span class="exec-pulse"></span>
-                    <span class="exec-badge">{{ execIntentLabel || streamingStageLabel }}</span>
-                    <span v-if="execIndustry" class="exec-tag">行业·{{ industryLabel(execIndustry) }}</span>
-                    <span v-if="execConfidence != null" class="exec-tag exec-tag--conf">
-                      置信 {{ Math.round(execConfidence * 100) }}%
-                    </span>
-                    <span class="exec-timer">⏱ {{ execElapsedText }}</span>
-                  </div>
-                  <div v-if="liveThinkText" class="exec-body">{{ liveThinkText }}</div>
-                  <div v-else class="exec-body exec-placeholder">{{ streamingStageLabel }}</div>
-                  <!-- B(#488): COS 上传进度条(exec-head 内实时「📤 上传中 NN%」) -->
-                  <div v-if="cosUploadingActive" class="cos-progress">
-                    <span class="cos-icon">📤</span>
-                    <span class="cos-label">正在上传{{ cosUploadFile ? '：' + cosUploadFile : '' }} {{ cosUploadPct }}%</span>
-                    <span class="cos-bar"><i :style="{ width: cosUploadPct + '%' }"></i></span>
-                  </div>
-                </div>
-                <!-- 正在生成中的文件: 文件名跑马灯占位 + loading 骨架屏(不含文件内容) -->
-                <div v-if="genFileName" class="gen-file-card" :class="{ done: !genLoading }">
-                  <div class="gen-marquee">
-                    <span class="gen-ico">{{ genLoading ? '⚙️' : '✅' }}</span>
-                    <div class="gen-marquee-viewport">
-                      <span class="gen-fname">{{ genLoading ? '正在生成' : '已生成' }}：{{ genFileName }}</span>
-                      <span class="gen-fname gen-fname--dup" aria-hidden="true">{{ genLoading ? '正在生成' : '已生成' }}：{{ genFileName }}</span>
-                    </div>
-                  </div>
-                  <div v-if="genLoading" class="gen-skeleton">
-                    <span class="sk sk-1"></span>
-                    <span class="sk sk-2"></span>
-                    <span class="sk sk-3"></span>
-                  </div>
-                </div>
-                <!-- §9: 执行前计划预览卡(与 SubTaskTrack 同款视觉: 头部 + 单条子任务泳道) -->
-                <div v-if="planPreview" class="plan-preview">
-                  <div class="pp-head">
-                    <span class="pp-icon">🧭</span>
-                    <div>
-                      <div class="pp-title">{{ planPreview.title || '执行计划' }}</div>
-                      <div v-if="planPreview.note" class="pp-note">{{ planPreview.note }}</div>
-                    </div>
-                  </div>
-                  <!-- 正在执行的意图, 渲染成与 SubTaskTrack 同构的一条 lane -->
-                  <div v-if="previewLane" class="lane" :class="previewLane.status">
-                    <div class="lane-top">
-                      <span class="status-icon" :class="previewLane.status">{{ previewLane.status === 'running' ? '⟳' : '✓' }}</span>
-                      <span class="goal" :title="previewLane.goal">{{ previewLane.goal }}</span>
-                      <span v-if="previewLane.roleLabel" class="role-tag">{{ previewLane.roleLabel }}</span>
-                      <span class="status-label" :class="previewLane.status">{{ previewLane.status === 'running' ? '执行中' : '已完成' }}</span>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- §6 D: 取消结构化摘要卡 -->
-                <div v-if="cancelSummary" class="cancel-summary">
-                  <div class="cs-head">⏹ 已取消 · 执行摘要</div>
-                  <div class="cs-body">
-                    <span class="cs-chip done">✓ 已完成 {{ cancelSummary.completed.length }}</span>
-                    <span class="cs-chip cancelled">⏹ 已取消 {{ cancelSummary.cancelled.length }}</span>
-                    <span class="cs-chip skipped">⤼ 已跳过 {{ cancelSummary.skipped.length }}</span>
-                  </div>
-                  <ul v-if="cancelSummary.cancelled.length || cancelSummary.skipped.length" class="cs-list">
-                    <li v-for="id in cancelSummary.cancelled" :key="'c-' + id" class="cs-item cancelled">
-                      已取消: {{ id }}
-                    </li>
-                    <li v-for="id in cancelSummary.skipped" :key="'s-' + id" class="cs-item skipped">
-                      未执行(已跳过): {{ id }}
-                    </li>
-                  </ul>
-                </div>
-
-                <ThoughtTrail
-                  v-if="!isMultiIntent"
-                  :steps="thoughtSteps"
-                  :tool-trail="toolTrail"
-                  :plans="planNodes"
-                  :degraded="degraded"
-                  :degraded-reason="degradedReason"
-                  :switch-model-info="switchModelInfo"
-                  :current="currentStage"
-                  :intent="currentIntent"
-                  :current-role="sopCurrentRole"
-                />
-                <template v-else>
-                  <SubTaskTrack
-                    v-if="generating && !mergeResult"
-                    :subtasks="subTasks"
-                    :strategy="orchStrategy"
-                    @confirm="confirmSubTask"
-                  />
-                  <MergedResult
-                    v-if="mergeResult"
-                    :success-count="mergeResult.success_count"
-                    :fail-count="mergeResult.fail_count"
-                    :failed-tasks="mergeResult.failed_tasks"
-                  />
-                </template>
-
-                <!-- COS 上传状态: 生成完成后产物直传对象存储, 进度/失败在同一卡片内显示 -->
-                <div v-if="cosUploading || cosFailed" class="cos-trail">
-                  <div v-if="cosUploading" class="cos-row uploading">
-                    <span class="cos-spinner"></span>
-                    <span>COS 上传中…（{{ cosUploadingList.length }} 个文件）</span>
-                  </div>
-                  <div v-if="cosFailed" class="cos-row failed">
-                    <span>⚠ {{ cosFailedList.length }} 个文件上传失败</span>
-                    <button class="cos-retry-btn" type="button" @click="retryCosUpload">重试</button>
-                  </div>
-                </div>
-
-                <!-- 安全二次确认(删除项目/高危拦截): 详情内嵌气泡, 用户用文字(如「确认」)继续。
-                     注: 建站「方案确认」(await_confirm) 已在后端移除(D #500/#502), 此处不再渲染方案卡。 -->
-                <div v-if="pendingConfirm" class="confirm-card-in-bubble">
-                  <div class="cp-title">
-                    ⚠️ 安全确认
-                    <span
-                      class="cp-risk"
-                      :class="pendingConfirm.riskLevel === 'high' ? 'risk-high' : 'risk-medium'"
-                    >{{ pendingConfirm.riskLevel === 'high' ? '高风险' : '中风险' }}</span>
-                  </div>
-                  <div class="cp-body">
-                    <div class="cp-goal">{{ pendingConfirm.reason }}</div>
-                  </div>
-                  <div class="cp-hint">请在下方对话框回复「确认」或「继续」以放行；回复其他内容则取消本次操作。</div>
-                </div>
-                <!-- 选项选择内嵌气泡(无弹窗): 选项只读展示, 用户在下方对话框用文字(选A/方案B/1)确认 -->
-                <div v-if="optionsData" class="options-card-in-bubble">
-                  <div class="oc-title">{{ optionsData.question || '请选择方案' }}</div>
-                  <div
-                    v-for="c in optionsData.choices"
-                    :key="c.id"
-                    class="oc-choice"
-                  >
-                    <div class="oc-info">
-                      <div class="oc-name">{{ c.id }}. {{ c.title }}</div>
-                      <div v-if="c.desc" class="oc-desc">{{ c.desc }}</div>
-                      <div v-if="c.pros" class="oc-pros">✅ {{ c.pros }}</div>
-                      <div v-if="c.cons" class="oc-cons">⚠️ {{ c.cons }}</div>
-                    </div>
-                  </div>
-                  <div class="oc-hint">请在下方对话框输入「选A」/「选B」/「选C」确认，或直接补充要求重新发送。</div>
-                </div>
-              </div>
-            </template>
-          </MessageBubble>
-
-          <!-- 当前会话内联执行 UI 已移入宿主 assistant 气泡(见上方 MessageBubble 的 #trail 插槽, P1) -->
-        </template>
-
-        <!-- 生成完成的产物清单: 文字反馈 + 点击在右侧预览面板打开。
-             关键契约: 仅在 finished && !generating 时显示, 避免与"正在生成"状态叠加
-             (否则用户同时看到『生成完成卡片』和『仍在跑/raw-stream』, 状态自相矛盾)。 -->
-        <div v-if="finished && !generating && artifactLinks.length" class="artifact-summary-card">
-          <div class="asc-head">✅ 生成完成 · 共 {{ artifactLinks.length }} 项产物</div>
-          <div class="asc-hint">
-            点击下方任意文件，即可在右侧预览面板查看（HTML 实时渲染 · 需求文档原文 · 代码高亮）。
-          </div>
-          <div class="asc-list">
-            <button
-              v-for="link in artifactLinks"
-              :key="link.name + link.kind"
-              type="button"
-              class="asc-item"
-              @click="openArtifact(link.name, link.kind)"
-            >
-              <span class="asc-icon">{{ link.icon }}</span>
-              <span class="asc-name">{{ link.name }}</span>
-              <span v-if="link.kind === 'requirement'" class="asc-dl" title="下载 .md" @click.stop="downloadReqDoc()">⬇</span>
-              <span class="asc-open">打开 ↗</span>
-            </button>
-          </div>
+      <main ref="convRef" class="conversation">
+        <div v-if="!convStore.messages.length" class="empty-state">
+          描述你的目标；系统会在执行过程中展示阶段、任务、工具和审批状态。
         </div>
-      </div>
+        <MessageBubble
+          v-for="(message, index) in convStore.messages"
+          :key="`${message.id}-${index}`"
+          :role="message.role"
+          :content="message.content"
+          :time="message.created_at"
+          :streaming="message === activeAssistant && generating"
+          :can-rate="false"
+        >
+          <template v-if="message === activeAssistant && hasLivePanel" #trail>
+            <StageRail :stages="stream.stages" :show-development="import.meta.env.DEV" />
+            <ActivityPanel
+              :activities="stream.activities"
+              :capability-notices="stream.capabilityNotices"
+              :usage="stream.usage"
+            />
+            <div v-if="stream.attemptOutputs.length" class="attempt-output">
+              <b>本次尝试输出</b>
+              <p v-for="(output, outputIndex) in stream.attemptOutputs" :key="outputIndex">{{ output }}</p>
+            </div>
+            <ApprovalCard
+              v-if="stream.approval"
+              :approval="stream.approval"
+              :submitting="approvalSubmitting"
+              @decision="decideApproval"
+            />
+            <div v-if="stream.suspended" class="suspended">{{ suspendedText }}</div>
+          </template>
+        </MessageBubble>
+      </main>
 
-      <div class="footer">
-        <!-- 消息队列(生成中等待发送) -->
-        <div v-if="queueVisible" class="queue-bar">
-          <div class="queue-head">⏳ 等待发送 ({{ msgQueue.length }})</div>
-          <div v-for="(q, i) in msgQueue" :key="i" class="queue-row">
-            <span class="queue-seq">#{{ i + 1 }}</span>
-            <template v-if="q.editing">
-              <input
-                :ref="(el: any) => el && q.editing && (el as HTMLInputElement).focus()"
-                class="queue-input"
-                :value="q.text"
-                @keyup.enter="saveQueueItem(i, ($event.target as HTMLInputElement).value)"
-                @blur="saveQueueItem(i, ($event.target as HTMLInputElement).value)"
-                @keyup.escape="q.editing = false"
-              />
-            </template>
-            <template v-else>
-              <span class="queue-text">{{ q.text }}</span>
-            </template>
-            <span class="queue-actions">
-              <button class="qbtn" title="立即发送" @click="sendNowQueueItem(i)"><Icon name="play" :size="14" /></button>
-              <button class="qbtn" title="编辑" @click="editQueueItem(i)"><Icon name="edit" :size="14" /></button>
-              <button class="qbtn qdel" title="删除" @click="deleteQueueItem(i)">✕</button>
-            </span>
-          </div>
-        </div>
-        <!-- q-2: 预设模板卡(无项目 + 空输入时展示, 一键带结构化需求) -->
-        <div v-if="showTemplates" class="tpl-cards">
-          <div class="tpl-cards-head">✨ 选个模板快速开始（点击填入需求，可再微调）</div>
-          <div class="tpl-grid">
-            <button
-              v-for="t in SITE_TEMPLATES"
-              :key="t.key"
-              type="button"
-              class="tpl-card"
-              @click="applyTemplate(t)"
-            >
-              <span class="tpl-icon">{{ t.icon }}</span>
-              <span class="tpl-title">{{ t.title }}</span>
-              <span class="tpl-desc">{{ t.desc }}</span>
-            </button>
-          </div>
-        </div>
+      <footer class="composer">
+        <p v-if="replaying" class="status-line">正在补齐缺失的流事件…</p>
+        <p v-if="errorMessage || streamErrorText" class="error-line">{{ errorMessage || streamErrorText }}</p>
         <ChatInput
           v-model:value="input"
           v-model:model="model"
           :generating="generating"
-          :cancelling="cancelling"
+          :cancelling="stopping"
           :models="models"
           @send="send"
           @stop="stop"
         />
-        <div v-if="errorMsg" class="error">⚠ {{ errorMsg }}</div>
-        <!-- 非阻塞候选提示: 系统已自决 top1 并继续, 列出可切换候选(可点击或输入"用 X"/"B") -->
-        <div v-if="alternativesData && alternativesData.skills.length" class="alts-bar">
-          <span class="alts-label">已选 <b>{{ alternativesData.selected }}</b></span>
-          <span class="alts-sep">·</span>
-          <span class="alts-hint">可切换：</span>
-          <button
-            v-for="(sk, i) in alternativesData.skills"
-            :key="sk"
-            class="alts-chip"
-            @click="resendWithSkill(sk)"
-          >{{ String.fromCharCode(66 + i) }}. {{ sk }}</button>
-          <span class="alts-tip">（输入字母如「B」或「用 {{ alternativesData.skills[0] }}」也可切换）</span>
-        </div>
-        <!-- SIR 澄清卡(底部浮动面板): 结构化选项 + 自由输入 + 确认按钮, 不影响原页面布局 -->
-        <Teleport to="body">
-          <transition name="clarify-pop">
-            <div v-if="clarifyData" class="clarify-panel">
-              <div class="clarify-panel-inner">
-                <div class="clarify-head">💬 为了更精准地帮你，请补充以下信息</div>
-                <ul v-if="clarifyData.questions.length" class="clarify-list">
-                  <li v-for="(q, i) in clarifyData.questions" :key="i">{{ q }}</li>
-                </ul>
-                <div
-v-if="clarifyData.options.length" class="clarify-options"
-                     :class="clarifyData.multi ? 'is-multi' : 'is-single'">
-                  <label
-v-for="(opt, i) in clarifyData.options" :key="i"
-                         class="clarify-opt" :class="{ on: clarifySelected.includes(i) }">
-                    <input
-v-if="clarifyData.multi" v-model="clarifySelected" type="checkbox"
-                           :value="i" class="clarify-opt-input" />
-                    <input
-v-else type="radio" name="clarifyOpt" :value="i"
-                           :checked="clarifySelected.includes(i)"
-                           class="clarify-opt-input" @change="clarifySelected = [i]" />
-                    <span class="clarify-opt-label">{{ opt.label }}</span>
-                    <span v-if="opt.recommended" class="clarify-badge">推荐</span>
-                  </label>
-                </div>
-                <textarea
-v-model="clarifyFreeText" class="clarify-free"
-                          :placeholder="clarifyData.freeTextHint || '有其他要求？也可以直接在这里补充…'"
-                          rows="2"></textarea>
-                <div class="clarify-actions">
-                  <button class="clarify-skip" @click="clarifyData = null">✕ 暂不补充</button>
-                  <button
-class="clarify-confirm"
-                          :disabled="!clarifySelected.length && !clarifyFreeText.trim()"
-                          @click="confirmClarify">✅ 确认并继续</button>
-                </div>
-              </div>
-            </div>
-          </transition>
-        </Teleport>
-        <!-- 高危拦截提示(安全 critical, 不可绕过) -->
-        <div v-if="blockReason" class="error block-warn">
-          🛑 高危操作已被拦截：{{ blockReason }}
-          <button class="pob-clear" @click="blockReason = ''">✕ 我知道了</button>
-        </div>
-        <div v-if="finished && !errorMsg && !blockReason" class="feedback">
-          <span class="rate-hint-text">评分已移到每条 AI 回复气泡内，点击「⭐ 评价」即可多维度打分</span>
-          <button
-            v-if="previewUrl"
-            class="copy-link"
-            title="复制预览链接"
-            data-track="复制预览链接"
-            @click="copyPreviewLink"
-          >
-            🔗 复制预览链接
-          </button>
-          <a v-if="previewUrl" :href="safeHref(previewUrl)" target="_blank" rel="noreferrer" class="open">
-            打开线上预览 ↗
-          </a>
-        </div>
-      </div>
-    </div>
+      </footer>
+    </section>
 
-    <div
-      ref="colGrip"
-      class="col-grip"
-      :class="{ active: gripActive }"
-      @mousedown="onGripDown"
-    ></div>
-
-    <div class="right-pane" :class="{ collapsed: rightCollapsed }">
-      <div class="right-toggle">
-        <button class="toggle-btn" @click="rightCollapsed = !rightCollapsed">
-          <Icon :name="rightCollapsed ? 'chevronLeft' : 'chevronRight'" :size="16" />
-        </button>
-        <span v-if="rightCollapsed" class="toggle-label">预览</span>
-      </div>
-      <div v-if="!rightCollapsed" class="right-body">
+    <aside class="preview-panel">
       <RightPanel
-        ref="rightPanel"
-        :artifacts="projectArtifacts"
+        :artifacts="artifacts"
         :generating="generating"
         :project-id="projectStore.currentProjectId"
-        :requirement-doc="requirementDoc"
+        :requirement-doc="null"
         @refresh="loadArtifacts"
       />
-      </div>
-    </div>
-
+    </aside>
   </div>
 </template>
 
 <style scoped>
-.chat {
-  flex: 1;
-  display: flex;
-  min-height: 0;
-  min-width: 0;
-}
-.left-col {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  min-width: 240px;
-}
-.left-col.full {
-  /* right-pane collapsed → left-col fills all */
-}
-/* 可拖拽分栏手柄 */
-.col-grip {
-  width: 5px;
-  cursor: col-resize;
-  background: var(--border);
-  flex-shrink: 0;
-  transition: background 0.15s;
-  position: relative;
-}
-.col-grip:hover,
-.col-grip.active {
-  background: var(--brand);
-}
-.right-pane {
-  width: var(--right-pane-width, 42%);
-  min-width: 280px;
-  max-width: 70%;
-  border-left: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-  transition: width 0.2s;
-}
-.right-pane.collapsed {
-  width: 36px;
-  min-width: 36px;
-  max-width: 36px;
-}
-.right-toggle {
-  display: flex;
-  align-items: center;
-  padding: 6px 8px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.toggle-btn {
-  background: none; border: none; cursor: pointer;
-  font-size: 18px; color: var(--text-muted); font-weight: bold;
-  padding: 8px 12px; line-height: 1;
-}
-.toggle-label {
-  writing-mode: vertical-rl;
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 8px;
-}
-.right-body {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-.conv-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-}
-.conv-bar select {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 4px 8px;
-  font-size: 13px;
-}
-.conv-title {
-  font-size: 13px;
-  color: var(--muted);
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.proj-name { font-weight: 700; font-size: 14px; color: var(--text); }
-.proj-input { font-weight: 700; font-size: 14px; border: 1px solid var(--brand); border-radius: 6px; padding: 2px 6px; color: var(--text); background: var(--surface-2); outline: none; width: 180px; }
-.proj-edit { border: none; background: none; cursor: pointer; font-size: 13px; padding: 2px 4px; opacity: .5; transition: opacity .15s; }
-.proj-edit:hover { opacity: 1; }
-.proj-date { font-size: 11px; color: var(--muted); margin-left: auto; }
-.newconv {
-  margin-left: auto;
-  border: 1px solid var(--brand);
-  background: var(--brand);
-  color: #fff;
-  border-radius: 8px;
-  padding: 4px 12px;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-}
-.conv {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.sentinel { height: 1px; }
-.loading-more { text-align: center; color: var(--muted); font-size: 12px; padding: 8px; }
-
-/* 历史会话折叠卡片 */
-.session-divider { text-align: center; padding: 12px 0 6px; margin: 0 8px 6px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); }
-.session-divider span { background: var(--surface-3); padding: 2px 10px; border-radius: 4px; }
-.empty {
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.7;
-  background: var(--panel);
-  border: 1px dashed var(--border);
-  border-radius: 10px;
-  padding: 14px;
-}
-.trail-wrap {
-  max-height: 32%;
-  overflow: auto;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
-  padding: 10px 14px;
-}
-/* 当前会话内联 track: 圆角卡片直接贴着气泡, 不再作为底部独立面板 */
-.trail-wrap-inline {
-  margin: 6px 0 12px;
-  padding: 10px 14px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-}
-/* 正在生成文件: 文件名跑马灯 + loading 骨架屏 */
-.gen-file-card {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--brand-border-strong);
-  background: linear-gradient(90deg, var(--brand-bg-soft) 0%, var(--brand-bg-soft) 100%);
-  border-radius: 10px;
-  overflow: hidden;
-}
-.gen-file-card.done {
-  border-color: #9fe0b0;
-  background: linear-gradient(90deg, var(--ok-bg) 0%, var(--ok-bg) 100%);
-}
-.gen-marquee {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.gen-ico {
-  font-size: 16px;
-  flex-shrink: 0;
-}
-.gen-marquee-viewport {
-  position: relative;
-  flex: 1;
-  overflow: hidden;
-  white-space: nowrap;
-}
-.gen-fname {
-  display: inline-block;
-  padding-left: 100%;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--info);
-  animation: gen-marquee-scroll 9s linear infinite;
-}
-.gen-file-card.done .gen-fname {
-  color: var(--ok);
-  animation: none;
-  padding-left: 0;
-}
-.gen-fname--dup {
-  position: absolute;
-  left: 100%;
-  top: 0;
-}
-@keyframes gen-marquee-scroll {
-  0% { transform: translateX(0); }
-  100% { transform: translateX(-100%); }
-}
-.gen-skeleton {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.gen-skeleton .sk {
-  height: 10px;
-  border-radius: 6px;
-  background: linear-gradient(90deg, var(--info-bg) 25%, var(--info-bg) 37%, var(--info-bg) 63%);
-  background-size: 400% 100%;
-  animation: gen-shimmer 1.4s ease infinite;
-}
-.gen-skeleton .sk-1 { width: 92%; }
-.gen-skeleton .sk-2 { width: 78%; }
-.gen-skeleton .sk-3 { width: 85%; }
-@keyframes gen-shimmer {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
-}
-/* 合并执行面板: 阶段头 + 实时思考(原 live-think 块, 现与 ThoughtTrail 同卡片显示) */
-.exec-head {
-  background: var(--brand-bg-soft);
-  border: 1px solid var(--brand-border-strong);
-  border-radius: 8px;
-  padding: 8px 10px;
-  margin-bottom: 10px;
-}
-.exec-row {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
-}
-.exec-badge {
-  font-size: 12px; font-weight: 700; color: var(--brand);
-  background: var(--brand-bg); border: 1px solid #62e0cb; border-radius: 999px;
-  padding: 2px 10px; line-height: 1.4;
-}
-/* 系统收到: 发送瞬间即出现, 给用户即时反馈(始终绿色完成态) */
-.recv-chip {
-  font-size: 12px; font-weight: 700; color: var(--ok);
-  background: var(--ok-bg); border: 1px solid #86efac; border-radius: 999px;
-  padding: 2px 10px; line-height: 1.4;
-  display: inline-flex; align-items: center; gap: 3px;
-}
-.exec-tag {
-  font-size: 11px; font-weight: 600; color: var(--text-3);
-  background: #eef4f1; border: 1px solid #d8dee9; border-radius: 999px;
-  padding: 2px 8px; line-height: 1.4;
-}
-.exec-tag--conf {
-  color: var(--ok); background: #d1fae5; border-color: #6ee7b7;
-}
-.exec-timer {
-  margin-left: auto; font-size: 11px; font-weight: 600; color: var(--text-4);
-  font-variant-numeric: tabular-nums;
-}
-.exec-pulse {
-  display: inline-block;
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--brand, #15c4a4);
-  animation: lt-blink 1.2s ease-in-out infinite;
-  margin-right: 6px;
-  vertical-align: middle;
-}
-.exec-stage {
-  font-size: 12px; font-weight: 600; color: var(--brand, #15c4a4);
-  vertical-align: middle;
-}
-/* B(#488): COS 上传进度条 */
-.cos-progress {
-  display: flex; align-items: center; gap: 6px; margin-top: 6px;
-  font-size: 11px; color: var(--text-3);
-}
-.cos-icon { flex-shrink: 0; }
-.cos-label { flex-shrink: 0; white-space: nowrap; }
-.cos-bar {
-  flex: 1; height: 6px; background: var(--brand-bg); border-radius: 3px; overflow: hidden; min-width: 60px;
-}
-.cos-bar > i {
-  display: block; height: 100%;
-  background: linear-gradient(90deg, #15c4a4, #62e0cb);
-  border-radius: 3px; transition: width .3s ease;
-}
-.exec-body {
-  margin-top: 6px;
-  font-size: 12px; color: var(--text-3); line-height: 1.5;
-  max-height: 6em; overflow-y: auto;
-  white-space: pre-wrap; word-break: break-word;
-  border-left: 2px solid var(--brand, #15c4a4);
-  padding-left: 8px;
-}
-.exec-placeholder {
-  color: var(--text-muted); border-left-color: var(--text-3); font-style: italic;
-}
-@keyframes lt-blink {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.75); }
-}
-/* P2: 二次确认详情卡内嵌气泡时, 与上方轨迹做视觉分隔 */
-.confirm-card-in-bubble {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--border);
-}
-/* COS 上传状态: 同一卡片内显示进度/失败, 与主轨迹视觉一致 */
-.cos-trail {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.cos-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  line-height: 1.5;
-}
-.cos-row.uploading { color: var(--warn); }
-.cos-row.failed { color: var(--err); }
-.cos-spinner {
-  width: 13px;
-  height: 13px;
-  border: 2px solid var(--warn-border);
-  border-top-color: var(--warn);
-  border-radius: 50%;
-  animation: cos-spin 0.8s linear infinite;
-  flex: 0 0 auto;
-}
-@keyframes cos-spin { to { transform: rotate(360deg); } }
-.cos-retry-btn {
-  margin-left: auto;
-  border: 1px solid #fca5a5;
-  background: var(--err-bg);
-  color: var(--err);
-  border-radius: 6px;
-  padding: 2px 10px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-.cos-retry-btn:hover { background: var(--err-bg); }
-
-/* §9: 执行前计划预览卡(与 SubTaskTrack 同款视觉) */
-.plan-preview {
-  border: 1px solid var(--border);
-  background: linear-gradient(180deg, var(--surface-2) 0%, var(--surface-1) 100%);
-  border-radius: 14px;
-  padding: 14px 16px;
-  margin-bottom: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.pp-head { display: flex; gap: 10px; align-items: flex-start; }
-.pp-icon { font-size: 18px; line-height: 1.2; }
-.pp-title { font-weight: 700; font-size: 14px; color: var(--brand); }
-.pp-note { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
-
-/* 单条子任务泳道(复用 SubTaskTrack 的 lane 视觉, 让单/多意图风格统一) */
-.plan-preview .lane {
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border);
-  border-radius: 12px;
-  padding: 10px 12px;
-  background: var(--surface-2);
-  transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.2s ease;
-}
-.plan-preview .lane.running { border-left-color: var(--brand); box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.08); }
-.plan-preview .lane.done { border-left-color: var(--ok); }
-.lane-top { display: flex; align-items: center; gap: 8px; }
-.status-icon { font-size: 15px; line-height: 1; flex: none; }
-.status-icon.running { animation: spin 1s linear infinite; color: var(--brand); }
-.status-icon.done { color: var(--ok); }
-.plan-preview .goal {
-  flex: 1;
-  min-width: 0;
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.role-tag { font-size: 11px; font-weight: 600; background: var(--brand-bg); color: var(--brand); border-radius: 6px; padding: 1px 8px; flex: none; }
-.status-label { font-size: 11px; margin-left: auto; color: var(--muted); }
-.status-label.running { color: var(--brand); font-weight: 600; }
-.status-label.done { color: var(--ok); font-weight: 600; }
-
-/* §6 D: 取消结构化摘要卡 */
-.cancel-summary {
-  border: 1px solid var(--err-border);
-  background: var(--err-bg);
-  border-radius: 12px;
-  padding: 12px 14px;
-  margin-bottom: 12px;
-}
-.cs-head { font-weight: 700; font-size: 13.5px; color: var(--err); }
-.cs-body { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.cs-chip {
-  font-size: 12px;
-  font-weight: 600;
-  border-radius: 999px;
-  padding: 2px 10px;
-}
-.cs-chip.done { background: var(--ok-bg); color: var(--ok); }
-.cs-chip.cancelled { background: var(--err-bg); color: var(--err); }
-.cs-chip.skipped { background: var(--warn-bg); color: var(--warn); }
-.cs-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.cs-item { font-size: 12px; line-height: 1.5; }
-.cs-item.cancelled { color: var(--err); }
-.cs-item.skipped { color: var(--warn); }
-.footer {
-  padding: 12px 14px;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
-}
-.error {
-  color: var(--err);
-  font-size: 13px;
-  background: var(--err-bg);
-  border: 1px solid var(--err-border);
-  border-radius: 8px;
-  padding: 8px 12px;
-  margin-top: 8px;
-}
-.cp-title { font-weight: 600; font-size: 14px; margin-bottom: 10px; color: var(--info); display: flex; align-items: center; gap: 10px; }
-.cp-risk { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
-.cp-risk.risk-high { background: var(--err-bg); color: var(--err); border: 1px solid var(--err-border); }
-.cp-risk.risk-medium { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-border); }
-.cp-body { margin-bottom: 12px; }
-.cp-goal { font-size: 13px; color: var(--text-3); margin-bottom: 8px; }
-.cp-hint { font-size: 11px; color: var(--text-muted); margin-top: 8px; line-height: 1.6; }
-
-:global([data-theme="dark"]) .cp-title { color: #7df0d9; }
-:global([data-theme="dark"]) .cp-goal { color: var(--text-3); }
-:global([data-theme="dark"]) .cp-hint { color: var(--text-4); }
-
-/* ── 文字产物链接卡片(替代确认模态框) ── */
-.artifact-links-card {
-  background: var(--brand-bg-soft);
-  border: 1px solid var(--brand-border);
-  border-radius: 10px;
-  padding: 12px 14px;
-  margin: 8px 0;
-}
-.alc-head { font-weight: 600; font-size: 14px; color: var(--info); margin-bottom: 6px; }
-.alc-invite {
-  font-size: 13px; color: var(--text); line-height: 1.6;
-  background: var(--surface-2); border: 1px solid var(--brand-border); border-left: 3px solid #0e9e8c;
-  border-radius: 8px; padding: 8px 12px; margin-bottom: 10px;
-}
-.alc-build-btn {
-  display: block; width: 100%; margin-bottom: 10px;
-  padding: 11px 16px; border: none; border-radius: 10px; cursor: pointer;
-  font-size: 14px; font-weight: 700; color: #fff;
-  background: linear-gradient(135deg, #15b8c4 0%, #15c4a4 100%);
-  box-shadow: 0 6px 18px rgba(99, 102, 241, .35);
-  transition: transform .18s cubic-bezier(.16, 1, .3, 1), box-shadow .18s, filter .18s;
-}
-.alc-build-btn:hover {
-  transform: translateY(-2px) scale(1.02);
-  box-shadow: 0 10px 26px rgba(99, 102, 241, .45);
-  filter: brightness(1.05);
-}
-.alc-build-btn:active { transform: translateY(0) scale(.99); }
-.alc-hint {
-  font-size: 12px; color: var(--text-3); line-height: 1.6;
-  background: var(--surface-2); border: 1px dashed var(--brand-border); border-radius: 8px;
-  padding: 6px 10px; margin-bottom: 10px;
-}
-.alc-list { display: flex; flex-wrap: wrap; gap: 8px; }
-.alc-item {
-  display: inline-flex; align-items: center; gap: 6px;
-  border: 1px solid var(--brand-border); background: var(--surface-2); border-radius: 8px;
-  padding: 5px 10px; cursor: pointer; font-size: 12px; color: var(--text);
-  transition: background .15s, transform .12s, box-shadow .15s;
-}
-.alc-item:hover {
-  background: var(--brand-bg); transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(2,132,199,.18);
-}
-.alc-icon { font-size: 14px; }
-.alc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
-.alc-open { font-size: 11px; color: var(--brand); font-weight: 600; }
-.alc-dl, .asc-dl { margin-left: auto; font-size: 13px; color: #15c4a4; cursor: pointer; opacity: 0.7; padding: 0 2px; }
-.alc-dl:hover, .asc-dl:hover { opacity: 1; }
-.alc-plan {
-  margin-top: 10px; background: var(--surface-2); border: 1px solid var(--brand-bg);
-  border-radius: 8px; padding: 8px 12px;
-}
-.alc-plan-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
-.alc-goal { font-size: 12px; color: var(--text-3); margin-bottom: 6px; }
-.alc-steps { margin: 0; padding-left: 18px; }
-.alc-steps li { font-size: 12px; color: var(--text-4); line-height: 1.7; }
-
-/* ── 生成产物清单卡片(对话框内, 点击联动右侧预览) ── */
-.artifact-summary-card {
-  background: var(--ok-bg);
-  border: 1px solid var(--ok-bg-strong);
-  border-radius: 10px;
-  padding: 12px 14px;
-  margin-top: 2px;
-}
-.asc-head { font-weight: 700; font-size: 14px; color: var(--ok); margin-bottom: 4px; }
-.asc-hint { font-size: 12px; color: var(--text-3); line-height: 1.6; margin-bottom: 10px; }
-.asc-list { display: flex; flex-wrap: wrap; gap: 8px; }
-.asc-item {
-  display: inline-flex; align-items: center; gap: 6px;
-  border: 1px solid var(--ok-bg-strong); background: var(--surface-2); border-radius: 8px;
-  padding: 5px 10px; cursor: pointer; font-size: 12px; color: var(--text);
-  font-family: inherit;
-  transition: background .15s, transform .12s, box-shadow .15s;
-}
-.asc-item:hover {
-  background: var(--ok-bg); transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(22,163,74,.18);
-}
-.asc-icon { font-size: 14px; }
-.asc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
-.asc-open { font-size: 11px; color: var(--ok); font-weight: 600; }
-.alc-dl, .asc-dl { margin-left: auto; font-size: 13px; color: #15c4a4; cursor: pointer; opacity: 0.7; padding: 0 2px; }
-.alc-dl:hover, .asc-dl:hover { opacity: 1; }
-
-/* ── 气泡内选项卡(无弹窗, 保证气泡任意时刻可见) ── */
-.options-card-in-bubble {
-  border: 1px solid var(--border); border-radius: 10px;
-  padding: 12px 14px; margin: 8px 0; background: rgba(59,130,246,.04);
-}
-.oc-title { font-weight: 600; font-size: 14px; color: #15c4a4; margin-bottom: 10px; }
-.oc-choice {
-  display: flex; align-items: flex-start; gap: 10px;
-  padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
-  cursor: pointer; transition: border-color .2s, background .2s; margin-bottom: 8px;
-}
-.oc-choice:last-child { margin-bottom: 0; }
-.oc-choice:hover { border-color: #62e0cb; background: rgba(59,130,246,.04); }
-.oc-info { flex: 1; min-width: 0; }
-.oc-name { font-weight: 600; font-size: 14px; color: var(--text); }
-.oc-desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
-.oc-pros { font-size: 12px; color: var(--ok); margin-top: 4px; }
-.oc-cons { font-size: 12px; color: var(--err); margin-top: 2px; }
-:global([data-theme="dark"]) .options-card-in-bubble { background: rgba(59,130,246,.10); }
-:global([data-theme="dark"]) .oc-title { color: #62e0cb; }
-
-/* ── 非阻塞候选提示条 ── */
-.alts-bar {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
-  padding: 8px 14px; margin: 0 16px 6px;
-  background: rgba(16,185,129,.08); border: 1px solid #6ee7b7;
-  border-radius: 10px; font-size: 13px; color: var(--ok);
-}
-.alts-label b { color: #065f46; }
-.alts-sep { color: var(--text-muted); }
-.alts-hint { color: #059669; }
-.alts-chip {
-  border: 1px solid #6ee7b7; background: var(--surface-2); color: var(--ok);
-  border-radius: 999px; padding: 4px 12px; cursor: pointer;
-  font-size: 12px; font-weight: 600; transition: all .18s ease;
-}
-.alts-chip:hover { background: #10b981; color: #fff; transform: translateY(-1px); }
-.alts-tip { color: var(--text-muted); font-size: 11px; }
-
-/* ── SIR 澄清卡(底部浮动面板) ── */
-.clarify-panel {
-  position: fixed;
-  left: 50%;
-  bottom: 18px;
-  transform: translateX(-50%);
-  width: calc(100% - 32px);
-  max-width: 640px;
-  z-index: 1000;
-  pointer-events: none;
-}
-.clarify-panel-inner {
-  pointer-events: auto;
-  padding: 16px 18px;
-  background: rgba(255, 255, 255, 0.82);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  border: 1px solid rgba(99, 102, 241, 0.35);
-  border-radius: 16px;
-  box-shadow: 0 18px 50px rgba(30, 27, 75, 0.22);
-  font-size: 13px;
-  color: var(--brand);
-}
-.clarify-head { font-weight: 600; margin-bottom: 8px; font-size: 14px; }
-.clarify-list { margin: 0 0 8px; padding-left: 18px; color: var(--text-3); }
-.clarify-list li { margin: 3px 0; line-height: 1.5; }
-.clarify-options { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
-.clarify-opt {
-  display: flex; align-items: center; gap: 10px;
-  padding: 10px 12px; cursor: pointer;
-  background: rgba(99, 102, 241, 0.06);
-  border: 1px solid rgba(99, 102, 241, 0.18);
-  border-radius: 10px; transition: all .18s ease;
-}
-.clarify-opt:hover { background: rgba(99, 102, 241, 0.12); }
-.clarify-opt.on {
-  background: rgba(99, 102, 241, 0.16);
-  border-color: #15c4a4;
-  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.18) inset;
-}
-.clarify-opt-input { width: 16px; height: 16px; accent-color: #15c4a4; flex: none; }
-.clarify-opt-label { flex: 1; }
-.clarify-badge {
-  font-size: 11px; font-weight: 700; color: var(--ok);
-  background: #d1fae5; border: 1px solid #6ee7b7;
-  border-radius: 999px; padding: 1px 8px;
-}
-.clarify-free {
-  width: 100%; margin-top: 4px; padding: 8px 10px;
-  border: 1px solid rgba(99, 102, 241, 0.25); border-radius: 10px;
-  background: rgba(255, 255, 255, 0.7); color: var(--brand);
-  font: inherit; resize: vertical; outline: none;
-}
-.clarify-free:focus { border-color: #15c4a4; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
-.clarify-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
-.clarify-skip {
-  border: 1px solid #dfe5e0; background: var(--surface-2); color: var(--text-3);
-  border-radius: 10px; padding: 8px 14px; cursor: pointer; font: inherit;
-  transition: all .18s ease;
-}
-.clarify-skip:hover { background: var(--surface-3); color: var(--text-2); }
-.clarify-confirm {
-  border: none; border-radius: 10px; padding: 8px 18px; cursor: pointer;
-  font: inherit; font-weight: 600; color: #fff;
-  background: linear-gradient(135deg, #15c4a4, #ff8a5c);
-  box-shadow: 0 6px 16px rgba(99, 102, 241, 0.35);
-  transition: all .18s ease;
-}
-.clarify-confirm:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(99, 102, 241, 0.42); }
-.clarify-confirm:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
-/* 浮动面板滑入动画 */
-.clarify-pop-enter-active, .clarify-pop-leave-active { transition: all .28s cubic-bezier(0.16, 1, 0.3, 1); }
-.clarify-pop-enter-from, .clarify-pop-leave-to { opacity: 0; transform: translate(-50%, 16px); }
-
-/* 深色主题适配(项目主题以 <html data-theme="dark"> 承载) */
-:global([data-theme="dark"]) .clarify-panel-inner {
-  background: rgba(30, 27, 46, 0.82);
-  border-color: rgba(129, 140, 248, 0.4);
-  color: #cdeee7;
-}
-:global([data-theme="dark"]) .clarify-list { color: var(--text-2); }
-:global([data-theme="dark"]) .clarify-opt { background: rgba(129, 140, 248, 0.1); border-color: rgba(129, 140, 248, 0.25); }
-:global([data-theme="dark"]) .clarify-opt:hover { background: rgba(129, 140, 248, 0.18); }
-:global([data-theme="dark"]) .clarify-opt.on { background: rgba(129, 140, 248, 0.22); border-color: #62e0cb; }
-:global([data-theme="dark"]) .clarify-free { background: rgba(15, 15, 30, 0.6); border-color: rgba(129, 140, 248, 0.3); color: #cdeee7; }
-:global([data-theme="dark"]) .clarify-skip { background: rgba(30, 27, 46, 0.6); border-color: var(--text-3); color: var(--text-2); }
-:global([data-theme="dark"]) .clarify-skip:hover { background: rgba(55, 48, 80, 0.8); }
-
-/* ── 待发送选项提示(已移除弹窗, 选项改为气泡内文字确认) ── */
-
-.feedback {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  font-size: 13px;
-  color: var(--muted);
-  margin-top: 8px;
-}
-.rate-label { margin-right: 4px; }
-.star-btn {
-  border: none;
-  background: none;
-  color: #d4d4d8;
-  cursor: pointer;
-  font-size: 16px;
-  padding: 0 2px;
-  transition: color .15s;
-}
-.star-btn.on { color: #f59e0b; }
-.star-btn.sel { color: #e17800; }
-.comment-inp {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 3px 8px;
-  font-size: 12px;
-  width: 140px;
-  color: var(--text);
-  background: var(--panel);
-}
-.submit-rate {
-  border: 1px solid var(--brand);
-  background: var(--brand);
-  color: #fff;
-  border-radius: 6px;
-  padding: 3px 10px;
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 600;
-}
-.rated { color: var(--brand2); font-weight: 600; }
-.copy-link {
-  border: 1px solid var(--brand);
-  background: transparent;
-  color: var(--brand);
-  border-radius: 6px;
-  padding: 3px 10px;
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 600;
-  margin-left: 4px;
-}
-.feedback .open {
-  margin-left: auto;
-  color: var(--brand);
-  text-decoration: none;
-  font-weight: 600;
-}
-.paused-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--warn-bg); border: 1px solid #f59e0b; border-radius: 10px; font-size: 13px; margin-bottom: 8px; }
-.paused-resume { padding: 4px 12px; border: none; border-radius: 6px; background: #10b981; color: #fff; cursor: pointer; font-size: 12px; }
-.paused-abort { padding: 4px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); cursor: pointer; font-size: 12px; }
-.queue-bar { margin-bottom: 8px; padding: 8px 10px; background: var(--brand-bg); border-radius: 8px; font-size: 12px; max-height: 200px; overflow-y: auto; }
-.queue-head { font-weight: 700; color: #15c4a4; margin-bottom: 4px; }
-.queue-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px solid #cdeee7; }
-.queue-row:last-child { border-bottom: none; }
-.queue-seq { color: #62e0cb; font-weight: 600; min-width: 20px; }
-.queue-text { flex: 1; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.queue-input { flex: 1; border: 1px solid #7df0d9; border-radius: 4px; padding: 1px 4px; font-size: 12px; outline: none; }
-.queue-actions { display: flex; gap: 2px; }
-.qbtn { border: none; background: none; cursor: pointer; font-size: 13px; padding: 1px 4px; border-radius: 3px; color: var(--muted); }
-.qbtn:hover { background: #c9eef1; color: #15c4a4; }
-.qdel:hover { background: var(--err-bg); color: #ef4444; }
-
-/* q-2: 预设模板卡 */
-.tpl-cards { margin-bottom: 10px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
-.tpl-cards-head { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
-.tpl-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-@media (max-width: 720px) { .tpl-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-.tpl-card {
-  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
-  padding: 10px 12px; text-align: left; cursor: pointer;
-  background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
-  transition: transform .2s cubic-bezier(.16,1,.3,1), box-shadow .2s, border-color .2s;
-}
-.tpl-card:hover { transform: translateY(-2px) scale(1.02); border-color: #62e0cb; box-shadow: 0 6px 18px rgba(79,70,229,.18); }
-.tpl-icon { font-size: 20px; line-height: 1; }
-.tpl-title { font-size: 13px; font-weight: 700; color: var(--text); }
-.tpl-desc { font-size: 11px; color: var(--muted); }
-
-/* 搜索跳转高亮闪烁 */
-.highlight-flash {
-  animation: flash-highlight 2s ease-out;
-  border-radius: 8px;
-}
-@keyframes flash-highlight {
-  0% { background-color: rgba(79, 70, 229, 0.2); }
-  50% { background-color: rgba(79, 70, 229, 0.08); }
-  100% { background-color: transparent; }
-}
+.chat { display: flex; flex: 1; min-width: 0; min-height: 0; background: var(--surface-1); }
+.thread-panel { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.chat-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.eyebrow { display: block; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+h1 { margin: 3px 0 0; color: var(--text); font-size: 16px; }
+.turn-id { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.conversation { display: flex; flex: 1; flex-direction: column; gap: 10px; overflow-y: auto; padding: 18px; }
+.empty-state { max-width: 540px; margin: auto; border: 1px dashed var(--border); border-radius: 14px; padding: 20px; color: var(--muted); font-size: 13px; line-height: 1.7; text-align: center; }
+.composer { border-top: 1px solid var(--border); padding: 12px 16px; background: var(--panel); }
+.status-line, .error-line { margin: 0 0 8px; border-radius: 8px; padding: 7px 10px; font-size: 12px; }
+.status-line { background: var(--brand-bg); color: var(--brand); }
+.error-line { background: var(--err-bg); color: var(--err); }
+.attempt-output, .suspended { margin: 10px 0; border-radius: 10px; padding: 10px 12px; font-size: 12px; line-height: 1.6; }
+.attempt-output { border: 1px solid var(--border); background: var(--surface-2); color: var(--text-3); }
+.attempt-output b { color: var(--text); }
+.attempt-output p { margin: 6px 0 0; white-space: pre-wrap; }
+.suspended { border: 1px solid var(--warn-border); background: var(--warn-bg); color: var(--warn); }
+.preview-panel { width: min(42%, 560px); min-width: 300px; border-left: 1px solid var(--border); }
+@media (max-width: 900px) { .preview-panel { display: none; } }
 </style>

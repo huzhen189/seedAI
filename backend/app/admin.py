@@ -119,12 +119,12 @@ async def track_frontend(request: Request):
 # ---------- 指标 SSE ----------
 @router.get("/metrics")
 async def metrics_stream(_=Depends(require_admin)):
-    """实时指标:每 2s 推一帧快照(轮询兜底见前端)。"""
+    """实时指标:每 5s 推一帧快照(轮询兜底见前端)。"""
 
     async def publisher():
         while True:
             yield {"event": "metrics", "data": json.dumps(await snapshot())}
-            await asyncio.sleep(2)
+            await asyncio.sleep(5)
 
     from sse_starlette.sse import EventSourceResponse
 

@@ -16,7 +16,7 @@ import asyncio
 import logging
 import shlex
 
-from shared.config import settings
+from app.config import settings
 
 
 logger = logging.getLogger("business.deployment")

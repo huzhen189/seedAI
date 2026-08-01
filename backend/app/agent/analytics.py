@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from .config import settings
+from app.config import settings
 from .scoring import SCORING_DIMENSIONS  # 7 维定义(单一来源), 供 QC/Reviewer 维度聚合复用
 
 

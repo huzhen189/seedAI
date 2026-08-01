@@ -1,0 +1,42 @@
+"""S9 的 W0 终态、消息、用量与 Outbox 同事务收口。"""
+
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.turn_context import TurnContext
+from app.models import Message, Turn, UsageLedger
+
+
+class FinalizeService:
+    async def finalize(self, session: AsyncSession, context: TurnContext) -> str:
+        turn = (await session.execute(select(Turn).where(Turn.turn_id == context.turn_id).with_for_update())).scalar_one()
+        terminal = "completed"
+        if context.validation is not None and context.validation.status == "needs_approval":
+            terminal = "waiting_approval"
+        elif context.validation is not None and context.validation.status == "block":
+            terminal = "blocked"
+        if terminal == "completed":
+            session.add(
+                Message(
+                    conversation_id=context.session.conversation_id,
+                    project_id=context.session.project_id or 0,
+                    turn_id=context.turn_id,
+                    role="assistant",
+                    content=context.reply_final,
+                    content_refs=[{"artifact_id": ref} for ref in (context.execution.artifact_refs if context.execution else [])],
+                )
+            )
+        usage = (await session.execute(select(UsageLedger).where(UsageLedger.turn_id == context.turn_id, UsageLedger.kind == "model_calls"))).scalar_one_or_none()
+        if usage is not None:
+            usage.settled_units = 0
+            usage.status = "released"
+        turn.status = terminal
+        turn.last_event_id = "finalized"
+        turn.lock_version += 1
+        await session.flush()
+        return terminal
+
+
+finalize_service = FinalizeService()

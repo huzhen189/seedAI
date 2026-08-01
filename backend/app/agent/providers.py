@@ -17,7 +17,7 @@ from typing import List
 import httpx
 from langchain_openai import ChatOpenAI
 
-from .config import settings
+from app.config import settings
 
 # 日志命名规范: app.<module>(见项目约定)。旧名 "ai_service.provider" 不在 handler 覆盖范围内,
 # 导致 provider 层日志被静默丢弃(2026-07-30 排查 hy3 401 时发现)。

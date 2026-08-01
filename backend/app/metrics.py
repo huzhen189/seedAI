@@ -6,14 +6,28 @@
 MVP 不引 Prometheus;后期可平滑替换为 /metrics 暴露文本格式。
 """
 
+import asyncio
+import ctypes
 import json
 import logging
+import os as _os
+import platform as _platform
+import shutil as _shutil
+import socket as _socket
+import string as _string
+import sys as _sys
 import time
 from datetime import datetime, timedelta
 from urllib.parse import urlparse as _urlparse
 
 from .cache import get_redis
-from .config import ENV_FILE, settings
+from app.config import ENV_FILE, settings
+
+# 主机(操作系统)指标: 优先 psutil(若已安装), 否则纯标准库回退。
+try:
+    import psutil as _psutil
+except Exception:  # pragma: no cover - psutil 可选
+    _psutil = None
 
 
 logger = logging.getLogger("business.metrics")
@@ -156,10 +170,278 @@ async def snapshot() -> dict:
             "api_latency": latency,
             "ai_stats": ai_stats,
             "db": db,
+            "system": await _system_status(),
         }
     except Exception as e:
         logger.warning("snapshot failed: %s", e)
-        return {"uptime_s": int(time.time() - START_TIME), "error": str(e)}
+        return {
+            "uptime_s": int(time.time() - START_TIME),
+            "error": str(e),
+            "system": await _system_status(),
+        }
+
+
+async def _system_status() -> dict:
+    """采集运行主机(操作系统)指标, 管理页『服务器系统状态』区块使用。
+
+    设计原则: 与 _db_status 解耦(独立异常边界); 任一子系统失败只标记 off 不影响其他;
+    优先 psutil, 否则纯标准库回退; 全部 CPU/内存 采集强制 0.5s 超时, 防拖垮 /admin/metrics SSE。
+    数值单位: 百分比为 0~100 浮点; bytes 为绝对字节(前端用 _human_bytes 展示)。
+    """
+    try:
+        # 并行采集 CPU 百分比(需要采样间隔)与内存, 各加 0.5s 超时保护
+        cpu_task = asyncio.to_thread(_cpu_percent)
+        mem_task = asyncio.to_thread(_mem_info)
+        cpu_pct, cpu_load, cpu_cores = await asyncio.wait_for(cpu_task, timeout=0.6)
+        mem = await asyncio.wait_for(mem_task, timeout=0.6)
+    except Exception as e:
+        logger.warning("system_status cpu/mem probe failed: %s", e)
+        cpu_pct, cpu_load, cpu_cores = None, None, None
+        mem = {"ok": False, "error": str(e)[:200]}
+
+    try:
+        disk = _disk_info()
+    except Exception as e:
+        logger.warning("system_status disk probe failed: %s", e)
+        disk = {"ok": False, "error": str(e)[:200]}
+
+    try:
+        boot_ts = _boot_time()
+    except Exception:
+        boot_ts = None
+
+    return {
+        "platform": _platform_name(),
+        "hostname": _safe(lambda: _socket.gethostname()),
+        "kernel": _safe(lambda: _platform.release()),
+        "arch": _safe(lambda: _platform.machine() or _platform.architecture()[0]),
+        "python_version": _sys.version.split()[0],
+        "cpu_cores": cpu_cores,
+        "cpu_percent": cpu_pct,
+        "load_avg": cpu_load,          # (1m,5m,15m) 或 None
+        "mem": mem,
+        "disk": disk,
+        "boot_time": boot_ts,          # epoch 秒, 前端算开机时长
+        "ts": int(time.time()),
+    }
+
+
+def _safe(fn):
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+def _platform_name() -> dict:
+    """友好的操作系统名称 + 系统分类(linux/windows/darwin)。"""
+    sys_name = _platform.system().lower()  # 'linux' / 'windows' / 'darwin'
+    if sys_name == "linux":
+        name = _linux_pretty_name() or "Linux"
+    elif sys_name == "windows":
+        name = f"Windows {_platform.version()}"
+    elif sys_name == "darwin":
+        name = f"macOS {_platform.mac_ver()[0]}"
+    else:
+        name = _platform.system() or "未知"
+    return {"name": name, "family": sys_name}
+
+
+def _linux_pretty_name() -> str:
+    """读 /etc/os-release 的 PRETTY_NAME(如 'CentOS Linux 7 (Core)')。"""
+    try:
+        with open("/etc/os-release", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("PRETTY_NAME="):
+                    return line.split("=", 1)[1].strip().strip('"')
+    except Exception:
+        pass
+    return ""
+
+
+def _cpu_percent():
+    """返回 (cpu_percent, load_avg_or_None, logical_cores)。"""
+    if _psutil is not None:
+        cpu_pct = _psutil.cpu_percent(interval=0.3)
+        cores = _psutil.cpu_count(logical=True)
+        load = _psutil.getloadavg()  # (1m,5m,15m)
+        return float(cpu_pct), list(load), cores
+    # 纯标准库回退
+    cores = _safe(lambda: _os.cpu_count()) or 1
+    cpu_pct = _cpu_percent_fallback()
+    load = _load_avg_fallback()
+    return cpu_pct, load, cores
+
+
+def _cpu_percent_fallback():
+    """Linux 用 /proc/stat 两次采样差算总占用; 其他平台返回 None(用负载近似)。"""
+    try:
+        if not _os.path.exists("/proc/stat"):
+            return None
+        def _read():
+            with open("/proc/stat", encoding="utf-8") as f:
+                line = f.readline()
+            parts = list(map(int, line.split()[1:]))
+            idle = parts[3]
+            total = sum(parts)
+            return total, idle
+        t0, i0 = _read()
+        time.sleep(0.3)
+        t1, i1 = _read()
+        total_d = t1 - t0
+        idle_d = i1 - i0
+        if total_d <= 0:
+            return None
+        return round((1 - idle_d / total_d) * 100, 1)
+    except Exception:
+        return None
+
+
+def _load_avg_fallback():
+    """Linux 读 /proc/loadavg; 其他平台 None。"""
+    try:
+        if _os.path.exists("/proc/loadavg"):
+            with open("/proc/loadavg", encoding="utf-8") as f:
+                parts = f.read().split()
+            return [float(parts[0]), float(parts[1]), float(parts[2])]
+    except Exception:
+        pass
+    return None
+
+
+def _mem_info() -> dict:
+    """内存使用情况: total/available/used(字节) + percent。"""
+    if _psutil is not None:
+        vm = _psutil.virtual_memory()
+        return {
+            "ok": True,
+            "total": vm.total,
+            "available": vm.available,
+            "used": vm.used,
+            "percent": float(vm.percent),
+        }
+    # 纯标准库回退(Linux /proc/meminfo)
+    try:
+        info = {}
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split(":")
+                if len(parts) != 2:
+                    continue
+                key = parts[0].strip()
+                val_kb = int(parts[1].strip().split()[0])  # kB
+                info[key] = val_kb * 1024
+        total = info.get("MemTotal")
+        available = info.get("MemAvailable") or (total - info.get("MemFree", 0))
+        used = total - available if total is not None else None
+        percent = round(used / total * 100, 1) if (total and used is not None) else None
+        if total is None:
+            return {"ok": False, "error": "无内存数据"}
+        return {
+            "ok": True,
+            "total": total,
+            "available": available,
+            "used": used,
+            "percent": percent,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+def _disk_info() -> dict:
+    """所有挂载分区的磁盘使用情况(跳过伪/可移动文件系统)。
+
+    返回 { ok, partitions: [{device,mountpoint,fstype,total,used,free,percent}], total, used, free }。
+    """
+    if _psutil is not None:
+        parts = _psutil.disk_partitions(all=False)
+        items = []
+        for p in parts:
+            try:
+                usage = _psutil.disk_usage(p.mountpoint)
+            except Exception:
+                continue
+            items.append({
+                "device": p.device,
+                "mountpoint": p.mountpoint,
+                "fstype": p.fstype,
+                "total": usage.total,
+                "used": usage.used,
+                "free": usage.free,
+                "percent": round(usage.percent, 1),
+            })
+    else:
+        items = _disk_info_fallback()
+    if not items:
+        return {"ok": False, "error": "无磁盘数据", "partitions": []}
+    t_all = sum(x["total"] for x in items)
+    u_all = sum(x["used"] for x in items)
+    f_all = sum(x["free"] for x in items)
+    pct = round(u_all / t_all * 100, 1) if t_all else None
+    return {
+        "ok": True,
+        "partitions": items,
+        "total": t_all,
+        "used": u_all,
+        "free": f_all,
+        "percent": pct,
+    }
+
+
+def _disk_info_fallback():
+    """Linux 纯标准库回退: 解析 /proc/mounts + shutil.disk_usage。"""
+    items = []
+    try:
+        mounts = []
+        with open("/proc/mounts", encoding="utf-8") as f:
+            for line in f:
+                cols = line.split()
+                if len(cols) < 3:
+                    continue
+                dev, mp, fstype = cols[0], cols[1], cols[2]
+                # 跳过明显伪文件系统
+                if fstype in {
+                    "proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup",
+                    "cgroup2", "mqueue", "overlay", "squashfs", "debugfs",
+                    "tracefs", "securityfs", "pstore", "bpf", "configfs",
+                    "fusectl", "hugetlbfs", "ramfs", "autofs", "binfmt_misc",
+                }:
+                    continue
+                if not mp.startswith("/") or mp in {"/dev", "/proc", "/sys"}:
+                    continue
+                mounts.append((dev, mp, fstype))
+        for dev, mp, fstype in mounts:
+            try:
+                du = _shutil.disk_usage(mp)
+            except Exception:
+                continue
+            items.append({
+                "device": dev,
+                "mountpoint": mp,
+                "fstype": fstype,
+                "total": du.total,
+                "used": du.used,
+                "free": du.free,
+                "percent": round(du.used / du.total * 100, 1) if du.total else None,
+            })
+    except Exception:
+        pass
+    return items
+
+
+def _boot_time():
+    """系统启动时间(epoch 秒)。"""
+    if _psutil is not None:
+        return int(_psutil.boot_time())
+    try:
+        if _os.path.exists("/proc/stat"):
+            with open("/proc/uptime", encoding="utf-8") as f:
+                uptime = float(f.readline().split()[0])
+            return int(time.time() - uptime)
+    except Exception:
+        pass
+    return None
 
 
 def _human_bytes(num: float) -> str:

@@ -1,326 +1,190 @@
-import type { ChatMessage, IntentEvent, ModelInfo, NodeEvent, OptionEvent, AlternativesEvent, PlanEvent, RetryEvent, ThinkEvent, UnsupportedEvent, BlockEvent, ConfirmEvent, QcResult, RatingDims, OrchestrationEvent, SubTaskStartEvent, SubTaskDoneEvent, SubTaskFailEvent, MergeEvent, ClarifyEvent, CancelSummaryEvent, PlanPreviewEvent, ReasoningEvent, ToolCallEvent, ToolResultEvent } from '../types'
 import { notifyAuthRequired } from '../stores/auth'
-import { post, publicGet, get } from './client'
+import type { StreamEvent } from '../types/contracts.generated'
 
-export interface ChatCallbacks {
-  onNode?: (data: NodeEvent) => void
-  onThink?: (data: ThinkEvent) => void
-  onPlan?: (data: PlanEvent) => void
-  onToken?: (text: string, subTaskId?: string) => void
-  onPreview?: (data: NodeEvent) => void
-  onDegraded?: (data: unknown) => void
-  onDone?: () => void
-  onAborted?: () => void
-  onError?: (msg: string) => void
-  /** SSE 事件 id 回传(lastEventId), 供前端记录续接游标(after) */
-  onEventId?: (id: string) => void
-  /** 主模型不可用时触发(data 含 failed/suggested/message),前端弹框待用户选替代模型后重发 */
-  onRetry?: (data: RetryEvent) => void
-  /** 用户断开连接, 已保存断点(data 含 stage/progress) */
-  onPaused?: (data: Record<string, unknown>) => void
-  onRequirement?: (data: Record<string, unknown>) => void
-  /** 多选项(requirement_agent 出方案) */
-  onIntent?: (data: IntentEvent) => void
-  /** 多方案选择(requirement_agent 出方案),前端弹出单选框 */
-  onOptions?: (data: OptionEvent) => void
-  /** 非阻塞候选提示(管道级工具路由已自决 top-1, 列出可切换候选) */
-  onAlternatives?: (data: AlternativesEvent) => void
-  /** 不支持的功能提示(意图不属于已知范围) */
-  onUnsupported?: (data: UnsupportedEvent) => void
-  /** 高危拦截(安全 critical, 不可绕过) */
-  onBlock?: (data: BlockEvent) => void
-  /** 二次确认(安全 high, 等待用户确认后带 confirmed 重发) */
-  onConfirm?: (data: ConfirmEvent) => void
-  /** 多意图编排总览(orchestration):子任务清单 + 执行策略 */
-  onOrchestration?: (data: OrchestrationEvent) => void
-  /** 子任务开始进入执行层(subtask_start) */
-  onSubtaskStart?: (data: SubTaskStartEvent) => void
-  /** 子任务完成(subtask_done) */
-  onSubtaskDone?: (data: SubTaskDoneEvent) => void
-  /** 子任务失败 / 拦截 / 跳过(subtask_fail) */
-  onSubtaskFail?: (data: SubTaskFailEvent) => void
-  /** 结果合并完成(merge):最终连贯回复 + 部分失败清单 */
-  onMerge?: (data: MergeEvent) => void
-  /** §6 D: 取消结构化摘要(已取消 / 已完成 / 已跳过清单), 前端渲染摘要卡 */
-  onCancelSummary?: (data: CancelSummaryEvent) => void
-  /** §9: 执行前计划预览(含 SOP 角色链路 badge), 前端渲染「执行计划」卡 */
-  onPlanPreview?: (data: PlanPreviewEvent) => void
-  /** 后置 QC 单裁判结果(v2.3.0):整体分 + 6 维聚合, 落入气泡徽标 */
-  onQc?: (data: QcResult) => void
-  /** L2 精炼结果(v0.9.0): done 前下发的终版润色文本(建站类), 用于覆盖气泡内容 */
-  onRefined?: (data: string) => void
-  /** B(#488): COS 上传进度(pct 0~100), 供 exec-head 进度条实时展示「📤 上传中 NN%」 */
-  onProgress?: (data: { pct: number; stage?: string; file?: string }) => void
-  /** B(#488): 单文件 COS 上传完成(filename/url) */
-  onCosUpload?: (data: { filename: string; index?: number; total?: number; url?: string }) => void
-  /** SIR 澄清(CLARIFY):意图模糊/缺规格时, 下发动态最少必要追问 + 结构化选项, 用户确认后带 clarified 重发 */
-  onClarify?: (data: ClarifyEvent) => void
-  /** 提前告知正在生成的文件名(跑马灯占位 + loading 骨架屏), 不含文件内容 */
-  onGenFile?: (data: { name: string }) => void
-  /** Phase 1: 结构化思考/计划(reasoning 事件), 让前端显示"我在想什么") */
-  onReasoning?: (data: ReasoningEvent) => void
-  /** Phase 1: 工具调用开始(tool_call 事件), 显式透出"我去查/生成了…") */
-  onToolCall?: (data: ToolCallEvent) => void
-  /** Phase 1: 工具调用结果(tool_result 事件, 默认前端折叠) */
-  onToolResult?: (data: ToolResultEvent) => void
+export interface ChatRequest {
+  client_msg_id: string
+  conversation_id: number
+  message: string
+  expected_conversation_version?: number
 }
 
-export interface StartChatOptions {
-  model: string
-  messages?: ChatMessage[]  // 已废弃: 后端从 DB 取历史, 前端只传 q
-  traceId: string
-  conversationId: number
-  cb: ChatCallbacks
-  q?: string
-  contextHint?: string
-  after?: string
-  resume?: boolean
-  correct?: boolean
-  /** 二次确认已通过标记(安全 confirm 通过后重发) */
-  confirmed?: boolean
-  /** 澄清回填标记(用户在 clarify 卡选完确认后重发, 后端跳过意图分类直接路由) */
-  clarified?: boolean
-  /** 多选项选中后重发: 指定 Worker 直接执行的 skill(管道级 options 选择) */
-  skill?: string
-  /** 多意图中风险已确认的子任务 id 列表(重发时带上, 让 MEDIUM 风险子任务放行) */
-  confirmedSubtasks?: string[]
+export type TurnControlAction = 'stop' | 'pause' | 'resume' | 'correct' | 'supplement' | 'discard'
+
+export interface StreamSubscription {
+  abort: () => void
+  finished: Promise<void>
 }
 
-/** 打开与业务服务的 SSE 对话流(需登录 Cookie + conversation_id)。返回 EventSource 以便取消。 */
-export function startChat(opts: StartChatOptions): EventSource {
+export interface StreamHandlers {
+  onEvent: (event: StreamEvent) => void
+  onError: (error: Error) => void
+}
+
+export interface TurnSnapshot {
+  turn_id: string
+  stream_id?: string
+  status?: string
+  response?: string
+  [key: string]: unknown
+}
+
+export function startChat(request: ChatRequest, handlers: StreamHandlers): StreamSubscription {
+  return openStream('/api/chat', {
+    method: 'POST',
+    headers: {
+      Accept: 'text/event-stream',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(request),
+  }, handlers)
+}
+
+export function replayStream(streamId: string, after: number | null, handlers: StreamHandlers): StreamSubscription {
   const params = new URLSearchParams()
-  params.set('model', opts.model)
-  params.set('trace_id', opts.traceId)
-  params.set('conversation_id', String(opts.conversationId))
-  if (opts.q) params.set('q', opts.q)
-  if (opts.contextHint) params.set('context_hint', opts.contextHint)
-  if (opts.after) params.set('after', opts.after)
-  if (opts.resume) params.set('resume', 'true')
-  if (opts.correct) params.set('correct', 'true')
-  if (opts.confirmed) params.set('confirmed', '1')
-  if (opts.clarified) params.set('clarified', '1')
-  if (opts.skill) params.set('skill', opts.skill)
-  if (opts.confirmedSubtasks?.length) params.set('confirmed_subtasks', opts.confirmedSubtasks.join(','))
+  if (after != null) params.set('after', String(after))
+  const query = params.size ? `?${params.toString()}` : ''
+  return openStream(`/api/streams/${encodeURIComponent(streamId)}${query}`, {
+    method: 'GET',
+    headers: { Accept: 'text/event-stream' },
+  }, handlers)
+}
 
-  const url = `/api/chat?${params.toString()}`
-  console.log('[SSE] 连接 %s', url)
-  const es = new EventSource(url)
-  es.onopen = () => console.log('[SSE] 已连接')
-  const safeParse = (raw: string): any => {
-    try {
-      return JSON.parse(raw)
-    } catch {
-      return {}
-    }
-  }
+export async function controlTurn(
+  turnId: string,
+  action: TurnControlAction,
+  payload: Record<string, unknown> = {},
+): Promise<void> {
+  await requestJson(`/api/turns/${encodeURIComponent(turnId)}/control`, {
+    method: 'POST',
+    body: JSON.stringify({ action, ...payload }),
+  })
+}
 
-  es.addEventListener('node', (e) => opts.cb.onNode?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('think', (e) => opts.cb.onThink?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('plan', (e) => opts.cb.onPlan?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('intent', (e) => opts.cb.onIntent?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('options', (e) => opts.cb.onOptions?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('alternatives', (e) => opts.cb.onAlternatives?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('unsupported', (e) => opts.cb.onUnsupported?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('block', (e) => opts.cb.onBlock?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('confirm', (e) => opts.cb.onConfirm?.(safeParse((e as MessageEvent).data)))
-  // 多意图编排事件(sub_task_id 已在 proxy 透传, 前端按事件渲染泳道)
-  es.addEventListener('orchestration', (e) => opts.cb.onOrchestration?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('subtask_start', (e) => opts.cb.onSubtaskStart?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('subtask_done', (e) => opts.cb.onSubtaskDone?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('subtask_fail', (e) => opts.cb.onSubtaskFail?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('merge', (e) => opts.cb.onMerge?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('cancel_summary', (e) => opts.cb.onCancelSummary?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('plan_preview', (e) => opts.cb.onPlanPreview?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('paused', (e) => opts.cb.onPaused?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('clarify', (e) => opts.cb.onClarify?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('requirement_doc', (e) => opts.cb.onRequirement?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('token', (e) => {
-    const d = safeParse((e as MessageEvent).data)
-    const text = typeof d.data === 'string' ? d.data : (e as MessageEvent).data
-    // 多意图: token 带 sub_task_id(单意图为 undefined;合并结果 = "__merge__")
-    const subTaskId = typeof d.sub_task_id === 'string' ? d.sub_task_id : undefined
-    opts.cb.onToken?.(text, subTaskId)
+export async function submitApproval(
+  approvalId: string,
+  decision: 'approve' | 'reject',
+  decisionNonce: string,
+): Promise<void> {
+  await requestJson(`/api/gate/${encodeURIComponent(approvalId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ decision, decision_nonce: decisionNonce }),
   })
-  es.addEventListener('preview', (e) => opts.cb.onPreview?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('gen_file', (e) => {
-    const d = safeParse((e as MessageEvent).data)
-    opts.cb.onGenFile?.({ name: typeof d.name === 'string' ? d.name : 'index.html' })
-  })
-  es.addEventListener('degraded', (e) => opts.cb.onDegraded?.(safeParse((e as MessageEvent).data)))
-  es.addEventListener('qc', (e) => {
-    const d = safeParse((e as MessageEvent).data) as QcResult
-    opts.cb.onQc?.(d)
-  })
-  es.addEventListener('refined', (e) => {
-    const d = safeParse((e as MessageEvent).data)
-    const text = typeof d.data === 'string' ? d.data : (e as MessageEvent).data
-    opts.cb.onRefined?.(text)
-  })
-  es.addEventListener('progress', (e) => {
-    const d = safeParse((e as MessageEvent).data)
-    opts.cb.onProgress?.({ pct: Number(d.pct) || 0, stage: d.stage, file: d.file })
-  })
-  es.addEventListener('cos_upload', (e) => {
-    const d = safeParse((e as MessageEvent).data)
-    opts.cb.onCosUpload?.({ filename: d.filename, index: d.index, total: d.total, url: d.url })
-  })
-  // Phase 1: think→call→observe 循环可见化(reasoning / tool_call / tool_result)
-  es.addEventListener('reasoning', (e) => {
-    const d = safeParse((e as MessageEvent).data) as ReasoningEvent
-    opts.cb.onReasoning?.(d)
-  })
-  es.addEventListener('tool_call', (e) => {
-    const d = safeParse((e as MessageEvent).data) as ToolCallEvent
-    opts.cb.onToolCall?.(d)
-  })
-  es.addEventListener('tool_result', (e) => {
-    const d = safeParse((e as MessageEvent).data) as ToolResultEvent
-    opts.cb.onToolResult?.(d)
-  })
-  es.addEventListener('done', () => {
-    console.log('[SSE] 收到 done, 关闭连接')
-    opts.cb.onDone?.()
-    es.close()
-  })
-  es.addEventListener('aborted', () => {
-    console.log('[SSE] 收到 aborted')
-    opts.cb.onAborted?.()
-    es.close()
-  })
-  // 主模型不可用:前端弹框确认后重新发起请求
-  es.addEventListener('retry', (e) => {
-    const d = safeParse((e as MessageEvent).data) as RetryEvent
-    opts.cb.onRetry?.(d)
-    es.close()
-  })
-  // 服务端命名 error 事件带 data;网络层错误无 data。两者都关闭,不重连(避免重复生成)。
-  es.addEventListener('error', (e) => {
-    const me = e as MessageEvent
-    if (me.data) {
-      // 服务端错误: 关闭并提示(仅在确有 data 时记录, 避免网络抖动重连刷屏)
-      console.log('[SSE] 收到 error data=%s', String(me.data).slice(0, 100))
-      const d = safeParse(me.data)
-      const msg = String(d.message || me.data)
-      const code = String(d.code || '')
-      if (code === 'UPSTREAM_ERROR') {
-        opts.cb.onError?.('AI 服务暂时不可用，请稍后重试')
-      } else if (code === 'RATE_LIMITED') {
-        opts.cb.onError?.('请求过于频繁，请稍后再试')
-      } else if (code === 'AUTH_REQUIRED') {
-        notifyAuthRequired()
-        opts.cb.onError?.('登录已失效，请重新登录')
-      } else if (
-        /missing authentication|not authenticated|未登录|invalid or expired token|^\s*401\b/i.test(msg)
-      ) {
-        notifyAuthRequired()
-        opts.cb.onError?.('登录已失效，请重新登录')
-      } else {
-        opts.cb.onError?.(msg || '服务异常，请稍后重试')
-      }
-      es.close()
-    }
-    // 无 data: 网络抖动 → EventSource 会自动重连, 静默不干预(避免日志刷屏)
-  })
+}
 
-  // 统一追踪 lastEventId: 每个命名事件都携带后端发的 `id:` 帧,
-  // 浏览器自动维护 event.lastEventId; 此处转交上层用于 F5 续接游标(after)。
-  const TRACKED_TYPES = [
-    'node', 'think', 'plan', 'token', 'intent', 'options', 'alternatives',
-    'unsupported', 'block', 'confirm', 'orchestration', 'subtask_start',
-    'subtask_done', 'subtask_fail', 'merge', 'cancel_summary', 'plan_preview',
-    'paused', 'clarify', 'requirement_doc', 'preview', 'degraded', 'qc',
-    'refined', 'reasoning', 'tool_call', 'tool_result',
-    'done', 'aborted', 'retry', 'error',
-  ]
-  for (const t of TRACKED_TYPES) {
-    es.addEventListener(t, (ev) => {
-      const id = (ev as MessageEvent).lastEventId
-      if (id) opts.cb.onEventId?.(id)
+export async function getTurn(turnId: string): Promise<TurnSnapshot> {
+  return requestJson(`/api/turns/${encodeURIComponent(turnId)}`, { method: 'GET' }) as Promise<TurnSnapshot>
+}
+
+export async function getPendingApprovals(): Promise<Record<string, unknown>[] | { approvals?: Record<string, unknown>[] }> {
+  return requestJson('/api/gate/pending', { method: 'GET' }) as Promise<Record<string, unknown>[] | { approvals?: Record<string, unknown>[] }>
+}
+
+function openStream(path: string, init: RequestInit, handlers: StreamHandlers): StreamSubscription {
+  const controller = new AbortController()
+  const finished = consume(path, { ...init, signal: controller.signal }, handlers, controller.signal)
+  return { abort: () => controller.abort(), finished }
+}
+
+async function consume(
+  path: string,
+  init: RequestInit,
+  handlers: StreamHandlers,
+  signal: AbortSignal,
+): Promise<void> {
+  try {
+    const response = await fetch(path, {
+      ...init,
+      credentials: 'same-origin',
     })
-  }
+    if (!response.ok) throw await responseError(response)
+    if (!response.body) throw new Error('服务端没有返回流式响应')
 
-  return es
-}
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
 
-/** 级联取消(C1):通知业务 → AI 标记 cancel。 */
-export async function cancelChat(traceId: string): Promise<void> {
-  try {
-    await post('/api/cancel', { trace_id: traceId })
-  } catch {
-    /* 忽略取消失败 */
-  }
-}
-
-/** v4 手动停止:通知业务 → AI 标记 pause(跑完当前阶段后暂停,可续跑)。区别于 cancelChat(立即 abort)。 */
-export async function pauseChat(traceId: string): Promise<void> {
-  try {
-    await post('/api/pause', { trace_id: traceId })
-  } catch {
-    /* 忽略暂停失败 */
-  }
-}
-
-/** v4 我的状态入口:返回上一次项目/会话 + 任务状态,供刷新/重开恢复上下文。 */
-export interface MyInfoResp {
-  current_project_id: number | null
-  current_conversation_id: number | null
-  status: 'idle' | 'running' | 'paused' | 'aborted' | 'done' | 'error' | string
-  current_stage: string | null
-  progress_pct: number
-  pause_reason: string | null
-  pending_decision: string | null
-  active_trace_id: string | null
-  needs_resume: boolean
-}
-
-export async function myInfo(): Promise<MyInfoResp> {
-  try {
-    const data = await get('/api/my-info')
-    return data as MyInfoResp
-  } catch {
-    return {
-      current_project_id: null,
-      current_conversation_id: null,
-      status: 'idle',
-      current_stage: null,
-      progress_pct: 0,
-      pause_reason: null,
-      pending_decision: null,
-      active_trace_id: null,
-      needs_resume: false,
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      buffer = drainFrames(buffer, handlers)
     }
+
+    buffer += decoder.decode()
+    if (buffer.trim()) parseFrame(buffer, handlers)
+  } catch (error) {
+    if (signal.aborted) return
+    handlers.onError(error instanceof Error ? error : new Error('流式连接失败'))
   }
 }
 
-/** 拉取可用模型列表(公开接口,无需登录)。 */
-export async function fetchModels(): Promise<ModelInfo[]> {
-  try {
-    const data = await publicGet('/api/models')
-    return Array.isArray(data) ? data : []
-  } catch {
-    return []
+function drainFrames(source: string, handlers: StreamHandlers): string {
+  let rest = source
+  while (true) {
+    const match = /\r?\n\r?\n/.exec(rest)
+    if (!match || match.index === undefined) return rest
+    const frame = rest.slice(0, match.index)
+    rest = rest.slice(match.index + match[0].length)
+    parseFrame(frame, handlers)
   }
 }
 
-/** 提交 1-10 评分评价(③-a:统计 + 回归数据集)。后端 /api/feedback 已实现。
- *  dimensions: 气泡内 6 维细分(可选), 缺省 null。 */
-export async function sendFeedback(
-  traceId: string,
-  rating: number,
-  conversationId?: number,
-  comment?: string,
-  dimensions?: RatingDims,
-): Promise<boolean> {
+function parseFrame(frame: string, handlers: StreamHandlers): void {
+  const data = frame
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trimStart())
+    .join('\n')
+  if (!data) return
+
   try {
-    await post('/api/feedback', {
-      trace_id: traceId,
-      conversation_id: conversationId ?? null,
-      rating,
-      comment: comment || null,
-      dimensions: dimensions && Object.keys(dimensions).length ? dimensions : null,
-    })
-    return true
-  } catch {
-    return false
+    const event = JSON.parse(data) as StreamEvent
+    if (!isStreamEvent(event)) throw new Error('收到不符合规范的流事件')
+    handlers.onEvent(event)
+  } catch (error) {
+    handlers.onError(error instanceof Error ? error : new Error('无法解析流事件'))
   }
+}
+
+function isStreamEvent(value: unknown): value is StreamEvent {
+  if (!value || typeof value !== 'object') return false
+  const event = value as Partial<StreamEvent>
+  return typeof event.stream_id === 'string'
+    && typeof event.turn_id === 'string'
+    && typeof event.trace_id === 'string'
+    && typeof event.event_id === 'string'
+    && typeof event.seq === 'number'
+    && typeof event.type === 'string'
+    && !!event.data
+    && typeof event.data === 'object'
+}
+
+async function requestJson(path: string, init: RequestInit): Promise<unknown> {
+  const response = await fetch(path, {
+    ...init,
+    credentials: 'same-origin',
+    headers: {
+      Accept: 'application/json',
+      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+      ...init.headers,
+    },
+  })
+  if (!response.ok) throw await responseError(response)
+  if (response.status === 204) return null
+  return response.json()
+}
+
+async function responseError(response: Response): Promise<Error> {
+  let message = `请求失败（${response.status}）`
+  try {
+    const payload = await response.json() as { message?: string; detail?: string; code?: string }
+    message = payload.message || payload.detail || payload.code || message
+  } catch {
+    // 非 JSON 错误使用状态码即可。
+  }
+  if (response.status === 401) {
+    notifyAuthRequired()
+    message = '登录已失效，请重新登录'
+  }
+  return new Error(message)
 }

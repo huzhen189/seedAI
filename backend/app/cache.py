@@ -11,7 +11,7 @@ from typing import Optional
 
 import redis.asyncio as aioredis
 
-from .config import settings
+from app.config import settings
 
 
 logger = logging.getLogger("business.cache")

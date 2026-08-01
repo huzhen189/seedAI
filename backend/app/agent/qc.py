@@ -30,7 +30,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .providers import get_chat_model
-from .config import settings
+from app.config import settings
 from .scoring import (
     SCORING_DIMENSIONS, LLM_SCORING_DIMS, parse_scores,
 )
