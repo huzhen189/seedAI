@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
-from app.core.contracts import ApprovalStatus, StreamEvent, TurnStatus
+from app.core.contracts import ApprovalStatus, StageId, StreamEvent, TurnStatus
 from app.core.pipeline import InMemoryAuditSink, StageResult
 from app.core.stages import build_pipeline
 from app.core.turn_context import TurnContext
@@ -36,7 +36,6 @@ from app.db.repositories import outbox as outbox_repo
 from app.db.repositories import turns as turns_repo
 from app.models import Approval
 from app.security import CurrentUser, get_current_user
-from app.services.finalize import finalize_service
 from app.services.turns import turn_service
 from app.transport.stream_broker import broker
 
@@ -129,6 +128,17 @@ async def _publish(context: TurnContext, event_type: str, data: dict[str, Any]) 
     )
 
 
+def _terminal_of(results: Sequence[StageResult]) -> str:
+    """从 S9 的 StageResult 还原终态。
+
+    S9 以 ``turn_<terminal>`` 形式回填 reason_code(completed/waiting_approval/blocked)。
+    """
+    for result in reversed(results):
+        if result.stage is StageId.S9:
+            return (result.reason_code or "").removeprefix("turn_") or "completed"
+    return "completed"
+
+
 async def _run_pipeline(context: TurnContext) -> None:
     """在独立事务中执行 S0-S9，并把阶段轨迹实时投递到流。"""
     try:
@@ -148,8 +158,11 @@ async def _run_pipeline(context: TurnContext) -> None:
                     },
                 )
 
-            await pipeline.run(context, observe)
-            terminal = await finalize_service.finalize(session, context)
+            results = await pipeline.run(context, observe)
+            # 终态收口的唯一归属是 S9(内部调 finalize)。此处只读取其结论，
+            # 绝不重复调用 finalize —— 否则同事务二次 add(assistant Message)
+            # 会撞 uq_messages_turn_role 唯一约束，导致整个 Turn 回滚。
+            terminal = _terminal_of(results)
     except Exception as exc:  # noqa: BLE001
         logger.exception("[pipeline] turn=%s 执行失败: %s", context.turn_id, exc)
         await _mark_failed(context.turn_id)
