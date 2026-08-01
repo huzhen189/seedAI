@@ -145,7 +145,9 @@ function applyEvent(state: StreamUiState, event: StreamEvent): void {
       applyStateDiff(state, event.data)
       break
     case 'approval':
-      state.approval = event.data
+      // 合并而非覆盖: 后续 approval 事件(如第一→第二步的 pending_second)往往不再携带
+      // 一次性 decision_nonce 明文(后端只在首个 approval 事件下发一次), 必须保留以完成双段确认。
+      state.approval = mergeApproval(state.approval, event.data)
       break
     case 'attempt_output': {
       const output = textFrom(event.data)
@@ -249,6 +251,27 @@ function upsertCapabilityNotice(state: StreamUiState, data: Record<string, unkno
 
 function textFrom(data: Record<string, unknown>): string {
   return stringValue(data.delta) || stringValue(data.text) || stringValue(data.content) || stringValue(data.message)
+}
+
+// 合并审批卡: 保留一次性 nonce(明文只下发一次), 后续事件只更新状态/风险等字段。
+// 同时按状态权威度收敛: approved/rejected/expired/invalidated 等终态覆盖 pending_*。
+const APPROVAL_TERMINAL = new Set(['approved', 'rejected', 'expired', 'invalidated', 'consumed', 'submitted'])
+function mergeApproval(
+  prev: Record<string, unknown> | null,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  const base = prev ?? {}
+  const merged: Record<string, unknown> = { ...base, ...next }
+  for (const nonceKey of ['decision_nonce', 'decision_nonce_2']) {
+    if (!(nonceKey in next) && nonceKey in base) merged[nonceKey] = base[nonceKey]
+  }
+  const prevStatus = stringValue(base.status)
+  const nextStatus = stringValue(next.status)
+  // 乱序保护: 若新事件是非终态但已有终态, 保留终态(避免回退到 pending)。
+  if (!APPROVAL_TERMINAL.has(nextStatus) && APPROVAL_TERMINAL.has(prevStatus)) {
+    merged.status = prevStatus
+  }
+  return merged
 }
 
 function stringValue(value: unknown): string {

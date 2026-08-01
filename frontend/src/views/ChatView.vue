@@ -180,6 +180,10 @@ const streamHandlers = {
     } else if (event.type === 'suspended') {
       generating.value = false
       stopping.value = false
+    } else if (event.type === 'reconnect') {
+      // 断连重订阅后向 Turn API 请求快照对账, 修正本地可能因乱序/丢失而偏离的状态。
+      void reconcileTerminal()
+      if (!stream.approval) void restorePendingApproval()
     }
     scrollToBottom()
   },
@@ -226,21 +230,45 @@ async function stop(): Promise<void> {
   }
 }
 
+const APPROVAL_TERMINAL = new Set(['approved', 'rejected', 'expired', 'invalidated', 'consumed', 'submitted'])
+
 async function decideApproval(decision: 'approve' | 'reject'): Promise<void> {
   const approvalId = readText(stream.approval, ['approval_id'])
-  const decisionNonce = readText(stream.approval, ['decision_nonce', 'challenge_nonce'])
+  // 双段确认复用同一一次性 nonce(后端两张 approve 都校验 challenge_nonce_hash);
+  // reducer 已在不带 nonce 的 pending_second 事件中保留它。
+  const decisionNonce = readText(stream.approval, ['decision_nonce', 'decision_nonce_2', 'challenge_nonce'])
   if (!approvalId || !decisionNonce) {
     errorMessage.value = '审批事件缺少 approval_id 或 decision_nonce'
     return
   }
   approvalSubmitting.value = true
+  errorMessage.value = ''
   try {
     await submitApproval(approvalId, decision, decisionNonce)
-    if (stream.approval) stream.approval = { ...stream.approval, status: decision === 'approve' ? 'submitted' : 'rejected' }
+    // 终态由 SSE 事件权威驱动: 拒绝直接标记终态; 批准交还 SSE(pending_second / done)。
+    if (decision === 'reject' && stream.approval) {
+      stream.approval = { ...stream.approval, status: 'rejected' }
+    }
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '提交审批决定失败'
+    const msg = error instanceof Error ? error.message : '提交审批决定失败'
+    errorMessage.value = msg
+    // 409 过期/已消费/非待决 -> 同步卡片状态, 便于用户重新发起审批。
+    const upper = msg.toUpperCase()
+    if (stream.approval) {
+      if (upper.includes('EXPIRED')) stream.approval = { ...stream.approval, status: 'expired' }
+      else if (upper.includes('CONSUMED') || upper.includes('NOT_PENDING') || upper.includes('INVALID')) {
+        stream.approval = { ...stream.approval, status: 'invalidated' }
+      }
+    }
   } finally {
     approvalSubmitting.value = false
+  }
+}
+
+// 倒计时归零时由 ApprovalCard 抛出, 同步本地卡片为过期态(避免误提交)。
+function onApprovalExpired(): void {
+  if (stream.approval && !APPROVAL_TERMINAL.has(String(stream.approval.status))) {
+    stream.approval = { ...stream.approval, status: 'expired' }
   }
 }
 
@@ -400,6 +428,8 @@ watch(() => stream.response, scrollToBottom)
               :approval="stream.approval"
               :submitting="approvalSubmitting"
               @decision="decideApproval"
+              @expired="onApprovalExpired"
+              @reauth="auth.openLogin()"
             />
             <div v-if="stream.suspended" class="suspended">{{ suspendedText }}</div>
           </template>
