@@ -25,6 +25,7 @@ import {
   resetStreamUiState,
   type StreamUiState,
 } from '../stream/reducer'
+import { offlineQueue, onOnline, isOnline, type QueuedMessage } from '../stream/offlineQueue'
 import type { Artifact, Message, ModelInfo } from '../types'
 import type { StreamEvent } from '../types/contracts.generated'
 
@@ -50,9 +51,12 @@ const stopping = ref(false)
 const replaying = ref(false)
 const approvalSubmitting = ref(false)
 const errorMessage = ref('')
+const offlineNote = ref('')
 const activeAssistant = ref<Message | null>(null)
 const subscription = ref<StreamSubscription | null>(null)
 const replaySubscription = ref<StreamSubscription | null>(null)
+// M9c: 联网恢复回调的注销函数, 卸载时清理避免重复注册。
+let unregisterOnline: (() => void) | null = null
 const convRef = ref<HTMLElement | null>(null)
 const artifacts = ref<Artifact[]>([])
 
@@ -86,15 +90,9 @@ async function ensureConversation(message: string): Promise<number> {
   return convStore.currentConvId!
 }
 
-async function send(): Promise<void> {
-  const message = input.value.trim()
-  if (!message || generating.value) return
-  if (!auth.user.value) {
-    auth.openLogin()
-    return
-  }
-
+async function performSend(message: string, clientMsgId: string): Promise<void> {
   errorMessage.value = ''
+  offlineNote.value = ''
   try {
     const conversationId = await ensureConversation(message)
     resetStreamUiState(stream)
@@ -106,17 +104,57 @@ async function send(): Promise<void> {
     generating.value = true
 
     subscription.value?.abort()
-    subscription.value = startChat({
-      client_msg_id: createClientMessageId(),
-      conversation_id: conversationId,
-      message,
-    }, streamHandlers)
-    void subscription.value.finished
+    const sub = startChat(
+      { client_msg_id: clientMsgId, conversation_id: conversationId, message },
+      streamHandlers,
+    )
+    subscription.value = sub
+    await sub.finished
     scrollToBottom()
   } catch (error) {
     generating.value = false
     errorMessage.value = error instanceof Error ? error.message : '无法创建对话'
   }
+}
+
+async function send(clientMsgId?: string): Promise<void> {
+  const message = input.value.trim()
+  if (!message || generating.value) return
+  if (!auth.user.value) {
+    auth.openLogin()
+    return
+  }
+
+  // 离线: 先持久化, 联网后由 offlineQueue 串行幂等补发(后端按 client_msg_id 去重)。
+  if (!isOnline()) {
+    const id = clientMsgId || createClientMessageId()
+    await offlineQueue.enqueue({ client_msg_id: id, message, conversation_id: projectStore.currentProjectId })
+    offlineNote.value = '离线：消息已存入本地队列，联网后自动发送'
+    input.value = ''
+    return
+  }
+
+  await performSend(message, clientMsgId || createClientMessageId())
+}
+
+// 离线队列补发: 逐条串行执行(后端按 client_msg_id 幂等去重, 重复提交只重挂接已有流)。
+async function flushOfflineQueue(): Promise<void> {
+  if (generating.value) return
+  if ((await offlineQueue.count()) === 0) return
+  offlineNote.value = '正在补发离线消息…'
+  try {
+    const sent = await offlineQueue.flush(async (item: QueuedMessage) => {
+      await performSend(item.message, item.client_msg_id)
+    })
+    offlineNote.value = sent > 0 ? `已补发 ${sent} 条离线消息` : ''
+  } catch {
+    offlineNote.value = '离线消息补发失败，联网后将自动重试'
+  }
+  setTimeout(() => {
+    if (offlineNote.value.startsWith('已补发') || offlineNote.value.startsWith('正在补发')) {
+      offlineNote.value = ''
+    }
+  }, 4000)
 }
 
 const streamHandlers = {
@@ -299,11 +337,16 @@ onMounted(async () => {
   await restorePendingApproval()
   await replaySavedStream()
   scrollToBottom()
+  // M9c: 联网恢复时按 client_msg_id 串行、幂等补发离线队列。
+  unregisterOnline = onOnline(() => void flushOfflineQueue())
+  // 若挂载时已在线但存在上次离线遗留的待发消息(如离线期间刷新了页面), 立即补发。
+  if (isOnline() && (await offlineQueue.count()) > 0) void flushOfflineQueue()
 })
 
 onUnmounted(() => {
   subscription.value?.abort()
   replaySubscription.value?.abort()
+  unregisterOnline?.()
 })
 
 watch(() => projectStore.currentProjectId, async (projectId) => {
@@ -365,6 +408,7 @@ watch(() => stream.response, scrollToBottom)
 
       <footer class="composer">
         <p v-if="replaying" class="status-line">正在补齐缺失的流事件…</p>
+        <p v-if="offlineNote" class="offline-line">{{ offlineNote }}</p>
         <p v-if="errorMessage || streamErrorText" class="error-line">{{ errorMessage || streamErrorText }}</p>
         <ChatInput
           v-model:value="input"
@@ -401,6 +445,7 @@ h1 { margin: 3px 0 0; color: var(--text); font-size: 16px; }
 .composer { border-top: 1px solid var(--border); padding: 12px 16px; background: var(--panel); }
 .status-line, .error-line { margin: 0 0 8px; border-radius: 8px; padding: 7px 10px; font-size: 12px; }
 .status-line { background: var(--brand-bg); color: var(--brand); }
+.offline-line { background: var(--warn-bg); color: var(--warn); }
 .error-line { background: var(--err-bg); color: var(--err); }
 .attempt-output, .suspended { margin: 10px 0; border-radius: 10px; padding: 10px 12px; font-size: 12px; line-height: 1.6; }
 .attempt-output { border: 1px solid var(--border); background: var(--surface-2); color: var(--text-3); }
