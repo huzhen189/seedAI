@@ -1,6 +1,7 @@
 """新链路 HTTP 入口包。"""
 
 from .admin_analytics import router as admin_analytics_router
+from .byok import router as byok_router
 from .ops import router as ops_router
 from .preview import router as preview_router
 from .turns import router as turns_router
@@ -12,4 +13,5 @@ __all__ = [
     "admin_analytics_router",
     "preview_router",
     "ops_router",
+    "byok_router",
 ]

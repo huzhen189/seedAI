@@ -260,6 +260,9 @@ class Settings(BaseSettings):
     refresh_token_ttl: int = Field(default=7 * 24 * 3600, ge=3600)
     seed_super_admin: str = ""
     provider_encryption_key: str = ""
+    provider_encryption_key_prev: str = ""
+    # KEK 版本号：换 KEK 时同步 +1，rotate 据此判断密文是否需要升级重加密。
+    provider_encryption_key_version: int = 1
     critical_admin_allowlist: str = ""
 
     deepseek_api_key: str = ""

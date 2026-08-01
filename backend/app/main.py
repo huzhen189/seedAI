@@ -32,6 +32,7 @@ _VENDOR_ABSPATH = VENDOR_DIR.resolve()
 
 from .api import (
     admin_analytics_router,
+    byok_router,
     ops_router,
     preview_router,
     turns_router,
@@ -172,6 +173,8 @@ app.include_router(admin_analytics_router)
 app.include_router(preview_router)
 # 运维可观测性(M10b): /readyz /ops/status /metrics
 app.include_router(ops_router)
+# BYOK 用户级密钥(M10e, §14.3): allowlist + AES-256-GCM + 轮换
+app.include_router(byok_router)
 
 
 if __name__ == "__main__":
