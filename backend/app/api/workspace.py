@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.expression import ColumnElement
 
 from app.db import get_db, transaction
 from app.models import Conversation, Message, Project
@@ -293,3 +294,155 @@ async def auto_start(
         project_view = _project_view(project)
         conversation_view = _conversation_view(conversation)
     return {"project": project_view, "conversation": conversation_view}
+
+
+# ---------------------------------------------------------------- 搜索
+
+
+def _like(column: Any, q: str) -> ColumnElement[bool]:
+    """构造安全的 LIKE 条件: 转义 LIKE 元字符, 防止用户输入的 % / _ 变成通配符。"""
+    escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return column.like(f"%{escaped}%", escape="\\")
+
+
+@router.get("/search")
+async def search_entities(
+    q: str = Query(min_length=1, max_length=128),
+    user: CurrentUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """全局搜索: 项目名 + 会话名 -> SearchItem[]。
+
+    契约见 frontend/src/types.ts::SearchItem —— {type, id, title, project_id}。
+    project 项的 project_id 置为自身 id, 便于前端统一跳转。
+    """
+    keyword = q.strip()
+    if not keyword:
+        return []
+
+    projects = (
+        await session.execute(
+            select(Project)
+            .where(
+                Project.user_id == user.id,
+                Project.status.in_(["draft", "active"]),
+                _like(Project.name, keyword),
+            )
+            .order_by(Project.updated_at.desc())
+            .limit(10)
+        )
+    ).scalars().all()
+
+    conversations = (
+        await session.execute(
+            select(Conversation)
+            .where(Conversation.user_id == user.id, _like(Conversation.name, keyword))
+            .order_by(Conversation.updated_at.desc())
+            .limit(10)
+        )
+    ).scalars().all()
+
+    items: list[dict[str, Any]] = [
+        {"type": "project", "id": p.id, "title": p.name, "project_id": p.id} for p in projects
+    ]
+    items += [
+        {"type": "conversation", "id": c.id, "title": c.name, "project_id": c.project_id}
+        for c in conversations
+    ]
+    return items
+
+
+@router.get("/search/messages")
+async def search_messages(
+    q: str = Query(min_length=1, max_length=128),
+    user: CurrentUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """消息全文搜索 -> MessageSearchResult[]。
+
+    问答配对走 turn_id: 真相模型对 messages 建有 UniqueConstraint(turn_id, role),
+    同一轮的 user / assistant 消息共享同一个 turn_id, 因此可精确聚合成「提问 + 回复」,
+    无需按 id 邻接猜测。turn_id 为空的历史消息降级为单条展示。
+    """
+    keyword = q.strip()
+    if not keyword:
+        return []
+
+    hits = (
+        await session.execute(
+            select(Message)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                Conversation.user_id == user.id,
+                Message.role.in_(["user", "assistant"]),
+                _like(Message.content, keyword),
+            )
+            .order_by(Message.id.desc())
+            .limit(40)
+        )
+    ).scalars().all()
+    if not hits:
+        return []
+
+    # 命中消息所属的轮次 -> 一次性取回该轮的全部消息, 供问答配对(避免 N+1)。
+    turn_ids = {m.turn_id for m in hits if m.turn_id}
+    pairs: dict[str, dict[str, Message]] = {}
+    if turn_ids:
+        siblings = (
+            await session.execute(
+                select(Message).where(
+                    Message.turn_id.in_(turn_ids), Message.role.in_(["user", "assistant"])
+                )
+            )
+        ).scalars().all()
+        for m in siblings:
+            if m.turn_id:
+                pairs.setdefault(m.turn_id, {})[m.role] = m
+
+    # 会话标题 + 项目名: 单次批量查询。
+    conv_ids = {m.conversation_id for m in hits}
+    meta_rows = (
+        await session.execute(
+            select(Conversation.id, Conversation.name, Project.id, Project.name)
+            .join(Project, Project.id == Conversation.project_id)
+            .where(Conversation.id.in_(conv_ids))
+        )
+    ).all()
+    meta = {row[0]: {"conv_title": row[1], "project_id": row[2], "project_name": row[3]} for row in meta_rows}
+
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for hit in hits:
+        # 同一轮的提问与回复可能双双命中, 按轮次去重, 只保留一条。
+        dedup_key = f"t:{hit.turn_id}" if hit.turn_id else f"m:{hit.id}"
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        pair = pairs.get(hit.turn_id or "", {})
+        user_msg = pair.get("user")
+        ai_msg = pair.get("assistant")
+        if user_msg is None and hit.role == "user":
+            user_msg = hit
+        if ai_msg is None and hit.role == "assistant":
+            ai_msg = hit
+
+        info = meta.get(hit.conversation_id)
+        if info is None:  # 会话已删但消息残留(理论不该发生), 跳过而非 500。
+            continue
+        anchor = user_msg or hit
+        results.append(
+            {
+                "message_id": anchor.id,
+                "conversation_id": hit.conversation_id,
+                "project_id": info["project_id"],
+                "project_name": info["project_name"],
+                "conv_title": info["conv_title"],
+                "user_text": user_msg.content if user_msg else "",
+                "ai_reply": ai_msg.content if ai_msg else "",
+                "created_at": _iso(anchor.created_at),
+            }
+        )
+        if len(results) >= 20:
+            break
+    return results
