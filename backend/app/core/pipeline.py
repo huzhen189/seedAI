@@ -56,9 +56,3 @@ class Pipeline:
             raise PipelineContractError(f"Stage {expected_stage.value} 返回了错误 result.stage={result.stage.value}")
         if expected_stage in {StageId.S0, StageId.S8, StageId.S9} and result.status is StageStatus.SKIPPED:
             raise PipelineContractError(f"已接受 Turn 的 {expected_stage.value} 不得 skipped")
-
-
-def build_m2_skeleton_pipeline(audit_sink: AuditSink) -> Pipeline:
-    from .stages import build_pipeline
-
-    return build_pipeline(audit_sink=audit_sink, session=None)

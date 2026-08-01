@@ -7,7 +7,7 @@ import pytest
 from app.core.contracts import PIPELINE_STAGES, StageId, StageResult, StageStatus, SessionInfo, UserIdentity
 from app.core.errors import PipelineContractError
 from app.core.ids import new_ulid
-from app.core.pipeline import InMemoryAuditSink, Pipeline, build_m2_skeleton_pipeline
+from app.core.pipeline import InMemoryAuditSink, Pipeline
 from app.core.turn_context import TurnContext
 from app.core.stages import (
     S0GatewayStage,
@@ -38,30 +38,21 @@ def make_context() -> TurnContext:
     )
 
 
-def test_skeleton_pipeline_runs_exactly_s0_to_s9_without_side_effects() -> None:
-    async def scenario() -> None:
-        audit = InMemoryAuditSink()
-        context = make_context()
-        results = await build_m2_skeleton_pipeline(audit).run(context)
+def test_pipeline_has_exactly_s0_to_s9_in_order() -> None:
+    """规范: 十阶段 Pipeline(S0-S9) 必须存在且按序编排, 不再有 skeleton NO_OP 阶段。
 
-        assert tuple(result.stage for result in results) == PIPELINE_STAGES
-        assert tuple(result.status for result in results) == (
-            StageStatus.COMPLETED,
-            StageStatus.NO_OP,
-            StageStatus.NO_OP,
-            StageStatus.NO_OP,
-            StageStatus.NO_OP,
-            StageStatus.NO_OP,
-            StageStatus.NO_OP,
-            StageStatus.NO_OP,
-            StageStatus.COMPLETED,
-            StageStatus.COMPLETED,
-        )
-        assert audit.results == list(results)
-        assert context.execution is None
-        assert context.reply_final == ""
+    真实执行需要数据库会话(由 API 层在请求内注入), 故此处只校验结构契约:
+    构造不依赖 DB, 且阶段数=10、顺序严格 S0..S9。端到端执行由 live smoke 覆盖。
+    """
+    from app.core.stages import build_pipeline
 
-    asyncio.run(scenario())
+    pipeline = build_pipeline(audit_sink=InMemoryAuditSink(), session=None)
+    stage_ids = [s.stage_id for s in pipeline._stages]  # noqa: SLF001 - 结构校验
+    assert stage_ids == list(PIPELINE_STAGES)
+    assert len(stage_ids) == 10
+    assert [s.value for s in stage_ids] == [
+        "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9",
+    ]
 
 
 def test_pipeline_rejects_reordered_stages() -> None:
