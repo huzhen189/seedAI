@@ -390,19 +390,23 @@ export interface DbStatus {
   chroma?: ChromaStatus
 }
 
-/** 生成产物(Artifact 表) */
+/** 生成产物(Artifact 表)
+ *  v3 形状(`GET /api/projects/{id}/artifacts` 返回): 不再内联 files 列表,
+ *  只暴露版本级元数据; 实际产物经「签名预览端点」(`/preview/{token}/...`)按短期签名提供。
+ */
 export interface Artifact {
   id: number
-  title?: string
+  project_id?: number
+  version?: number
   trace_id?: string
   repo?: string        // site | code | image | doc
-  // P1: 文件元数据只存本地相对路径(path, 相对 ARTIFACT_DIR), 不再内联内容/直链。
-  // 前端据 `${location.origin}/artifacts/${path}` 同源拉取预览(nginx 静态直出)。
-  // url 仅在发布(P4)回填 COS 直链后才有意义; path 始终是本地预览依据。
-  files?: Record<string, { name: string; size: number; path?: string; url?: string; content?: string }>
-  preview_url?: string
-  download_url?: string
-  status?: string      // uploading | done | failed
+  status?: string      // building | verified | preview_ready | failed | deleted
+  /** 是否可签发预览(verified/preview_ready 且有 preview_path)。 */
+  previewable?: boolean
+  is_head?: boolean
+  is_published?: boolean
+  capability_manifest?: Record<string, unknown> | null
+  manifest_digest?: string | null
   created_at?: string
 }
 

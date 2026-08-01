@@ -302,7 +302,7 @@ class Settings(BaseSettings):
     preview_grant_ttl: int = Field(default=600, ge=60, le=3600)
     cookie_domain: str = ""
     cookie_secure: bool = False
-    cors_origins: str = "http://localhost:7100,http://seedai.huzhen.net.cn:7100,http://seedai.huzhen.net.cn,https://seedai.huzhen.net.cn"
+    cors_origins: str = "http://localhost:7100,http://127.0.0.1:7100,http://seedai.huzhen.net.cn:7100,http://seedai.huzhen.net.cn,https://seedai.huzhen.net.cn"
 
     chroma_collection_components: str = "components"
     chroma_collection_memory: str = "memory"

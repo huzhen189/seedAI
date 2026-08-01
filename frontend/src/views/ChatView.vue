@@ -28,6 +28,9 @@ import {
 import type { Artifact, Message, ModelInfo } from '../types'
 import type { StreamEvent } from '../types/contracts.generated'
 
+// 模板内不允许直接使用 import.meta, 提为 script 常量供绑定。
+const devMode = import.meta.env.DEV
+
 interface ResumeRef {
   streamId: string
   turnId: string
@@ -339,7 +342,7 @@ watch(() => stream.response, scrollToBottom)
           :can-rate="false"
         >
           <template v-if="message === activeAssistant && hasLivePanel" #trail>
-            <StageRail :stages="stream.stages" :show-development="import.meta.env.DEV" />
+            <StageRail :stages="stream.stages" :show-development="devMode" />
             <ActivityPanel
               :activities="stream.activities"
               :capability-notices="stream.capabilityNotices"
@@ -380,7 +383,6 @@ watch(() => stream.response, scrollToBottom)
         :artifacts="artifacts"
         :generating="generating"
         :project-id="projectStore.currentProjectId"
-        :requirement-doc="null"
         @refresh="loadArtifacts"
       />
     </aside>
