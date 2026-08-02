@@ -31,13 +31,14 @@ VENDOR_DIR = Path(__file__).resolve().parent.parent / "shared" / "vendor"
 _VENDOR_ABSPATH = VENDOR_DIR.resolve()
 
 from .api import (
-    admin_analytics_router,
     byok_router,
     ops_router,
     preview_router,
     turns_router,
+    vector_admin_router,
     workspace_router,
 )
+from .admin import router as admin_router
 from .auth import router as auth_router
 from app.config import settings
 from .cache import get_redis
@@ -176,13 +177,18 @@ async def serve_vendor(path: str):
 app.include_router(auth_router)
 app.include_router(turns_router)
 app.include_router(workspace_router)
-app.include_router(admin_analytics_router)
+# 管理后台(含 /admin/metrics SSE、/admin/analytics、/admin/quality、/users、/traces、
+# 前端遥测 track/perf 上报)。注:此前仅挂了 204 空壳 admin_analytics_router,真实只读端点
+# 一直在 admin.py 却未挂载,导致前端全 404;现统一并入 admin_router 消除冲突。
+app.include_router(admin_router)
 # 签名预览(REQ-PREVIEW-001): 取代 v2 的 nginx auth_request + 同源静态直出方案。
 app.include_router(preview_router)
 # 运维可观测性(M10b): /readyz /ops/status /metrics
 app.include_router(ops_router)
 # BYOK 用户级密钥(M10e, §14.3): allowlist + AES-256-GCM + 轮换
 app.include_router(byok_router)
+# 向量库可视化管理(统计系统): 超管专用, 只读浏览 + 受限写(删/建/清空, 留痕)
+app.include_router(vector_admin_router)
 
 
 if __name__ == "__main__":

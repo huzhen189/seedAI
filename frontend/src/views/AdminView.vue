@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { get, post } from '../api/client'
+import { get, post, delJson } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import RadarChart from '../components/RadarChart.vue'
 import { ROLE_LABELS, QC_DIM_LABELS, type AdminUser, type DbCapacity, type MetricsSnapshot, type Role } from '../types'
@@ -13,12 +13,13 @@ const currentRoleLabel = computed(
 
 // ---- 标签页(RBAC:用户管理 / 控制面 仅超管可见) ----
 // v2.0.0 重组: 运行指标(服务器/三库/模型用量/API延迟) · AI质量(雷达/Skill/生成阶段/LLM) · 前端分析(UV/PV/性能/点击)
-type Tab = 'metrics' | 'users' | 'control' | 'quality' | 'replay' | 'frontend'
+type Tab = 'metrics' | 'users' | 'control' | 'quality' | 'replay' | 'frontend' | 'vector'
 const tabs: { key: Tab; label: string; superOnly: boolean }[] = [
   { key: 'metrics', label: '运行指标', superOnly: false },
   { key: 'quality', label: 'AI 质量', superOnly: false },
   { key: 'replay', label: '回放', superOnly: false },
   { key: 'frontend', label: '前端分析', superOnly: false },
+  { key: 'vector', label: '向量库', superOnly: true },
   { key: 'users', label: '用户管理', superOnly: true },
   { key: 'control', label: '控制面', superOnly: true },
 ]
@@ -511,17 +512,285 @@ onMounted(() => {
   // 此处预拉一次, 后续由前端分析 tab 的 15s 轮询续接。
   fetchAnalytics()
 })
+onUnmounted(() => {
+  es?.close()
+})
+
+// ---- 向量库可视化管理（超管专用） ----
+
+// ---- 向量库可视化管理（超管专用） ----
+interface VCollection {
+  name: string
+  count: number
+  metadata: Record<string, any>
+}
+interface VPoint {
+  id: string
+  document: string
+  metadata: Record<string, any>
+}
+interface VHit {
+  id: string
+  text: string
+  metadata: Record<string, any>
+  distance: number
+}
+
+const vectorCollections = ref<VCollection[]>([])
+const vectorLoading = ref(false)
+const vectorError = ref('')
+const selectedCollection = ref('')
+const browsePoints = ref<VPoint[]>([])
+const browseWhere = ref('')
+const browseLimit = ref(50)
+const browseOffset = ref(0)
+const browseHasMore = ref(false)
+const browseLoading = ref(false)
+const queryText = ref('')
+const queryTopK = ref(10)
+const queryHits = ref<VHit[]>([])
+const queryLoading = ref(false)
+const selectedPoint = ref<(VPoint & { embedding?: number[] }) | null>(null)
+const pointLoading = ref(false)
+const selectedIds = ref<Set<string>>(new Set())
+const showAddPanel = ref(false)
+const addDocument = ref('')
+const addMetaRaw = ref('{}')
+const addError = ref('')
+
+async function fetchVectorCollections(): Promise<void> {
+  vectorLoading.value = true
+  vectorError.value = ''
+  try {
+    const data = await get('/admin/vector/collections')
+    vectorCollections.value = (data.collections || []) as VCollection[]
+  } catch (e) {
+    vectorError.value = (e as Error).message || '加载集合失败'
+    vectorCollections.value = []
+  } finally {
+    vectorLoading.value = false
+  }
+}
+
+async function selectCollection(name: string): Promise<void> {
+  selectedCollection.value = name
+  browseOffset.value = 0
+  selectedIds.value = new Set()
+  await browseCollection()
+  queryHits.value = []
+}
+
+async function browseCollection(): Promise<void> {
+  if (!selectedCollection.value) return
+  browseLoading.value = true
+  vectorError.value = ''
+  try {
+    const params = new URLSearchParams({
+      limit: String(browseLimit.value),
+      offset: String(browseOffset.value),
+    })
+    if (browseWhere.value.trim()) params.set('where', browseWhere.value.trim())
+    const data = await get(
+      `/admin/vector/collections/${encodeURIComponent(selectedCollection.value)}?${params.toString()}`,
+    )
+    browsePoints.value = (data.points || []) as VPoint[]
+    browseHasMore.value = (data.points || []).length >= browseLimit.value
+  } catch (e) {
+    vectorError.value = (e as Error).message || '浏览失败'
+    browsePoints.value = []
+  } finally {
+    browseLoading.value = false
+  }
+}
+
+function browsePrev(): void {
+  if (browseOffset.value >= browseLimit.value) {
+    browseOffset.value -= browseLimit.value
+    browseCollection()
+  }
+}
+function browseNext(): void {
+  if (browseHasMore.value) {
+    browseOffset.value += browseLimit.value
+    browseCollection()
+  }
+}
+
+async function runQuery(): Promise<void> {
+  if (!selectedCollection.value || !queryText.value.trim()) return
+  queryLoading.value = true
+  vectorError.value = ''
+  try {
+    const body: Record<string, unknown> = {
+      query: queryText.value.trim(),
+      top_k: queryTopK.value,
+    }
+    if (browseWhere.value.trim()) {
+      try {
+        body.where = JSON.parse(browseWhere.value.trim())
+      } catch {
+        vectorError.value = 'where 不是合法 JSON，已忽略检索过滤'
+      }
+    }
+    const data = await post(
+      `/admin/vector/collections/${encodeURIComponent(selectedCollection.value)}/query`,
+      body,
+    )
+    queryHits.value = (data.hits || []) as VHit[]
+  } catch (e) {
+    vectorError.value = (e as Error).message || '检索失败'
+    queryHits.value = []
+  } finally {
+    queryLoading.value = false
+  }
+}
+
+async function openPointDetail(id: string, withEmbedding = false): Promise<void> {
+  if (!selectedCollection.value) return
+  pointLoading.value = true
+  try {
+    const data = await get(
+      `/admin/vector/collections/${encodeURIComponent(selectedCollection.value)}/${encodeURIComponent(id)}?with_embedding=${withEmbedding}`,
+    )
+    selectedPoint.value = data.point as VPoint & { embedding?: number[] }
+  } catch (e) {
+    vectorError.value = (e as Error).message || '加载详情失败'
+    selectedPoint.value = null
+  } finally {
+    pointLoading.value = false
+  }
+}
+
+function toggleSelect(id: string): void {
+  const next = new Set(selectedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selectedIds.value = next
+}
+
+async function deletePoints(ids: string[]): Promise<void> {
+  if (!selectedCollection.value || ids.length === 0) return
+  if (!confirm(`确认删除 ${ids.length} 个向量点？此操作不可撤销。`)) return
+  vectorError.value = ''
+  try {
+    const res = await delJson(
+      `/admin/vector/collections/${encodeURIComponent(selectedCollection.value)}/points`,
+      { ids },
+    )
+    await browseCollection()
+    selectedIds.value = new Set()
+    await fetchVectorCollections()
+    vectorError.value = `已删除 ${res.deleted ?? ids.length} 个点`
+  } catch (e) {
+    vectorError.value = (e as Error).message || '删除失败'
+  }
+}
+
+async function deleteByWhere(): Promise<void> {
+  if (!selectedCollection.value) return
+  if (!confirm('确认按 where 条件删除匹配的全部向量点？此操作不可撤销。')) return
+  vectorError.value = ''
+  let where: Record<string, any> | null = null
+  if (browseWhere.value.trim()) {
+    try {
+      where = JSON.parse(browseWhere.value.trim())
+    } catch {
+      vectorError.value = 'where 不是合法 JSON'
+      return
+    }
+  } else {
+    vectorError.value = '请先填写 where 条件'
+    return
+  }
+  try {
+    const res = await delJson(
+      `/admin/vector/collections/${encodeURIComponent(selectedCollection.value)}/points`,
+      { where },
+    )
+    await browseCollection()
+    await fetchVectorCollections()
+    vectorError.value = `已删除 ${res.deleted ?? 0} 个点`
+  } catch (e) {
+    vectorError.value = (e as Error).message || '删除失败'
+  }
+}
+
+async function submitAdd(): Promise<void> {
+  addError.value = ''
+  if (!selectedCollection.value) return
+  if (!addDocument.value.trim()) {
+    addError.value = '文本不能为空'
+    return
+  }
+  let metadata: Record<string, any> | undefined
+  if (addMetaRaw.value.trim()) {
+    try {
+      metadata = JSON.parse(addMetaRaw.value.trim())
+    } catch {
+      addError.value = '元数据不是合法 JSON'
+      return
+    }
+  }
+  try {
+    await post(
+      `/admin/vector/collections/${encodeURIComponent(selectedCollection.value)}/points`,
+      { points: [{ document: addDocument.value.trim(), metadata }] },
+    )
+    showAddPanel.value = false
+    addDocument.value = ''
+    addMetaRaw.value = '{}'
+    await browseCollection()
+    await fetchVectorCollections()
+    vectorError.value = '新增成功'
+  } catch (e) {
+    addError.value = (e as Error).message || '新增失败'
+  }
+}
+
+async function clearCollection(): Promise<void> {
+  if (!selectedCollection.value) return
+  if (!confirm(`⚠️ 确认清空集合「${selectedCollection.value}」的所有向量点？集合本身保留，但数据全部删除不可撤销！`)) return
+  vectorError.value = ''
+  try {
+    const res = await delJson(
+      `/admin/vector/collections/${encodeURIComponent(selectedCollection.value)}/clear`,
+      { confirm: true },
+    )
+    await browseCollection()
+    await fetchVectorCollections()
+    vectorError.value = `已清空 ${res.removed ?? 0} 个点`
+  } catch (e) {
+    vectorError.value = (e as Error).message || '清空失败'
+  }
+}
+
+function refreshVector(): void {
+  fetchVectorCollections()
+  if (selectedCollection.value) browseCollection()
+}
+
 watch(activeTab, (t) => {
+  if (t === 'vector') {
+    fetchVectorCollections()
+    if (selectedCollection.value) browseCollection()
+  }
   if (t === 'frontend') {
     if (!al.value) fetchAnalytics()
     if (!alTimer) alTimer = setInterval(fetchAnalytics, 15000)
   } else {
-    if (alTimer) { clearInterval(alTimer); alTimer = null }
+    if (alTimer) {
+      clearInterval(alTimer)
+      alTimer = null
+    }
   }
 })
-onUnmounted(() => {
-  es?.close()
-})
+
+function fmtMeta(meta: Record<string, any> | undefined): string {
+  if (!meta) return ''
+  return Object.entries(meta)
+    .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
+    .join(' · ')
+}
 </script>
 
 <template>
@@ -1151,6 +1420,137 @@ onUnmounted(() => {
       <p class="hint">控制面为占位实现(M1 接 DockerComposeOrchestrator / K8s),当前仅 ack。</p>
     </section>
 
+    <!-- 向量库可视化（超管专用） -->
+    <section v-else-if="activeTab === 'vector' && isSuper" class="panel">
+      <div class="bar">
+        <h3>向量库管理</h3>
+        <button class="refresh" :disabled="vectorLoading" @click="refreshVector">刷新</button>
+      </div>
+      <p class="hint">可视化浏览 / 语义检索 / 受限写（删点 · 录入 · 清空）。写操作需超管并二次确认，已留痕。</p>
+      <p v-if="vectorError" class="ctrlmsg">{{ vectorError }}</p>
+
+      <div class="vector-layout">
+        <!-- 左：集合列表 -->
+        <aside class="coll-list">
+          <div v-if="vectorLoading" class="muted">加载中…</div>
+          <div v-else-if="!vectorCollections.length" class="muted">无集合或 Chroma 不可达</div>
+          <button
+            v-for="c in vectorCollections"
+            :key="c.name"
+            class="coll-item"
+            :class="{ on: selectedCollection === c.name }"
+            @click="selectCollection(c.name)"
+          >
+            <span class="coll-name">{{ c.name }}</span>
+            <span class="coll-count">{{ c.count }}</span>
+          </button>
+        </aside>
+
+        <!-- 右：主操作区 -->
+        <div v-if="!selectedCollection" class="coll-empty muted">← 选择左侧集合开始操作</div>
+        <div v-else class="coll-main">
+          <!-- 检索 + 过滤 -->
+          <div class="block">
+            <div class="subbar">
+              <input v-model="queryText" class="vinput" placeholder="语义检索（输入自然语言）" @keyup.enter="runQuery" />
+              <input v-model.number="queryTopK" class="vinput small" type="number" min="1" max="50" />
+              <button class="refresh" :disabled="queryLoading" @click="runQuery">检索</button>
+            </div>
+            <div class="subbar">
+              <input v-model="browseWhere" class="vinput" placeholder='where 过滤（JSON，如 {"kind":"intent"}）' />
+              <input v-model.number="browseLimit" class="vinput small" type="number" min="1" max="200" />
+              <button class="refresh" :disabled="browseLoading" @click="browseCollection">浏览</button>
+              <button class="mini-btn" :disabled="browseLoading || browseOffset < browseLimit" @click="browsePrev">上一页</button>
+              <button class="mini-btn" :disabled="browseLoading || !browseHasMore" @click="browseNext">下一页</button>
+            </div>
+
+            <!-- 检索命中 -->
+            <div v-if="queryHits.length" class="block">
+              <h4>检索命中（{{ queryHits.length }}）</h4>
+              <table class="atable">
+                <thead><tr><th>ID</th><th>距离</th><th>文本</th><th>元数据</th></tr></thead>
+                <tbody>
+                  <tr v-for="h in queryHits" :key="h.id">
+                    <td class="mono">{{ h.id }}</td>
+                    <td>{{ h.distance != null ? h.distance.toFixed(4) : '-' }}</td>
+                    <td class="doc-cell">{{ h.text }}</td>
+                    <td class="meta-cell">{{ fmtMeta(h.metadata) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- 批量操作 -->
+            <div class="subbar">
+              <span class="muted">已选 {{ selectedIds.size }} 个</span>
+              <button class="mini-btn danger" :disabled="!selectedIds.size" @click="deletePoints([...selectedIds])">删除选中</button>
+              <button class="mini-btn" @click="showAddPanel = !showAddPanel">录入点</button>
+              <button class="mini-btn danger" @click="deleteByWhere">按 where 删除</button>
+              <button class="mini-btn danger" @click="clearCollection">清空集合</button>
+            </div>
+
+            <!-- 录入面板 -->
+            <div v-if="showAddPanel" class="block add-panel">
+              <h4>录入向量点</h4>
+              <p v-if="addError" class="ctrlmsg">{{ addError }}</p>
+              <textarea v-model="addDocument" class="vtextarea" placeholder="文本内容（将被向量化）" rows="3"></textarea>
+              <textarea v-model="addMetaRaw" class="vtextarea" placeholder='元数据 JSON，如 {"kind":"manual"}' rows="2"></textarea>
+              <button class="refresh" @click="submitAdd">提交</button>
+            </div>
+          </div>
+
+          <!-- 浏览点表格 -->
+          <div class="block">
+            <h4>向量点（{{ browsePoints.length }}）</h4>
+            <div v-if="browseLoading" class="muted">加载中…</div>
+            <table v-else class="atable">
+              <thead>
+                <tr><th></th><th>ID</th><th>文本</th><th>元数据</th><th>操作</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="p in browsePoints" :key="p.id">
+                  <td><input type="checkbox" :checked="selectedIds.has(p.id)" @change="toggleSelect(p.id)" /></td>
+                  <td class="mono">{{ p.id }}</td>
+                  <td class="doc-cell">{{ p.document }}</td>
+                  <td class="meta-cell">{{ fmtMeta(p.metadata) }}</td>
+                  <td>
+                    <button class="mini-btn" @click="openPointDetail(p.id)">详情</button>
+                    <button class="mini-btn danger" @click="deletePoints([p.id])">删除</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 单点详情弹层 -->
+      <div v-if="selectedPoint" class="modal-mask" @click.self="selectedPoint = null">
+        <div class="modal">
+          <div class="bar">
+            <h4>向量点详情</h4>
+            <button class="mini-btn" @click="selectedPoint = null">关闭</button>
+          </div>
+          <p class="mono">ID: {{ selectedPoint.id }}</p>
+          <div class="block">
+            <h5>文本</h5>
+            <pre class="vpre">{{ selectedPoint.document }}</pre>
+          </div>
+          <div class="block">
+            <h5>元数据</h5>
+            <pre class="vpre">{{ JSON.stringify(selectedPoint.metadata, null, 2) }}</pre>
+          </div>
+          <div class="block" v-if="selectedPoint.embedding">
+            <h5>原始向量（{{ selectedPoint.embedding.length }} 维，前 16 值）</h5>
+            <pre class="vpre">{{ selectedPoint.embedding.slice(0, 16).map((x: number) => x.toFixed(4)).join(', ') }}</pre>
+          </div>
+          <div v-else class="block">
+            <button class="mini-btn" @click="openPointDetail(selectedPoint!.id, true)">加载原始向量</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section v-else class="panel">
       <p class="muted">无权限访问该模块。</p>
     </section>
@@ -1493,4 +1893,31 @@ h4 { margin: 12px 0 8px; font-size: 14px; color: var(--text); }
 .model-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); }
 .model-table .mname { font-weight: 600; color: var(--primary, #15c4a4); }
 .user-input { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
+
+/* ── 向量库工具 ── */
+.vector-layout { display: flex; gap: 16px; align-items: flex-start; }
+.coll-list { width: 220px; flex: 0 0 220px; max-height: 600px; overflow: auto; display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.coll-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text-2); cursor: pointer; text-align: left; transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
+.coll-item:hover { border-color: var(--brand); color: var(--brand); }
+.coll-item.on { background: var(--brand-bg); border-color: var(--brand); color: var(--brand); font-weight: 600; }
+.coll-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+.coll-count { font-size: 12px; color: var(--muted); background: var(--surface-2); border-radius: 6px; padding: 1px 7px; flex: 0 0 auto; }
+.coll-empty { padding: 30px; }
+.coll-main { flex: 1 1 auto; min-width: 0; }
+.subbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.vinput { flex: 1 1 200px; min-width: 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text-1); font-size: 13px; }
+.vinput.small { flex: 0 0 64px; width: 64px; }
+.vtextarea { width: 100%; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text-1); font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 8px; }
+.doc-cell { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.doc-cell:hover { white-space: normal; }
+.meta-cell { max-width: 220px; font-size: 11px; color: var(--muted); word-break: break-all; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+.add-panel { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--surface-2); }
+.vpre { max-height: 240px; overflow: auto; font-size: 12px; background: var(--surface-2); padding: 8px; border-radius: 8px; border: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; }
+.mini-btn.danger { border-color: rgba(220, 38, 38, 0.35); color: var(--err); }
+.mini-btn.danger:hover { background: rgba(220, 38, 38, 0.12); border-color: var(--err); }
+.modal-mask { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 50; backdrop-filter: blur(4px); }
+.modal { width: min(680px, 92vw); max-height: 86vh; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 18px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35); }
+.modal .block { margin-top: 10px; }
+.modal h5 { margin: 10px 0 4px; font-size: 13px; color: var(--text-4); }
 </style>

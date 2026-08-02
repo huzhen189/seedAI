@@ -57,6 +57,7 @@ export const get = (path: string) => request('GET', path)
 export const post = (path: string, body?: unknown) => request('POST', path, body)
 export const patch = (path: string, body?: unknown) => request('PATCH', path, body)
 export const del = (path: string) => request('DELETE', path)
+export const delJson = (path: string, body?: unknown) => request('DELETE', path, body)
 
 /** 公开接口(无需登录),直接 fetch */
 export async function publicGet(path: string): Promise<any> {
