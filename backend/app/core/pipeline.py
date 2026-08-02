@@ -2,15 +2,48 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Protocol
+from typing import Any, Protocol, cast
+
+from pydantic import BaseModel
 
 from .contracts import PIPELINE_STAGES, StageId, StageResult, StageStatus
 from .errors import PipelineContractError
 from .turn_context import TurnContext
 
 logger = logging.getLogger("app.core.pipeline")
+
+# IO 日志截断上限，避免 reply_final / understanding 等长字段把日志打爆。
+_IO_MAX_STR = 1200
+_IO_MAX_LIST_SAMPLE = 4
+
+
+def _log_safe(obj: object, max_str: int = _IO_MAX_STR, max_list: int = _IO_MAX_LIST_SAMPLE) -> object:
+    """把任意 context 状态递归转成「日志安全 + 截断」的纯 JSON 结构。
+
+    - Pydantic 模型：``model_copy(deep=True)`` 后再 ``model_dump(mode="json")``，
+      既与原始引用解耦（前后快照不串味），又保证 datetime/Enum 可序列化。
+    - 字符串：超过 ``max_str`` 截断并标注剩余长度。
+    - list/tuple：输出 ``{__len__, __sample__}``，只保留前 ``max_list`` 个样本。
+    """
+    if isinstance(obj, BaseModel):
+        return _log_safe(obj.model_dump(mode="json"), max_str, max_list)
+    if isinstance(obj, dict):
+        return {k: _log_safe(v, max_str, max_list) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        items = list(obj)
+        return {
+            "__len__": len(items),
+            "__sample__": [_log_safe(x, max_str, max_list) for x in items[:max_list]],
+        }
+    if isinstance(obj, str):
+        return obj if len(obj) <= max_str else f"{obj[:max_str]}[+{len(obj) - max_str} chars]"
+    if obj is None or isinstance(obj, (int, float, bool)):
+        return obj
+    return _log_safe(str(obj), max_str, max_list)
 
 
 class Stage(Protocol):
@@ -46,18 +79,50 @@ class Pipeline:
         results: list[StageResult] = []
         logger.info("[pipeline] 开始执行 turn=%s 共 %d 阶段", context.turn_id, len(self._stages))
         for stage in self._stages:
-            result = await stage.run(context)
+            intents = ",".join(
+                i.intent_id for i in (context.understanding.resolved_intents if context.understanding else [])
+            ) or "-"
             logger.info(
-                "[pipeline] 阶段 %s -> status=%s reason=%s duration=%dms turn=%s",
+                "[pipeline] ▶ 进入 %s turn=%s msg=%.40s intents=%s",
+                stage.stage_id.value, context.turn_id, context.clean_message, intents,
+            )
+            # 进入阶段即发一条 running 事件, 让前端 StageRail 实时显示"进行中"+友好文案。
+            # 修复此前只发结束事件、阶段从 pending 直跳 completed、用户体感"卡死无反馈"的问题。
+            if observer is not None:
+                await observer(StageResult(stage=stage.stage_id, status=StageStatus.RUNNING, reason_code="enter"))
+            # 节点进入前快照（run 前取，确保不被 stage 原地修改污染）。
+            in_io = cast(dict[str, Any], _log_safe(context.snapshot_state()))
+            result = await stage.run(context)
+            # 节点完成后快照 + 变更字段 diff。
+            out_io = cast(dict[str, Any], _log_safe(context.snapshot_state()))
+            changed = sorted(
+                k for k in (set(in_io) | set(out_io)) if in_io.get(k) != out_io.get(k)
+            )
+            logger.info(
+                "[pipeline.io] %s turn=%s | changed=%s | IN=%s | OUT=%s",
+                result.stage.value, context.turn_id, changed,
+                json.dumps(in_io, ensure_ascii=False),
+                json.dumps(out_io, ensure_ascii=False),
+            )
+            logger.info(
+                "[pipeline] ◀ %s -> status=%s reason=%s duration=%dms turn=%s",
                 result.stage.value, result.status.value, result.reason_code,
                 result.duration_ms, context.turn_id,
             )
             self._validate_result(stage.stage_id, result)
-            await self._audit_sink.append(result)
+            # 审计副本额外携带 IN/OUT/changed 快照(wire 侧 exclude, 只给 AuditSink 落库)。
+            # 用 model_copy 而非原地改, 保证 observer/返回给调用方的 result 保持纯净轻量。
+            await self._audit_sink.append(
+                result.model_copy(update={"io_in": in_io, "io_out": out_io, "io_changed": changed})
+            )
             if observer is not None:
                 await observer(result)
             results.append(result)
-        logger.info("[pipeline] 执行结束 turn=%s", context.turn_id)
+        status_counts = Counter(r.status.value for r in results)
+        logger.info(
+            "[pipeline] 执行结束 turn=%s 阶段=%d 状态分布=%s",
+            context.turn_id, len(results), dict(status_counts),
+        )
         return tuple(results)
 
     @staticmethod

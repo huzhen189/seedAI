@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -26,19 +27,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
+from app.core.audit import DbAuditSink
 from app.core.contracts import ApprovalStatus, StageId, StreamEvent, TurnStatus
-from app.core.pipeline import InMemoryAuditSink, StageResult
+from app.core.pipeline import StageResult
 from app.core.stages import build_pipeline
 from app.core.turn_context import TurnContext
 from app.db import get_db, transaction
 from app.db.repositories import approvals as approvals_repo
 from app.db.repositories import outbox as outbox_repo
 from app.db.repositories import turns as turns_repo
+from app.db.repositories.feedback import feedback_repo
 from app.domains.project import OpsOutcome, project_ops
 from app.models import Approval, Conversation, Message, ToolCall, Turn
 from app.security import CurrentUser, get_current_user
-from app.services.turns import turn_service
+from app.services.turns import AcceptedTurn, turn_service
 from app.transport.stream_broker import broker
+from app.analytics import record_user_active, record_gen_stage, record_ai_orch, record_feedback
 
 logger = logging.getLogger("app.api.turns")
 
@@ -75,11 +79,25 @@ class ChatRequest(BaseModel):
 class TurnControlRequest(BaseModel):
     action: Literal["stop", "pause", "resume", "correct", "supplement", "discard"]
     payload: dict[str, Any] = Field(default_factory=dict)
+    # 回溯控制（correct/supplement）时必填：用户对上一轮产物下达的新指令（修改/补充内容）。
+    instruction: str | None = Field(default=None, max_length=8000)
+    client_msg_id: str | None = Field(default=None, max_length=128)
 
 
 class ApprovalDecisionRequest(BaseModel):
     decision: Literal["approve", "reject"]
     decision_nonce: str = Field(min_length=1, max_length=128)
+
+
+class FeedbackRequest(BaseModel):
+    """用户对某一轮生成的评价。trace_id 由 SSE 事件带回前端，天然对齐回放。"""
+
+    trace_id: str = Field(min_length=1, max_length=64)
+    rating: int = Field(ge=1, le=10)
+    comment: str | None = Field(default=None, max_length=2000)
+    # 六维细分星级 {relevance: 8, accuracy: 9, ...}，可选
+    dimensions: dict[str, int] | None = None
+    conversation_id: int | None = Field(default=None, ge=1)
 
 
 # ---------------------------------------------------------------- SSE 编帧
@@ -149,6 +167,7 @@ async def _publish_approval_card(session: AsyncSession, context: TurnContext) ->
         "approval",
         {
             "approval_id": approval.approval_id,
+            "turn_id": context.turn_id,
             "decision_nonce": validation.decision_nonce,
             "action": approval.action,
             "status": approval.status,
@@ -171,24 +190,117 @@ def _terminal_of(results: Sequence[StageResult]) -> str:
     return "completed"
 
 
+# 前端 StageRail 每步反馈文案(用户友好, 不暴露内部 reason_code/阶段号)。
+# key=阶段号, value=不同状态下的文案; S6 按主域给出更具体的"正在生成网站"等。
+_STAGE_DETAIL_RUNNING: dict[str, str] = {
+    "S0": "已收到你的请求",
+    "S1": "正在回忆上下文…",
+    "S2": "正在理解你的需求…",
+    "S3": "正在整合已知信息…",
+    "S4": "正在规划执行步骤…",
+    "S5": "正在检查风险与条件…",
+    "S6": "正在执行…",
+    "S7": "正在保存结果…",
+    "S8": "正在质量校验…",
+    "S9": "正在收尾归档…",
+}
+_STAGE_DETAIL_DONE: dict[str, str] = {
+    "S0": "请求已接受",
+    "S1": "上下文已就绪",
+    "S2": "需求已理解",
+    "S3": "信息已整合",
+    "S4": "路径已确定",
+    "S5": "条件已通过",
+    "S6": "执行完成",
+    "S7": "结果已保存",
+    "S8": "校验通过",
+    "S9": "已完成",
+}
+_S6_DOMAIN_RUNNING: dict[str, str] = {
+    "site": "正在为你生成网站…",
+    "research": "正在搜集研究资料…",
+    "project": "正在处理项目…",
+    "chat": "正在组织回复…",
+}
+_S6_DOMAIN_DONE: dict[str, str] = {
+    "site": "网站已生成",
+    "research": "资料已整理",
+    "project": "项目已处理",
+    "chat": "回复已生成",
+}
+
+
+def _stage_detail(stage: str, status: str, context: TurnContext) -> str:
+    """给前端 StageRail 的每步反馈文案。
+
+    - 进行中(running/enter):友好的"正在…"文案;
+    - 结束(completed/no_op):"…完成"文案;
+    - skipped/paused/failed/blocked:对应状态文案。
+    S6 按本轮主域(建站/研究/项目/闲聊)给出更具体的描述。
+    """
+    domain = ""
+    if context.understanding is not None:
+        for it in context.understanding.resolved_intents:
+            if getattr(it, "executable", False):
+                domain = it.domain.value
+                break
+    if status in ("running", "enter"):
+        if stage == "S6":
+            return _S6_DOMAIN_RUNNING.get(domain, _STAGE_DETAIL_RUNNING["S6"])
+        return _STAGE_DETAIL_RUNNING.get(stage, "进行中…")
+    if status == "skipped":
+        return "首轮对话，暂无历史上下文" if stage == "S1" else "本轮无需执行"
+    if status == "paused":
+        return "待你确认一项操作"
+    if status == "blocked":
+        return "已被风险拦截"
+    if status == "failed":
+        return "执行出错"
+    if stage == "S6":
+        return _S6_DOMAIN_DONE.get(domain, _STAGE_DETAIL_DONE["S6"])
+    return _STAGE_DETAIL_DONE.get(stage, "完成")
+
+
 async def _run_pipeline(context: TurnContext) -> None:
     """在独立事务中执行 S0-S9，并把阶段轨迹实时投递到流。"""
+    # 审计 sink：缓冲每阶段 IN/OUT 快照，Turn 收尾时一次性落 trace_events，
+    # 供管理后台「回放」还原完整链路（此前只能去 app.log 翻 [pipeline.io]）。
+    audit_sink = DbAuditSink(trace_id=context.trace_id, turn_id=context.turn_id)
+    audit_sink.add_event(
+        "turn_start",
+        {
+            "turn_id": context.turn_id,
+            "stream_id": context.stream_id,
+            "conversation_id": context.session.conversation_id,
+            "project_id": context.session.project_id,
+            "user_id": context.user.user_id,
+            "client_msg_id": context.client_msg_id,
+            "user_input": context.clean_message,
+        },
+    )
     try:
         async with transaction() as session:
-            audit_sink = InMemoryAuditSink()
             pipeline = build_pipeline(audit_sink=audit_sink, session=session)
+            t_start = time.time()
 
             async def observe(result: StageResult) -> None:
-                await _publish(
-                    context,
-                    "stage",
-                    {
-                        "stage": result.stage.value,
-                        "status": result.status.value,
-                        "reason_code": result.reason_code,
-                        "duration_ms": result.duration_ms,
-                    },
-                )
+                payload: dict[str, Any] = {
+                    "stage": result.stage.value,
+                    "status": result.status.value,
+                    "reason_code": result.reason_code,
+                    "duration_ms": result.duration_ms,
+                    # 前端 StageRail 每步反馈文案(用户友好, 不暴露内部 reason_code)。
+                    "detail": _stage_detail(result.stage.value, result.status.value, context),
+                }
+                # 可追溯性：阶段产出的引用（S3 的 SIR 快照链 + 槽位 diff、S6 的 artifact id）
+                # 直接透出到 SSE，前端调试面板与线上排障都能按 turn 还原状态演进。
+                if result.output_refs:
+                    payload["output_refs"] = list(result.output_refs)
+                if result.stage is StageId.S3 and context.sir_diff:
+                    payload["sir_diff"] = context.sir_diff
+                await _publish(context, "stage", payload)
+                # 统计: 各生成阶段耗时(覆盖 S0-S9 全阶段)
+                await record_gen_stage(result.stage.value, result.duration_ms)
                 # S5 挂起审批时，紧跟一个 approval 事件把审批卡推给前端。
                 # 质询明文只在此刻下发这一次(库里只有 sha256)，错过即无法再取得。
                 if result.stage is StageId.S5 and result.reason_code == "approval_created":
@@ -199,15 +311,44 @@ async def _run_pipeline(context: TurnContext) -> None:
             # 绝不重复调用 finalize —— 否则同事务二次 add(assistant Message)
             # 会撞 uq_messages_turn_role 唯一约束，导致整个 Turn 回滚。
             terminal = _terminal_of(results)
+            # 统计: 整轮 s0-s9 编排(总耗时 + 是否成功终态)。
+            # 终态语义(finalize): completed=成功落库 / waiting_approval=闸门挂起(有效终态,非失败)
+            # / blocked=校验拦截(非崩溃但非成功);异常路径在 except 分支单独记 success=False。
+            total_ms = (time.time() - t_start) * 1000
+            orch_success = terminal in ("completed", "waiting_approval")
+            logger.info(
+                "[pipeline] 整轮编排终态 turn=%s terminal=%s success=%s total=%.1fms",
+                context.turn_id, terminal, orch_success, total_ms,
+            )
+            await record_ai_orch(success=orch_success, duration_ms=total_ms)
+        audit_sink.add_event(
+            "turn_end",
+            {
+                "terminal": terminal,
+                "total_ms": round(total_ms, 1),
+                "reply_final": context.reply_final,
+                "artifact_refs": list(context.execution.artifact_refs) if context.execution else [],
+            },
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("[pipeline] turn=%s 执行失败: %s", context.turn_id, exc)
+        audit_sink.add_event("turn_error", {"message": str(exc), "type": type(exc).__name__})
+        await audit_sink.flush()
         await _mark_failed(context.turn_id)
+        # 统计: 整轮编排失败
+        try:
+            await record_ai_orch(success=False, duration_ms=0.0)
+        except Exception:  # noqa: BLE001
+            pass
         await _publish(
             context,
             "error",
             {"code": "PIPELINE_FAILED", "message": str(exc), "retryable": False},
         )
         return
+
+    # 成功路径统一在业务事务之外落审计（失败路径已在 except 分支落过，保留现场）。
+    await audit_sink.flush()
 
     await _publish(
         context,
@@ -267,6 +408,8 @@ async def create_turn(
 
     context = accepted.context
     if not accepted.existing:
+        # 统计: 活跃用户(DAU 按日去重 + 人均生成次数) — 每次新受理 Turn 记一次
+        await record_user_active(user.id)
         _spawn(context)
     else:
         logger.info("[chat] 幂等命中，复用流 turn=%s", context.turn_id)
@@ -309,8 +452,45 @@ async def control_turn(
     payload: TurnControlRequest,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """用户侧控制。状态跃迁一律走 CAS，拒绝覆盖已终态的 Turn。"""
+    """用户侧控制。状态跃迁一律走 CAS，拒绝覆盖已终态的 Turn。
+
+    correct / supplement（回溯控制，§13.1）：不再只登记，而是以用户新指令
+    ``instruction`` 受理一个**回溯 turn**，绑定 ``prior_turn_id=turn_id``，走完整
+    S0-S9。S2/S4/S6 据此锁定上一轮产物（同 conversation/project）做受控 edit，
+    而非另起新站——实现「中断/回溯修改上一句」。
+    """
     logger.info("[control] turn=%s action=%s user=%s", turn_id, payload.action, user.id)
+    action = payload.action
+
+    # 回溯控制：先行校验指令与上一轮存在，避免进入事务后报错。
+    if action in {"correct", "supplement"}:
+        if not payload.instruction or not payload.instruction.strip():
+            raise HTTPException(status_code=422, detail={"code": "INSTRUCTION_REQUIRED"})
+        if not payload.client_msg_id:
+            raise HTTPException(status_code=422, detail={"code": "CLIENT_MSG_ID_REQUIRED"})
+        prior = await _load_prior_turn(turn_id, user.id)
+        if prior is None:
+            raise HTTPException(status_code=404, detail={"code": "PRIOR_TURN_NOT_FOUND"})
+        # 上一轮必须已终态（completed/blocked），运行中不允许回溯。
+        if prior.status not in {TurnStatus.COMPLETED.value, TurnStatus.BLOCKED.value}:
+            raise HTTPException(status_code=409, detail={"code": "PRIOR_TURN_NOT_TERMINAL", "status": prior.status})
+        # 受理回溯 turn 并异步重跑（新会话/项目沿用 prior 的，保证锁定原产物）。
+        accepted = await _accept_retro_turn(
+            user=user,
+            conversation_id=prior.conversation_id,
+            client_msg_id=payload.client_msg_id,
+            instruction=payload.instruction.strip(),
+            prior_turn_id=turn_id,
+        )
+        _spawn(accepted.context)
+        return {
+            "turn_id": accepted.context.turn_id,
+            "stream_id": accepted.context.stream_id,
+            "prior_turn_id": turn_id,
+            "action": action,
+            "status": "running",
+        }
+
     async with transaction() as session:
         turn = await turns_repo.by_turn_id(session, turn_id)
         if turn is None or turn.user_id != user.id:
@@ -318,14 +498,13 @@ async def control_turn(
         if turn.status in _TERMINAL_TURN_STATUS:
             raise HTTPException(status_code=409, detail={"code": "TURN_ALREADY_TERMINAL", "status": turn.status})
 
-        action = payload.action
         if action in {"stop", "discard"}:
             target, expected = TurnStatus.CANCELLED.value, turn.status
         elif action == "pause":
             target, expected = TurnStatus.PAUSED.value, TurnStatus.RUNNING.value
         elif action == "resume":
             target, expected = TurnStatus.RUNNING.value, TurnStatus.PAUSED.value
-        else:  # correct / supplement：不改变运行态，仅登记控制意图
+        else:  # 其它（未定义）保持原态
             target, expected = turn.status, turn.status
 
         if target != turn.status:
@@ -358,6 +537,79 @@ async def control_turn(
         data={"status": target, "action": action},
     )
     return {"turn_id": turn_id, "status": target, "action": action}
+
+
+async def _load_prior_turn(turn_id: str, user_id: int) -> Turn | None:
+    """读取被回溯的上一轮 turn（仅用户自己、且必须是正经 turn）。"""
+    async with transaction() as session:
+        turn = await turns_repo.by_turn_id(session, turn_id)
+        if turn is None or turn.user_id != user_id:
+            return None
+        return turn
+
+
+async def _accept_retro_turn(
+    *,
+    user: CurrentUser,
+    conversation_id: int,
+    client_msg_id: str,
+    instruction: str,
+    prior_turn_id: str,
+) -> AcceptedTurn:
+    """受理一个回溯 turn：复用现有 accept，但携带 prior_turn_id 与新指令。"""
+    async with transaction() as session:
+        accepted = await turn_service.accept(
+            session,
+            user=user,
+            conversation_id=conversation_id,
+            client_msg_id=client_msg_id,
+            raw_message=instruction,
+            expected_conversation_version=None,
+            prior_turn_id=prior_turn_id,
+        )
+        # 落一条 user Message（前端会与普通消息一致渲染）。
+        await session.flush()
+        return accepted
+
+
+@router.post("/feedback")
+async def submit_feedback(
+    payload: FeedbackRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """提交/更新一轮生成的用户评价（1-10 分 + 可选六维 + 评语）。
+
+    同一 trace 重复提交为覆盖更新（feedbacks.trace_id 唯一）。评分同时打进 Redis
+    统计（an: 命名空间的 P_FEEDBACK），并落 MySQL 供管理后台回放侧展示。
+    """
+    logger.info(
+        "[feedback] 提交评价 user=%s trace=%s rating=%s dims=%s",
+        user.id, payload.trace_id, payload.rating, bool(payload.dimensions),
+    )
+    async with transaction() as session:
+        try:
+            record = await feedback_repo.upsert(
+                session,
+                user_id=user.id,
+                trace_id=payload.trace_id,
+                conv_id=payload.conversation_id,
+                rating=payload.rating,
+                comment=payload.comment,
+                dimensions=dict(payload.dimensions) if payload.dimensions else None,
+            )
+        except LookupError as exc:
+            # trace 尚无 assistant 消息（生成失败/未落库）——不是服务端错误。
+            raise HTTPException(
+                status_code=404, detail={"code": "TRACE_NOT_FOUND", "message": str(exc)}
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail={"code": "INVALID_FEEDBACK", "message": str(exc)}
+            ) from exc
+        feedback_id = record.id
+    # 统计埋点放事务外：Redis 失败不得回滚已落库的评价。
+    await record_feedback(payload.rating, bool(payload.dimensions))
+    return {"ok": True, "feedback_id": feedback_id, "trace_id": payload.trace_id}
 
 
 @router.get("/gate/pending")
@@ -493,6 +745,7 @@ async def decide_approval(
                     conversation_id=turn.conversation_id,
                     project_id=project_id,
                     turn_id=turn.turn_id,
+                    trace_id=turn.trace_id,
                     role="assistant",
                     content=ack_text,
                     content_refs=content_refs,
@@ -584,6 +837,7 @@ async def _execute_approved_action(
         project_id=target_project_id,
         user_id=actor_user_id,
         trace_id=trace_id,
+        publish_files=list(approval.args.get("publish_files")) if approval.args.get("publish_files") else None,
     )
 
     ledger.status = "succeeded" if outcome.status == "succeeded" else "failed"

@@ -12,12 +12,13 @@ const currentRoleLabel = computed(
 )
 
 // ---- 标签页(RBAC:用户管理 / 控制面 仅超管可见) ----
-type Tab = 'metrics' | 'users' | 'control' | 'quality' | 'replay' | 'analytics'
+// v2.0.0 重组: 运行指标(服务器/三库/模型用量/API延迟) · AI质量(雷达/Skill/生成阶段/LLM) · 前端分析(UV/PV/性能/点击)
+type Tab = 'metrics' | 'users' | 'control' | 'quality' | 'replay' | 'frontend'
 const tabs: { key: Tab; label: string; superOnly: boolean }[] = [
   { key: 'metrics', label: '运行指标', superOnly: false },
   { key: 'quality', label: 'AI 质量', superOnly: false },
   { key: 'replay', label: '回放', superOnly: false },
-  { key: 'analytics', label: '系统分析', superOnly: false },
+  { key: 'frontend', label: '前端分析', superOnly: false },
   { key: 'users', label: '用户管理', superOnly: true },
   { key: 'control', label: '控制面', superOnly: true },
 ]
@@ -94,10 +95,10 @@ async function changeRole(u: AdminUser, role: string) {
   }
 }
 
-async function changePlan(u: AdminUser, plan: string) {
+async function changeTier(u: AdminUser, tier: string) {
   try {
-    const updated = await post(`/admin/users/${u.id}/plan`, { plan })
-    u.plan = updated.plan
+    const updated = await post(`/admin/users/${u.id}/tier`, { tier })
+    u.tier = updated.tier
   } catch (e: any) {
     if (e?.message !== 'AUTH_REQUIRED') alert(e?.message || '网络错误')
   }
@@ -177,10 +178,6 @@ const dbItems = computed<DbItem[]>(() => {
 // ---- R1: API 延迟两个子表单(业务端 / 需求端) ----
 type LatencyGroup = 'business' | 'ai_service'
 const latencyTab = ref<LatencyGroup>('business')
-const latencyGroups: { key: LatencyGroup; label: string }[] = [
-  { key: 'business', label: '业务端 (7101)' },
-  { key: 'ai_service', label: '需求端 (AI 核心, 进程内)' },
-]
 const currentLatency = computed<Record<string, LatencyBucket>>(() => {
   const groups = metrics.value.api_latency
   if (!groups) return {}
@@ -417,6 +414,17 @@ interface AnalyticsSnapshot {
     avg_rating: number | null
     with_dims_rate: number
   }
+  // v2.0.0 AI 质量 8 维雷达(0-100): 意图识别/LLM/Skill/生成/业务API/反馈/前端/编排
+  radar?: {
+    intent: number
+    llm: number
+    skill: number
+    generation: number
+    api: number
+    feedback: number
+    frontend: number
+    orchestration: number
+  }
   error?: string
 }
 const al = ref<AnalyticsSnapshot | null>(null)
@@ -431,15 +439,9 @@ async function fetchAnalytics() {
   finally { alLoading.value = false }
 }
 
-const ERROR_LABELS: Record<string, string> = {
-  rate_limited: '配额限流', model_unavailable: '模型不可用', upstream_error: '上游故障', timeout: '超时', unknown: '未分类',
-}
 
 const PERF_LABELS: Record<string, string> = {
   page_load: '全页加载', ttfb: '首字节(TTFB)', dom_ready: 'DOM 就绪',
-}
-const STAGE_LABELS_ANA: Record<string, string> = {
-  enter_planner: 'Planner', enter_coder: 'Coder', enter_reviewer: 'Reviewer', previewing: '预览投递',
 }
 function fmtMs(v: number | null | undefined): string {
   if (v == null || isNaN(Number(v))) return '-'
@@ -461,71 +463,56 @@ function statusLabel(s: string) {
   return m[s] || s
 }
 
-function strategyLabel(s: string) {
-  const m: Record<string, string> = { parallel: '全并行', mixed: '分层串行' }
-  return m[s] || s
-}
 
-function riskLabel(s: string) {
-  const m: Record<string, string> = { high: '高', medium: '中', low: '低' }
-  return m[s] || s
-}
 
 function eventTypeLabel(t: string) {
   const m: Record<string, string> = { node: '节点', think: '思考', plan: '计划', token: '输出', error: '错误', done: '完成', aborted: '取消', degraded: '降级' }
   return m[t] || t
 }
-function decisionLabel(d: string) {
-  const m: Record<string, string> = {
-    block: '安全拦截', confirm: '二次确认', options: '多选项',
-    route: '直接路由', fallback: '降级兜底', unsupported: '不支持',
+
+// 回放链路：事件详情折叠态(seq -> 是否展开)
+const expandedEvents = ref<Record<number, boolean>>({})
+function toggleEvent(i: number) {
+  expandedEvents.value = { ...expandedEvents.value, [i]: !expandedEvents.value[i] }
+}
+function expandAllEvents() {
+  const next: Record<number, boolean> = {}
+  selectedTrace.value?.events.forEach((_: unknown, i: number) => { next[i] = true })
+  expandedEvents.value = next
+}
+function isObj(v: unknown): v is Record<string, any> {
+  return !!v && typeof v === 'object' && !Array.isArray(v)
+}
+function pretty(v: unknown): string {
+  try {
+    return JSON.stringify(v, null, 2)
+  } catch {
+    return String(v)
   }
-  return m[d] || d
+}
+// 阶段事件 payload 摘要行(状态 / 耗时 / 变更字段数)
+function evtStatus(p: unknown): string | null {
+  return isObj(p) && typeof p.status === 'string' ? p.status : null
+}
+function evtDuration(p: unknown): number | null {
+  return isObj(p) && typeof p.duration_ms === 'number' ? p.duration_ms : null
+}
+function evtChangedCount(p: unknown): number {
+  return isObj(p) && Array.isArray(p.changed) ? p.changed.length : 0
 }
 
-function intentSourceLabel(s: string): string {
-  const m: Record<string, string> = { selection: '规则选中', reset: '重置', superfast: '强信号直路由', novelty: '新颖兜底', llm_ruling: 'LLM 终判', block: '安全拦截' }
-  return m[s] || s
-}
-function miPathLabel(s: string): string {
-  const m: Record<string, string> = { hybrid: '方案B(混合分层)', llm: '方案A(LLM深拆)' }
-  return m[s] || s
-}
-function reviewReasonLabel(r: string): string {
-  const m: Record<string, string> = { static_html: '缺根标签', static_close_tag: '标签未闭合', parse_fail: '解析失败', llm_fail: '模型失败', llm_unpassed: '判定未过', ok: '通过' }
-  return m[r] || r
-}
-function safetyRiskLabel(r: string): string {
-  const m: Record<string, string> = { low: '低', medium: '中', high: '高', critical: '致命' }
-  return m[r] || r
-}
-function safetyOutcomeLabel(o: string): string {
-  const m: Record<string, string> = { blocked: '拦截', pass: '放行' }
-  return m[o] || o
-}
-function ratePct(dist?: Record<string, number>): string {
-  if (!dist) return '-'
-  const ok = dist.ok || 0
-  const fail = dist.fail || 0
-  const t = ok + fail
-  return t ? (ok / t * 100).toFixed(0) + '%' : '-'
-}
-function hasLlmErr(models?: Record<string, AiCoreLlmModel>): boolean {
-  if (!models) return false
-  return Object.values(models).some((m) => m.err_dist && Object.keys(m.err_dist).length > 0)
-}
-function dimAvg(v?: LatencyBucket): string {
-  return v && v.avg != null ? v.avg.toFixed(1) : '-'
-}
 
 onMounted(() => {
   connectMetrics()
   if (isSuper.value) fetchUsers()
   fetchQuality()
   fetchTraces()
+  // 运行指标页需要 api_calls(访问量/失败/成功率/平均时长一行核心指标), 它来自 /admin/analytics;
+  // 此处预拉一次, 后续由前端分析 tab 的 15s 轮询续接。
+  fetchAnalytics()
 })
 watch(activeTab, (t) => {
-  if (t === 'analytics') {
+  if (t === 'frontend') {
     if (!al.value) fetchAnalytics()
     if (!alTimer) alTimer = setInterval(fetchAnalytics, 15000)
   } else {
@@ -698,16 +685,27 @@ onUnmounted(() => {
           </tbody>
         </table>
       </div>
-      <div class="block" v-if="metrics.api_latency">
+      <!-- 运行指标核心: API 一行核心指标(访问量 / 失败数 / 成功率 / 平均响应时长) -->
+      <div class="block" v-if="al && al.api_calls && Object.keys(al.api_calls).length">
+        <h3>API 接口核心指标（访问量 / 失败 / 成功率 / 平均时长）</h3>
+        <table class="model-table">
+          <thead><tr><th>接口</th><th>访问量</th><th>失败数</th><th>成功率</th><th>平均(ms)</th><th>P90(ms)</th><th>P99(ms)</th></tr></thead>
+          <tbody>
+            <tr v-for="(v, path) in al.api_calls" :key="path">
+              <td><code>{{ path }}</code></td>
+              <td>{{ v.total }}</td>
+              <td class="err">{{ v.fail }}</td>
+              <td>{{ (v.success_rate * 100).toFixed(1) }}%</td>
+              <td>{{ fmtMs(v.latency.avg) }}</td>
+              <td>{{ fmtMs(v.latency.p90) }}</td>
+              <td>{{ fmtMs(v.latency.p99) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <!-- 旧: 仅分位延迟(无访问量/成功率), 已并入上方核心指标表; 保留 SSE 维度的原始延迟作为补充 -->
+      <div class="block" v-else-if="metrics.api_latency">
         <h3>API 接口延迟 (ms)</h3>
-        <div class="subtabs">
-          <button
-            v-for="g in latencyGroups"
-            :key="g.key"
-            :class="{ on: latencyTab === g.key }"
-            @click="latencyTab = g.key"
-          >{{ g.label }}</button>
-        </div>
         <table v-if="Object.keys(currentLatency).length" class="model-table">
           <thead><tr><th>接口</th><th>P50</th><th>P90</th><th>P99</th><th>平均</th><th>样本</th></tr></thead>
           <tbody>
@@ -818,6 +816,79 @@ onUnmounted(() => {
           </li>
         </ul>
       </div>
+
+      <!-- ===== AI 质量 · 从 /admin/analytics 并入(Skill / 生成阶段 / AI核心 LLM+编排, 第6条) ===== -->
+      <template v-if="al">
+        <!-- AI 质量健康度雷达(8 维: 意图/LLM/Skill/生成/API/反馈/前端/编排) -->
+        <div v-if="al.radar" class="block qc-radar">
+          <h3>AI 质量健康度雷达（8 维，0-100）</h3>
+          <RadarChart
+            :axes="['意图识别','LLM调用','Skill成效','生成成功率','业务API','用户反馈','前端性能','编排成功率']"
+            :series="[{
+              name: '综合健康度',
+              color: '#15c4a4',
+              values: [
+                al.radar.intent ?? 0, al.radar.llm ?? 0, al.radar.skill ?? 0, al.radar.generation ?? 0,
+                al.radar.api ?? 0, al.radar.feedback ?? 0, al.radar.frontend ?? 0, al.radar.orchestration ?? 0,
+              ],
+            }]"
+            :size="340"
+          />
+        </div>
+        <!-- Skill 成效 -->
+        <div class="block" v-if="al.skill_outcomes && Object.keys(al.skill_outcomes).length">
+          <h4>Skill 调用成效</h4>
+          <table class="atable">
+            <thead><tr><th>技能</th><th>成功</th><th>失败</th><th>中断</th><th>成功率</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.skill_outcomes" :key="k">
+                <td>{{ k }}</td><td>{{ v.ok }}</td><td>{{ v.fail }}</td><td>{{ v.abort }}</td>
+                <td>{{ (v.success_rate * 100).toFixed(0) }}%</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <!-- Tools / 生成阶段耗时 -->
+        <div class="block" v-if="al.gen_stages && Object.keys(al.gen_stages).length">
+          <h4>生成阶段耗时（Tools 执行）</h4>
+          <table class="atable">
+            <thead><tr><th>阶段</th><th>P50</th><th>P90</th><th>P99</th><th>均值</th><th>样本</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.gen_stages" :key="k">
+                <td>{{ k }}</td>
+                <td>{{ fmtMs(v.p50) }}</td><td>{{ fmtMs(v.p90) }}</td><td>{{ fmtMs(v.p99) }}</td>
+                <td>{{ fmtMs(v.avg) }}</td><td>{{ v.samples }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <!-- AI 核心 · LLM Provider 调用 -->
+        <div class="block" v-if="al.ai_core && al.ai_core.llm && al.ai_core.llm.total">
+          <h4>LLM Provider 调用（模型用量 + 成功率）</h4>
+          <table class="atable">
+            <thead><tr><th>模型</th><th>次数</th><th>成功</th><th>失败</th><th>成功率</th><th>Token(in/out)</th><th>平均耗时</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.ai_core.llm.models" :key="k">
+                <td>{{ k }}</td><td>{{ v.total }}</td><td>{{ v.ok }}</td><td>{{ v.fail }}</td>
+                <td>{{ (v.success_rate * 100).toFixed(0) }}%</td>
+                <td>{{ (v.tokens_in || 0).toLocaleString() }} / {{ (v.tokens_out || 0).toLocaleString() }}</td>
+                <td>{{ fmtMs(v.duration_ms?.avg ?? 0) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <!-- AI 核心 · 编排成功率 -->
+        <div class="block" v-if="al.orchestration && al.orchestration.total">
+          <h4>AI 核心 · 多意图编排</h4>
+          <div class="kv">
+            <span>编排总次数</span><b>{{ al.orchestration.total }}</b>
+            <span>平均子任务数</span><b>{{ al.orchestration.split_count ? al.orchestration.split_count.avg.toFixed(1) : '-' }}</b>
+            <span>平均成功率</span><b>{{ al.orchestration.success_rate ? (al.orchestration.success_rate.avg * 100).toFixed(0) + '%' : '-' }}</b>
+            <span>平均耗时</span><b>{{ al.orchestration.duration_ms ? fmtMs(al.orchestration.duration_ms.avg) : '-' }}</b>
+          </div>
+        </div>
+      </template>
+
       <div v-if="!quality && !qualityLoading" class="muted">暂无质量数据</div>
     </section>
 
@@ -881,11 +952,45 @@ onUnmounted(() => {
         </div>
 
         <div v-if="selectedTrace.events.length" class="events">
-          <div v-for="(e, i) in selectedTrace.events" :key="i" class="evt">
-            <span class="eseq">{{ e.seq }}</span>
-            <span class="etype">{{ eventTypeLabel(e.event_type) }}</span>
-            <span v-if="e.stage" class="estage">{{ e.stage }}</span>
-            <span v-if="e.payload && typeof e.payload === 'object' && (e.payload as any).comment" class="ecomment">{{ (e.payload as any).comment }}</span>
+          <div class="events-toolbar">
+            <button class="mini-btn" @click="expandAllEvents">展开全部</button>
+          </div>
+          <div v-for="(e, i) in selectedTrace.events" :key="i" class="evt" :class="{ open: expandedEvents[i] }">
+            <div class="evt-head" @click="toggleEvent(i)">
+              <span class="ecaret">{{ expandedEvents[i] ? '▾' : '▸' }}</span>
+              <span class="eseq">{{ e.seq }}</span>
+              <span class="etype">{{ eventTypeLabel(e.event_type) }}</span>
+              <span v-if="e.stage" class="estage">{{ e.stage }}</span>
+              <span v-if="evtStatus(e.payload)" class="estatus" :class="e.payload && isObj(e.payload) && e.payload.status === 'error' ? 'err' : ''">{{ evtStatus(e.payload) }}</span>
+              <span v-if="evtDuration(e.payload) != null" class="edur">{{ evtDuration(e.payload) }}ms</span>
+              <span v-if="evtChangedCount(e.payload)" class="echanged">{{ evtChangedCount(e.payload) }} 字段变更</span>
+            </div>
+            <div v-if="expandedEvents[i] && e.payload" class="evt-detail">
+              <template v-if="isObj(e.payload)">
+                <div v-if="e.payload.io_in" class="io-block">
+                  <div class="io-title">IN · 阶段进入时状态</div>
+                  <pre class="io-json">{{ pretty(e.payload.io_in) }}</pre>
+                </div>
+                <div v-if="e.payload.io_out" class="io-block">
+                  <div class="io-title">OUT · 阶段离开时状态</div>
+                  <pre class="io-json">{{ pretty(e.payload.io_out) }}</pre>
+                </div>
+                <div v-if="evtChangedCount(e.payload)" class="changed-block">
+                  <div class="io-title">变更字段</div>
+                  <span v-for="c in e.payload.changed" :key="c" class="chip">{{ c }}</span>
+                </div>
+                <div v-if="e.payload.error" class="err-block">
+                  <div class="io-title">错误</div>
+                  <pre class="io-json">{{ pretty(e.payload.error) }}</pre>
+                </div>
+                <div v-if="e.payload.reason_code" class="meta-row">reason_code: {{ e.payload.reason_code }}</div>
+                <div v-if="e.payload.output_refs" class="meta-row">output_refs: {{ pretty(e.payload.output_refs) }}</div>
+                <div v-if="!e.payload.io_in && !e.payload.io_out" class="meta-row">
+                  <pre class="io-json">{{ pretty(e.payload) }}</pre>
+                </div>
+              </template>
+              <pre v-else class="io-json">{{ pretty(e.payload) }}</pre>
+            </div>
           </div>
         </div>
         <p v-else class="muted">该 Trace 没有结构化事件</p>
@@ -909,138 +1014,11 @@ onUnmounted(() => {
       <p v-if="!traces.length && !tracesLoading" class="muted">暂无生成记录</p>
     </section>
 
-    <!-- 系统分析 -->
-    <section v-else-if="activeTab === 'analytics'" class="panel">
-      <div class="bar"><h3>系统分析</h3><button class="refresh" :disabled="alLoading" @click="fetchAnalytics">刷新</button></div>
+    <!-- 前端分析(第7条: 原系统分析重命名为前端分析, 仅保留纯前端埋点) -->
+    <section v-else-if="activeTab === 'frontend'" class="panel">
+      <div class="bar"><h3>前端分析</h3><button class="refresh" :disabled="alLoading" @click="fetchAnalytics">刷新</button></div>
       <div v-if="al?.error" class="muted">加载失败: {{ al.error }}</div>
       <template v-else-if="al">
-        <!-- 意图命中率 -->
-        <div class="block">
-          <h4>意图命中率</h4>
-          <table v-if="al.intent_stats && Object.keys(al.intent_stats).length" class="atable">
-            <thead><tr><th>意图</th><th>命中</th><th>总数</th><th>命中率</th><th>指示</th></tr></thead>
-            <tbody>
-              <tr v-for="(v, k) in al.intent_stats" :key="k">
-                <td>{{ k }}</td><td>{{ v.ok }}</td><td>{{ v.total }}</td>
-                <td>{{ (v.rate * 100).toFixed(0) }}%</td>
-                <td><span class="dot" :style="{ background: v.rate > 0.7 ? '#22c55e' : v.rate > 0.3 ? '#f59e0b' : '#ef4444' }"></span></td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-else class="muted">暂无数据</p>
-        </div>
-        <!-- 意图决策分布 -->
-        <div class="block" v-if="al.intent_decisions && al.intent_decisions.by_decision && Object.keys(al.intent_decisions.by_decision).length">
-          <h4>意图决策分布</h4>
-          <table class="atable">
-            <thead><tr><th>决策</th><th>次数</th></tr></thead>
-            <tbody>
-              <tr v-for="(v, k) in al.intent_decisions.by_decision" :key="k">
-                <td>{{ decisionLabel(k) }}</td><td>{{ v }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-if="al.intent_decisions.by_risk && Object.keys(al.intent_decisions.by_risk).length" class="muted">
-            高风险拦截: {{ al.intent_decisions.by_risk.high || 0 }} · 致命拦截: {{ al.intent_decisions.by_risk.critical || 0 }}
-          </p>
-        </div>
-        <!-- Skill 成功率 -->
-        <div class="block">
-          <h4>Skill 成效</h4>
-          <table v-if="al.skill_outcomes && Object.keys(al.skill_outcomes).length" class="atable">
-            <thead><tr><th>技能</th><th>成功</th><th>失败</th><th>中断</th><th>成功率</th></tr></thead>
-            <tbody>
-              <tr v-for="(v, k) in al.skill_outcomes" :key="k">
-                <td>{{ k }}</td><td>{{ v.ok }}</td><td>{{ v.fail }}</td><td>{{ v.abort }}</td>
-                <td>{{ (v.success_rate * 100).toFixed(0) }}%</td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-else class="muted">暂无数据</p>
-        </div>
-        <!-- 生成阶段耗时 -->
-        <div class="block">
-          <h4>生成阶段耗时</h4>
-          <table v-if="al.gen_stages && Object.keys(al.gen_stages).length" class="atable">
-            <thead><tr><th>阶段</th><th>P50</th><th>P90</th><th>P99</th><th>均值</th><th>样本</th></tr></thead>
-            <tbody>
-              <tr v-for="(v, k) in al.gen_stages" :key="k">
-                <td>{{ STAGE_LABELS_ANA[k] || k }}</td>
-                <td>{{ fmtMs(v.p50) }}</td><td>{{ fmtMs(v.p90) }}</td><td>{{ fmtMs(v.p99) }}</td>
-                <td>{{ fmtMs(v.avg) }}</td><td>{{ v.samples }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-else class="muted">暂无数据</p>
-        </div>
-        <!-- API 延迟 -->
-        <div class="block">
-          <h4>API 响应时间</h4>
-          <table v-if="al.api_latency && Object.keys(al.api_latency).length" class="atable">
-            <thead><tr><th>端点</th><th>P50</th><th>P90</th><th>P99</th><th>均值</th><th>样本</th></tr></thead>
-            <tbody>
-              <tr v-for="(v, k) in al.api_latency" :key="k">
-                <td>{{ k }}</td>
-                <td>{{ fmtMs(v.p50) }}</td><td>{{ fmtMs(v.p90) }}</td><td>{{ fmtMs(v.p99) }}</td>
-                <td>{{ fmtMs(v.avg) }}</td><td>{{ v.samples }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-else class="muted">暂无数据</p>
-        </div>
-        <!-- 业务接口统计(STAT-2) -->
-        <div class="block">
-          <h4>业务接口调用</h4>
-          <table v-if="al.api_calls && Object.keys(al.api_calls).length" class="atable">
-            <thead><tr><th>端点</th><th>调用</th><th>成功</th><th>失败</th><th>成功率</th><th>P50</th><th>P90</th><th>P99</th></tr></thead>
-            <tbody>
-              <tr v-for="(v, k) in al.api_calls" :key="k">
-                <td>{{ k }}</td><td>{{ v.total }}</td><td>{{ v.ok }}</td><td>{{ v.fail }}</td>
-                <td>{{ (v.success_rate * 100).toFixed(0) }}%</td>
-                <td>{{ fmtMs(v.latency.p50) }}</td><td>{{ fmtMs(v.latency.p90) }}</td><td>{{ fmtMs(v.latency.p99) }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-else class="muted">暂无数据</p>
-        </div>
-        <!-- AI 核心编排统计(STAT-1, 由 ai_service 写入同 Redis) -->
-        <div class="block" v-if="al.orchestration && al.orchestration.total">
-          <h4>AI 核心 · 多意图编排</h4>
-          <div class="kv">
-            <span>编排总次数</span><b>{{ al.orchestration.total }}</b>
-            <span>平均子任务数</span><b>{{ al.orchestration.split_count ? al.orchestration.split_count.avg.toFixed(1) : '-' }}</b>
-            <span>平均成功率</span><b>{{ al.orchestration.success_rate ? (al.orchestration.success_rate.avg * 100).toFixed(0) + '%' : '-' }}</b>
-            <span>平均耗时</span><b>{{ al.orchestration.duration_ms ? fmtMs(al.orchestration.duration_ms.avg) : '-' }}</b>
-          </div>
-          <div v-if="al.orchestration.strategy_dist" class="muted" style="margin:6px 0;">
-            策略分布:
-            <span v-for="(v, k) in al.orchestration.strategy_dist" :key="k" class="pill">{{ strategyLabel(k) }} {{ v }}</span>
-          </div>
-          <div v-if="al.orchestration.sub_tasks && al.orchestration.sub_tasks.total">
-            <h5>子任务状态</h5>
-            <div class="muted">
-              <span v-for="(v, k) in al.orchestration.sub_tasks.status_dist" :key="k" class="pill">{{ statusLabel(k) }} {{ v }}</span>
-            </div>
-            <h5>风险分布</h5>
-            <div class="muted">
-              <span v-for="(v, k) in al.orchestration.sub_tasks.risk_dist" :key="k" class="pill">{{ riskLabel(k) }} {{ v }}</span>
-            </div>
-            <h5>各 Skill 产出</h5>
-            <table class="atable">
-              <thead><tr><th>Skill</th><th>总数</th><th>完成</th><th>失败</th><th>拦截</th><th>跳过</th><th>成功率</th></tr></thead>
-              <tbody>
-                <tr v-for="(v, k) in al.orchestration.sub_tasks.per_skill" :key="k">
-                  <td>{{ k }}</td><td>{{ v.total }}</td><td>{{ v.done }}</td><td>{{ v.failed }}</td><td>{{ v.blocked }}</td><td>{{ v.skipped }}</td>
-                  <td>{{ (v.success_rate * 100).toFixed(0) }}%</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <div v-else-if="al.orchestration && !al.orchestration.total" class="block">
-          <h4>AI 核心 · 多意图编排</h4>
-          <p class="muted">暂无多意图编排记录</p>
-        </div>
         <!-- 前端性能 -->
         <div class="block">
           <h4>前端加载性能</h4>
@@ -1090,161 +1068,6 @@ onUnmounted(() => {
           </table>
           <p v-else class="muted">暂无数据</p>
         </div>
-        <!-- 生成成功率 -->
-        <div v-if="al.generation_rate" class="block">
-          <h4>总体生成成功率</h4>
-          <div class="rate-bar" :style="{ '--rate': al.generation_rate.rate * 100 + '%' }">
-            <span>{{ (al.generation_rate.rate * 100).toFixed(1) }}%</span>
-            <span class="rate-sub">({{ al.generation_rate.done }}/{{ al.generation_rate.total }})</span>
-          </div>
-        </div>
-        <div v-if="al.error_stats && Object.keys(al.error_stats).length" class="block">
-          <h4>错误分布</h4>
-          <table class="atable"><thead><tr><th>类型</th><th>次数</th></tr></thead>
-            <tbody><tr v-for="(v, k) in al.error_stats" :key="k"><td>{{ ERROR_LABELS[k] || k }}</td><td>{{ v }}</td></tr></tbody>
-          </table>
-        </div>
-        <div v-if="al.model_stats && Object.keys(al.model_stats).length" class="block">
-          <h4>模型分布</h4>
-          <table class="atable"><thead><tr><th>模型</th><th>成功</th><th>失败</th><th>成功率</th></tr></thead>
-            <tbody><tr v-for="(v, k) in al.model_stats" :key="k"><td>{{ k }}</td><td>{{ v.ok }}</td><td>{{ v.fail }}</td><td>{{ (v.rate * 100).toFixed(0) }}%</td></tr></tbody>
-          </table>
-        </div>
-        <div v-if="al.user_stats" class="block">
-          <h4>用户活跃</h4>
-          <div class="card-row">
-            <div class="card"><div class="k">今日DAU</div><div class="v">{{ al.user_stats.dau_today }}</div></div>
-            <div class="card"><div class="k">活跃用户</div><div class="v">{{ al.user_stats.active_users }}</div></div>
-            <div class="card"><div class="k">总生成</div><div class="v">{{ al.user_stats.total_generations }}</div></div>
-            <div class="card"><div class="k">人均生成</div><div class="v">{{ al.user_stats.avg_per_user }}</div></div>
-          </div>
-        </div>
-        <!-- 后置单裁判 QC(v2.3.0) -->
-        <div v-if="al.qc && al.qc.count" class="block">
-          <h4>后置单裁判质检 (QC)</h4>
-          <div class="card-row">
-            <div class="card"><div class="k">触发次数</div><div class="v">{{ al.qc.count }}</div></div>
-            <div class="card"><div class="k">整体均分</div><div class="v">{{ al.qc.overall_avg ?? '-' }}</div></div>
-            <div class="card"><div class="k">需复核率</div><div class="v">{{ (al.qc.review_rate * 100).toFixed(1) }}%</div></div>
-          </div>
-          <table class="atable">
-            <thead><tr><th>维度</th><th>均分</th></tr></thead>
-            <tbody>
-              <tr v-for="(v, k) in al.qc.per_dim_avg" :key="k"><td>{{ qcLabel(k) }}</td><td>{{ v }}</td></tr>
-            </tbody>
-          </table>
-          <p v-if="al.qc.safety_dist && Object.keys(al.qc.safety_dist).length" class="muted">
-            安全风险分布: <span v-for="(v, k) in al.qc.safety_dist" :key="k">{{ k }} {{ v }} · </span>
-          </p>
-        </div>
-        <!-- AI 核心原生统计(v1.2.3, ai: 命名空间) -->
-        <template v-if="al.ai_core">
-          <div class="block">
-            <h4>AI 核心 · 原生统计 (v1.2.3)</h4>
-            <p class="muted">以下维度由 AI 核心独立采集(ai: 命名空间), 与业务端统计互补, 反映模型与质量内情。</p>
-          </div>
-          <!-- 意图识别 -->
-          <div v-if="al.ai_core.intent && al.ai_core.intent.total" class="block">
-            <h4>意图识别（AI 核心）</h4>
-            <div class="card-row">
-              <div class="card"><div class="k">分类总次数</div><div class="v">{{ al.ai_core.intent.total }}</div></div>
-              <div class="card"><div class="k">成功率</div><div class="v">{{ ratePct(al.ai_core.intent.success_dist) }}</div></div>
-              <div class="card"><div class="k">平均置信度</div><div class="v">{{ al.ai_core.intent.confidence?.avg != null ? al.ai_core.intent.confidence.avg.toFixed(2) : '-' }}</div></div>
-              <div class="card"><div class="k">平均耗时</div><div class="v">{{ fmtMs(al.ai_core.intent.duration_ms?.avg ?? 0) }}</div></div>
-            </div>
-            <h5>决策分布</h5>
-            <div class="muted"><span v-for="(v, k) in al.ai_core.intent.decision_dist" :key="k" class="pill">{{ decisionLabel(k) }} {{ v }}</span></div>
-            <h5>来源分布</h5>
-            <div class="muted"><span v-for="(v, k) in al.ai_core.intent.source_dist" :key="k" class="pill">{{ intentSourceLabel(k) }} {{ v }}</span></div>
-          </div>
-          <!-- 后置 QC -->
-          <div v-if="al.ai_core.qc && al.ai_core.qc.total" class="block">
-            <h4>后置 QC 单裁判（AI 核心）</h4>
-            <div class="card-row">
-              <div class="card"><div class="k">样本数</div><div class="v">{{ al.ai_core.qc.total }}</div></div>
-              <div class="card"><div class="k">整体均分</div><div class="v">{{ al.ai_core.qc.overall?.avg != null ? al.ai_core.qc.overall.avg.toFixed(2) : '-' }}</div></div>
-              <div class="card"><div class="k">需复核率</div><div class="v">{{ (al.ai_core.qc.needs_review_rate * 100).toFixed(1) }}%</div></div>
-              <div class="card"><div class="k">评委掉线率</div><div class="v">{{ (al.ai_core.qc.partial_rate * 100).toFixed(1) }}%</div></div>
-            </div>
-            <table class="atable"><thead><tr><th>维度</th><th>均分</th></tr></thead>
-              <tbody><tr v-for="(v, k) in al.ai_core.qc.dimensions" :key="k"><td>{{ qcLabel(k) }}</td><td>{{ dimAvg(v) }}</td></tr></tbody>
-            </table>
-            <p v-if="al.ai_core.qc.safety_dist && Object.keys(al.ai_core.qc.safety_dist).length" class="muted">安全风险: <span v-for="(v, k) in al.ai_core.qc.safety_dist" :key="k">{{ k }} {{ v }} · </span></p>
-          </div>
-          <!-- Reviewer -->
-          <div v-if="al.ai_core.reviewer && al.ai_core.reviewer.total" class="block">
-            <h4>生成内 Reviewer 自审（AI 核心）</h4>
-            <div class="card-row">
-              <div class="card"><div class="k">自审次数</div><div class="v">{{ al.ai_core.reviewer.total }}</div></div>
-              <div class="card"><div class="k">需复核率</div><div class="v">{{ (al.ai_core.reviewer.needs_review_rate * 100).toFixed(1) }}%</div></div>
-            </div>
-            <h5>各技能通过率</h5>
-            <table class="atable"><thead><tr><th>技能</th><th>通过</th><th>失败</th><th>通过率</th></tr></thead>
-              <tbody><tr v-for="(v, k) in al.ai_core.reviewer.per_skill" :key="k"><td>{{ k }}</td><td>{{ v.passed }}</td><td>{{ v.failed }}</td><td>{{ (v.pass_rate * 100).toFixed(0) }}%</td></tr></tbody>
-            </table>
-            <h5>失败原因分布</h5>
-            <div class="muted"><span v-for="(v, k) in al.ai_core.reviewer.reason_dist" :key="k" class="pill">{{ reviewReasonLabel(k) }} {{ v }}</span></div>
-          </div>
-          <!-- 安全网关 -->
-          <div v-if="al.ai_core.safety && al.ai_core.safety.total" class="block">
-            <h4>入口安全网关（AI 核心）</h4>
-            <div class="card-row"><div class="card"><div class="k">决策次数</div><div class="v">{{ al.ai_core.safety.total }}</div></div></div>
-            <h5>风险等级分布</h5>
-            <div class="muted"><span v-for="(v, k) in al.ai_core.safety.risk_dist" :key="k" class="pill">{{ safetyRiskLabel(k) }} {{ v }}</span></div>
-            <h5>处置</h5>
-            <div class="muted"><span v-for="(v, k) in al.ai_core.safety.outcome_dist" :key="k" class="pill">{{ safetyOutcomeLabel(k) }} {{ v }}</span></div>
-            <h5 v-if="al.ai_core.safety.reason_dist && Object.keys(al.ai_core.safety.reason_dist).length">拦截原因</h5>
-            <div class="muted"><span v-for="(v, k) in al.ai_core.safety.reason_dist" :key="k" class="pill">{{ k }} {{ v }}</span></div>
-          </div>
-          <!-- LLM Provider -->
-          <div v-if="al.ai_core.llm && al.ai_core.llm.total" class="block">
-            <h4>LLM Provider 调用（AI 核心）</h4>
-            <table class="atable">
-              <thead><tr><th>模型</th><th>次数</th><th>成功</th><th>失败</th><th>成功率</th><th>Token(in/out)</th><th>平均耗时</th></tr></thead>
-              <tbody>
-                <tr v-for="(v, k) in al.ai_core.llm.models" :key="k">
-                  <td>{{ k }}</td><td>{{ v.total }}</td><td>{{ v.ok }}</td><td>{{ v.fail }}</td>
-                  <td>{{ (v.success_rate * 100).toFixed(0) }}%</td>
-                  <td>{{ (v.tokens_in || 0).toLocaleString() }} / {{ (v.tokens_out || 0).toLocaleString() }}</td>
-                  <td>{{ fmtMs(v.duration_ms?.avg ?? 0) }}</td>
-                </tr>
-              </tbody>
-            </table>
-            <template v-if="hasLlmErr(al.ai_core.llm.models)">
-              <h5>错误类型分布</h5>
-              <div v-for="(v, k) in al.ai_core.llm.models" :key="'err' + k" class="muted">
-                <template v-if="v.err_dist && Object.keys(v.err_dist).length">
-                  <b>{{ k }}:</b> <span v-for="(c, e) in v.err_dist" :key="e" class="pill">{{ e }} {{ c }}</span>
-                </template>
-              </div>
-            </template>
-          </div>
-          <!-- 多意图 A+B 路由路径(v1.2.5) -->
-          <div v-if="al.ai_core.multi_intent && al.ai_core.multi_intent.total" class="block">
-            <h4>多意图 A+B 路由路径（AI 核心）</h4>
-            <div class="card-row">
-              <div class="card"><div class="k">拆分总次数</div><div class="v">{{ al.ai_core.multi_intent.total }}</div></div>
-              <div class="card"><div class="k">方案 B 占比</div><div class="v">{{ (al.ai_core.multi_intent.ab_ratio.hybrid * 100).toFixed(1) }}%</div></div>
-              <div class="card"><div class="k">方案 A 升级占比</div><div class="v">{{ (al.ai_core.multi_intent.ab_ratio.llm * 100).toFixed(1) }}%</div></div>
-              <div class="card"><div class="k">B→A 升级率</div><div class="v">{{ (al.ai_core.multi_intent.escalate_rate * 100).toFixed(1) }}%</div></div>
-            </div>
-            <h5>路径分布</h5>
-            <div class="muted"><span v-for="(v, k) in al.ai_core.multi_intent.path_dist" :key="k" class="pill">{{ miPathLabel(k) }} {{ v }}</span></div>
-            <div class="card-row">
-              <div class="card"><div class="k">平均子任务数</div><div class="v">{{ al.ai_core.multi_intent.sub_task_count?.avg != null ? al.ai_core.multi_intent.sub_task_count.avg.toFixed(1) : '-' }}</div></div>
-              <div class="card"><div class="k">平均拆分耗时</div><div class="v">{{ fmtMs(al.ai_core.multi_intent.duration_ms?.avg ?? 0) }}</div></div>
-            </div>
-          </div>
-        </template>
-        <!-- 用户评价(v0.8.5, 含六维子星) -->
-        <div v-if="al.feedback && al.feedback.count" class="block">
-          <h4>用户评价</h4>
-          <div class="card-row">
-            <div class="card"><div class="k">提交数</div><div class="v">{{ al.feedback.count }}</div></div>
-            <div class="card"><div class="k">平均评分</div><div class="v">{{ al.feedback.avg_rating ?? '-' }}</div></div>
-            <div class="card"><div class="k">含多维占比</div><div class="v">{{ (al.feedback.with_dims_rate * 100).toFixed(0) }}%</div></div>
-          </div>
-        </div>
       </template>
       <p v-if="!al && !alLoading" class="muted">点击刷新加载分析数据</p>
     </section>
@@ -1270,7 +1093,7 @@ onUnmounted(() => {
           <tr v-for="u in users" :key="u.id">
             <td>{{ u.id }}</td>
             <td>{{ u.account }}</td>
-            <td>{{ u.nickname || '-' }}</td>
+            <td>{{ u.display_name || '-' }}</td>
             <td>{{ u.email || '-' }}</td>
             <td>
               <select
@@ -1285,12 +1108,12 @@ onUnmounted(() => {
             </td>
             <td>
               <select
-                :value="u.plan"
-                @change="changePlan(u, ($event.target as HTMLSelectElement).value)"
+                :value="u.tier"
+                @change="changeTier(u, ($event.target as HTMLSelectElement).value)"
               >
                 <option value="free">free</option>
                 <option value="pro">pro</option>
-                <option value="team">team</option>
+                <option value="max">max</option>
               </select>
             </td>
           </tr>
@@ -1577,11 +1400,30 @@ onUnmounted(() => {
 .dbar { height: 10px; background: var(--border); border-radius: 999px; overflow: hidden; }
 .dfill { display: block; height: 100%; background: var(--brand); }
 .dcnt { color: var(--muted); }
-.events { max-height: 400px; overflow: auto; }
-.evt { display: flex; gap: 10px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.events { max-height: 520px; overflow: auto; }
+.events-toolbar { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.mini-btn { border: 1px solid var(--border); background: var(--panel); color: var(--text-2); border-radius: 6px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+.mini-btn:hover { border-color: var(--brand); color: var(--brand); }
+.evt { border-bottom: 1px solid var(--border); font-size: 13px; }
+.evt-head { display: flex; gap: 10px; align-items: center; padding: 6px 4px; cursor: pointer; border-radius: 6px; }
+.evt-head:hover { background: var(--brand-bg); }
+.evt.open .evt-head { background: var(--brand-bg); }
+.ecaret { width: 12px; color: var(--muted); }
 .eseq { width: 28px; color: var(--muted); text-align: right; }
-.etype { width: 48px; font-weight: 600; color: var(--brand); }
-.estage { color: var(--text-4); }
+.etype { width: 52px; font-weight: 600; color: var(--brand); }
+.estage { color: var(--text-4); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.estatus { padding: 1px 8px; border-radius: 10px; background: var(--brand-bg); color: var(--brand); font-size: 11px; font-weight: 600; }
+.estatus.err { background: rgba(220, 38, 38, 0.12); color: var(--err); }
+.edur { color: var(--text-4); font-size: 11px; }
+.echanged { color: #d97706; font-size: 11px; }
+.evt-detail { padding: 0 4px 8px 52px; }
+.io-block { margin: 6px 0; }
+.io-title { font-size: 11px; font-weight: 700; color: var(--text-4); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+.io-json { background: var(--code-bg, #0d1117); color: #c9d1d9; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.5; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.changed-block { margin: 6px 0; }
+.chip { display: inline-block; margin: 2px 4px 2px 0; padding: 1px 8px; border-radius: 10px; background: rgba(217, 119, 6, 0.14); color: #d97706; font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.err-block { margin: 6px 0; }
+.meta-row { font-size: 12px; color: var(--text-4); margin: 4px 0; }
 .ecomment { color: var(--muted); font-style: italic; margin-left: auto; }
 .back { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 4px 12px; cursor: pointer; font-size: 13px; margin-bottom: 8px; }
 .db-grid { display: flex; gap: 12px; flex-wrap: wrap; }

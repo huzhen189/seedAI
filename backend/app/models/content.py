@@ -78,6 +78,9 @@ class Message(Base, TimestampMixin):
     conversation_id: Mapped[int] = mapped_column(UnsignedBigInt, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
     project_id: Mapped[int] = mapped_column(UnsignedBigInt, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     turn_id: Mapped[str | None] = mapped_column(String(26))
+    # 关联 Trace/反馈: 与 turns.trace_id 同源(= turn_id), 用于按链路回放与提交评价。
+    # v3 重构时该列一度从模型/表丢失, 导致 get_trace / feedback 查询 500; 此处复原。
+    trace_id: Mapped[str | None] = mapped_column(String(64), index=True)
     role: Mapped[str] = mapped_column(enum_type("message_role", "user", "assistant", "system"), nullable=False)
     content: Mapped[str] = mapped_column(LongText(), nullable=False)
     content_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)

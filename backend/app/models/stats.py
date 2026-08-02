@@ -19,7 +19,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .base import Base, CreatedAtMixin, UnsignedBigInt, UnsignedTinyInt, enum_type
+from .base import Base, CreatedAtMixin, LongText, UnsignedBigInt, UnsignedTinyInt, enum_type
 
 
 logger = logging.getLogger("app.models.stats")
@@ -299,3 +299,45 @@ class KbChangeLog(Base, CreatedAtMixin):
     before_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     after_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     reason: Mapped[str | None] = mapped_column(String(255))
+
+
+class TraceEvent(Base, CreatedAtMixin):
+    """一次 Turn 的结构化链路事件序列(按 seq 追加)。
+
+    由 ``app.core.audit.DbAuditSink`` 在 Turn 收尾时批量写入：turn_start(用户输入)
+    → S0..S9 各阶段的 IN/OUT/changed 快照 → turn_end(最终回复)。管理后台「回放」
+    据此还原完整处理链路,不再依赖去 app.log 翻 [pipeline.io] 文本行。
+    """
+
+    __tablename__ = "trace_events"
+    __table_args__ = (Index("ix_trace_events_trace_seq", "trace_id", "seq"),)
+
+    id: Mapped[int] = mapped_column(UnsignedBigInt, primary_key=True, autoincrement=True)
+    trace_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # stage / turn_start / turn_end / turn_error
+    event_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    stage: Mapped[str | None] = mapped_column(String(32))
+    # JSON 文本; LONGTEXT 以容纳阶段 IO 快照(写入侧仍按 48KB 上限逐级截断)。
+    payload: Mapped[str | None] = mapped_column(LongText)
+
+
+class Feedback(Base, CreatedAtMixin):
+    """用户对一次生成的评价(1—10 分 + 评语 + 多维细分),供统计与回归数据集。"""
+
+    __tablename__ = "feedbacks"
+    __table_args__ = (
+        UniqueConstraint("trace_id", name="uq_feedbacks_trace_id"),
+        Index("ix_feedbacks_user_created", "user_id", "created_at"),
+        CheckConstraint("rating >= 1 AND rating <= 10", name="rating_range"),
+    )
+
+    id: Mapped[int] = mapped_column(UnsignedBigInt, primary_key=True, autoincrement=True)
+    user_id: Mapped[int | None] = mapped_column(UnsignedBigInt, index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    conversation_id: Mapped[int | None] = mapped_column(UnsignedBigInt, index=True)
+    message_id: Mapped[int | None] = mapped_column(UnsignedBigInt)
+    rating: Mapped[int] = mapped_column(UnsignedTinyInt, default=0, nullable=False)
+    comment: Mapped[str | None] = mapped_column(LongText)
+    # 六维细分评分 {relevance: 8, accuracy: 9, ...}
+    dimensions: Mapped[dict[str, Any] | None] = mapped_column(JSON)

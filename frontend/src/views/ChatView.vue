@@ -13,6 +13,7 @@ import {
   replayStream,
   startChat,
   submitApproval,
+  submitFeedback,
   type StreamSubscription,
 } from '../api/chat'
 import { createProject, listArtifacts } from '../api/projects'
@@ -60,6 +61,57 @@ let unregisterOnline: (() => void) | null = null
 const convRef = ref<HTMLElement | null>(null)
 const artifacts = ref<Artifact[]>([])
 
+// M9d: 预览面板宽度 — 按比例随屏幕自适应 + 可拖拽控制。比例持久化在 sessionStorage。
+const PREVIEW_RATIO_KEY = 'seedai:preview-ratio'
+const previewRatio = ref<number>(Number(sessionStorage.getItem(PREVIEW_RATIO_KEY)) || 42)
+const resizing = ref(false)
+const chatRootRef = ref<HTMLElement | null>(null)
+
+// M9d: 拖拽交互。核心难点: 预览区是 <iframe>, 指针一旦移到 iframe 上方,
+// 手柄自身的 pointermove 就收不到(指针不在手柄上)。解法:
+// (1) 拖拽期间把 pointermove/pointerup 挂到 window —— 无论指针在哪都收到;
+// (2) setPointerCapture 双保险 —— 跨 iframe 时事件仍被锁定回手柄(会冒泡到 window)。
+// 两者结合保证「面板实时跟随鼠标, 松手停在当前位置」。Pointer 事件统一鼠标/触摸/笔。
+function startResize(e: PointerEvent) {
+  e.preventDefault()
+  resizing.value = true
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  // 挂到 window: 指针移出手柄/进入 iframe 也能持续收到 move。
+  window.addEventListener('pointermove', onResizeMove)
+  window.addEventListener('pointerup', stopResize)
+  window.addEventListener('pointercancel', stopResize)
+  try {
+    ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
+  } catch {
+    /* 无 capture 时退化为 window listener, 仍可用 */
+  }
+}
+function onResizeMove(e: PointerEvent) {
+  if (!resizing.value || !chatRootRef.value) return
+  const rect = chatRootRef.value.getBoundingClientRect()
+  // preview-panel 在右侧, 它本身宽度 = (100 - 手柄左侧占比)%。
+  // 若直接把 cursorX 占比当作 previewRatio, 手柄会"反着跑"(往左移面板往右胀)。
+  // 故取右补集: 手柄左侧占 f → 右侧预览占比 = 100 - f, 手柄才真正跟随指针。
+  const f = (e.clientX - rect.left) / rect.width
+  let pct = (1 - f) * 100
+  pct = Math.min(72, Math.max(24, pct)) // 限制区间, 保证两栏都可用
+  previewRatio.value = pct
+}
+function stopResize() {
+  if (!resizing.value) return
+  resizing.value = false
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+  window.removeEventListener('pointermove', onResizeMove)
+  window.removeEventListener('pointerup', stopResize)
+  window.removeEventListener('pointercancel', stopResize)
+  sessionStorage.setItem(PREVIEW_RATIO_KEY, String(Math.round(previewRatio.value)))
+}
+const publishedUrl = computed<string | null>(
+  () => projectStore.projects.find((p) => p.id === projectStore.currentProjectId)?.published_url ?? null,
+)
+
 const hasLivePanel = computed(() =>
   generating.value
   || stream.lastSeq > 0
@@ -95,12 +147,14 @@ async function performSend(message: string, clientMsgId: string): Promise<void> 
   offlineNote.value = ''
   try {
     const conversationId = await ensureConversation(message)
-    resetStreamUiState(stream)
     const userMessage = optimisticMessage('user', message, conversationId)
     const assistantMessage = optimisticMessage('assistant', '', conversationId)
     convStore.messages.push(userMessage, assistantMessage)
     activeAssistant.value = assistantMessage
     input.value = ''
+    // 每轮新对话先清空上一轮的阶段/活动/序列号状态，否则 stream.lastSeq 沿用上轮尾值，
+    // 新流事件 seq=1 <= lastSeq 会被 reducer 直接丢弃(StageRail 卡在上轮数据、进度条看似不动)。
+    resetStreamUiState(stream)
     generating.value = true
 
     subscription.value?.abort()
@@ -162,7 +216,11 @@ const streamHandlers = {
     const result = reduceStreamEvent(stream, event)
     if (!result.applied) return
 
-    if (activeAssistant.value) activeAssistant.value.content = stream.response
+    if (activeAssistant.value) {
+      activeAssistant.value.content = stream.response
+      // 把本轮回放的 trace_id 挂到消息上, 供气泡内「评价」提交 feedbacks 关联。
+      if (stream.traceId) activeAssistant.value.trace_id = stream.traceId
+    }
     saveResumeRef()
     if (result.gapAfter !== null && stream.streamId) void recoverGap(result.gapAfter)
 
@@ -265,6 +323,31 @@ async function decideApproval(decision: 'approve' | 'reject'): Promise<void> {
   }
 }
 
+// 气泡内「评价」提交: 调后端 POST /api/feedback, 关联 trace_id + conversation_id。
+async function onRate(payload: {
+  rating: number
+  comment: string
+  dimensions: Record<string, number>
+  traceId?: string | null
+  conversationId?: number | null
+}): Promise<void> {
+  if (!payload.traceId) {
+    errorMessage.value = '缺少 trace_id，无法提交评价'
+    return
+  }
+  try {
+    await submitFeedback({
+      traceId: payload.traceId,
+      rating: payload.rating,
+      comment: payload.comment,
+      dimensions: payload.dimensions,
+      conversationId: payload.conversationId ?? convStore.currentConvId,
+    })
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '提交评价失败'
+  }
+}
+
 // 倒计时归零时由 ApprovalCard 抛出, 同步本地卡片为过期态(避免误提交)。
 function onApprovalExpired(): void {
   if (stream.approval && !APPROVAL_TERMINAL.has(String(stream.approval.status))) {
@@ -318,6 +401,22 @@ function optimisticMessage(role: 'user' | 'assistant', content: string, conversa
     model_id: role === 'assistant' ? model.value : null,
     created_at: new Date().toISOString(),
   }
+}
+
+// 发布弹窗确认: 把编辑的 text + 勾选文件清单组装成一条 chat 消息发后端,
+// 复用现有 publish 链路(意图命中 PUBLISH_WORDS → 发布审批卡 → site_deploy)。
+// 文件清单以 [PUBLISH_FILES]...[/PUBLISH_FILES] 结构化令牌内嵌, 后端 S5 解析后做增量发布。
+async function onPublish(payload: { text: string; files: string[] }) {
+  if (!auth.user.value) {
+    auth.openLogin()
+    return
+  }
+  const text = payload.text.trim() || `发布当前网站版本`
+  const fileBlock = payload.files.length
+    ? `\n[PUBLISH_FILES]\n${payload.files.join('\n')}\n[/PUBLISH_FILES]`
+    : ''
+  const message = `${text}${fileBlock}`
+  await performSend(message, createClientMessageId())
 }
 
 function scrollToBottom(): void {
@@ -389,7 +488,7 @@ watch(() => stream.response, scrollToBottom)
 </script>
 
 <template>
-  <div class="chat">
+  <div class="chat" ref="chatRootRef" :class="{ resizing }">
     <section class="thread-panel">
       <header class="chat-header">
         <div>
@@ -410,10 +509,15 @@ watch(() => stream.response, scrollToBottom)
           :content="message.content"
           :time="message.created_at"
           :streaming="message === activeAssistant && generating"
-          :can-rate="false"
+          :thinking="message === activeAssistant ? stream.thinking : ''"
+          :trace-id="message.trace_id"
+          :conversation-id="convStore.currentConvId"
+          :can-rate="!!auth.user.value && message.role === 'assistant'"
+          @rate="onRate"
         >
           <template v-if="message === activeAssistant && hasLivePanel" #trail>
-            <StageRail :stages="stream.stages" :show-development="devMode" />
+            <!-- 执行进度条：仅在流式生成中(回复未完整产出)显示；回复生成完成后隐藏，避免终态后再占用版面 -->
+            <StageRail v-if="generating" :stages="stream.stages" :show-development="devMode" />
             <ActivityPanel
               :activities="stream.activities"
               :capability-notices="stream.capabilityNotices"
@@ -452,12 +556,23 @@ watch(() => stream.response, scrollToBottom)
       </footer>
     </section>
 
-    <aside class="preview-panel">
+    <div
+      class="resize-handle"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="拖动调整预览宽度"
+      title="拖动调整预览宽度"
+      @pointerdown="startResize"
+    ></div>
+
+    <aside class="preview-panel" :style="{ width: previewRatio + '%' }">
       <RightPanel
         :artifacts="artifacts"
         :generating="generating"
         :project-id="projectStore.currentProjectId"
+        :published-url="publishedUrl"
         @refresh="loadArtifacts"
+        @publish="onPublish"
       />
     </aside>
   </div>
@@ -482,6 +597,36 @@ h1 { margin: 3px 0 0; color: var(--text); font-size: 16px; }
 .attempt-output b { color: var(--text); }
 .attempt-output p { margin: 6px 0 0; white-space: pre-wrap; }
 .suspended { border: 1px solid var(--warn-border); background: var(--warn-bg); color: var(--warn); }
-.preview-panel { width: min(42%, 560px); min-width: 300px; border-left: 1px solid var(--border); }
-@media (max-width: 900px) { .preview-panel { display: none; } }
+.preview-panel { flex: 0 0 auto; min-width: 280px; max-width: 1100px; border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+.resize-handle {
+  flex: 0 0 8px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  /* 触摸拖动时禁用浏览器默认手势(滚动/缩放), 让 pointermove 稳定触发 */
+  touch-action: none;
+  transition: background 0.15s;
+}
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--border);
+}
+.resize-handle:hover::after,
+.chat.resizing .resize-handle::after { background: var(--brand); width: 3px; left: 2px; }
+.resize-handle:hover,
+.chat.resizing .resize-handle { background: var(--brand-bg); }
+/* 拖拽中禁用预览 iframe 的指针事件, 双保险确保跨 iframe 拖动不丢失 */
+.chat.resizing :deep(iframe) { pointer-events: none; }
+/* 窄屏(手机): 预览占满, 对话栏隐藏, 保证预览可用且高度撑满。 */
+@media (max-width: 720px) {
+  .thread-panel { display: none; }
+  .resize-handle { display: none; }
+  .preview-panel { width: 100% !important; min-width: 0; max-width: none; }
+}
 </style>

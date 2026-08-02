@@ -17,6 +17,7 @@ from .runtime import (
 )
 from .stats import (
     Degradation,
+    Feedback,
     FlowCheck,
     IntentDecision,
     KbChangeLog,
@@ -25,6 +26,7 @@ from .stats import (
     ModelCall,
     OutputGuardLog,
     QcScore,
+    TraceEvent,
 )
 
 __all__ = [
@@ -37,6 +39,7 @@ __all__ = [
     "CreatedAtMixin",
     "Degradation",
     "Deployment",
+    "Feedback",
     "FlowCheck",
     "IntentDecision",
     "KbChangeLog",
@@ -55,6 +58,7 @@ __all__ = [
     "Task",
     "TimestampMixin",
     "ToolCall",
+    "TraceEvent",
     "Turn",
     "TurnCheckpoint",
     "UnsignedBigInt",

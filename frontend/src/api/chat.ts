@@ -53,11 +53,24 @@ export async function controlTurn(
   turnId: string,
   action: TurnControlAction,
   payload: Record<string, unknown> = {},
-): Promise<void> {
-  await requestJson(`/api/turns/${encodeURIComponent(turnId)}/control`, {
+): Promise<{ turn_id?: string; stream_id?: string; prior_turn_id?: string; status?: string } | null> {
+  return (await requestJson(`/api/turns/${encodeURIComponent(turnId)}/control`, {
     method: 'POST',
     body: JSON.stringify({ action, ...payload }),
-  })
+  })) as { turn_id?: string; stream_id?: string; prior_turn_id?: string; status?: string } | null
+}
+
+/**
+ * 回溯修改/补充上一轮：correct=重写上一句，supplement=在上一轮基础上补充。
+ * 成功返回后端新建的回溯 turn，前端据此订阅其 SSE 流拿到新版回复/产物。
+ */
+export async function correctTurn(
+  priorTurnId: string,
+  kind: 'correct' | 'supplement',
+  instruction: string,
+  clientMsgId: string,
+): Promise<{ turn_id?: string; stream_id?: string; prior_turn_id?: string; status?: string } | null> {
+  return controlTurn(priorTurnId, kind, { instruction, client_msg_id: clientMsgId })
 }
 
 export async function submitApproval(
@@ -77,6 +90,26 @@ export async function getTurn(turnId: string): Promise<TurnSnapshot> {
 
 export async function getPendingApprovals(): Promise<Record<string, unknown>[] | { approvals?: Record<string, unknown>[] }> {
   return requestJson('/api/gate/pending', { method: 'GET' }) as Promise<Record<string, unknown>[] | { approvals?: Record<string, unknown>[] }>
+}
+
+/** 提交用户对单轮对话的评价(后端 POST /api/feedback)。 */
+export async function submitFeedback(params: {
+  traceId: string
+  rating: number
+  comment?: string
+  dimensions?: Record<string, number>
+  conversationId?: number | null
+}): Promise<{ ok: boolean; feedback_id: number; trace_id: string }> {
+  return requestJson('/api/feedback', {
+    method: 'POST',
+    body: JSON.stringify({
+      trace_id: params.traceId,
+      rating: params.rating,
+      comment: params.comment ?? null,
+      dimensions: params.dimensions ?? null,
+      conversation_id: params.conversationId ?? null,
+    }),
+  }) as Promise<{ ok: boolean; feedback_id: number; trace_id: string }>
 }
 
 function openStream(path: string, init: RequestInit, handlers: StreamHandlers): StreamSubscription {

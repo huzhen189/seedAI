@@ -43,6 +43,7 @@ PIPELINE_STAGES: tuple[StageId, ...] = tuple(StageId)
 
 
 class StageStatus(str, Enum):
+    RUNNING = "running"
     COMPLETED = "completed"
     SKIPPED = "skipped"
     NO_OP = "no_op"
@@ -163,6 +164,9 @@ class TrustFlags(ContractModel):
 class ControlEvent(ContractModel):
     kind: Literal["stop", "pause", "resume", "supplement", "correct", "discard"]
     payload: dict[str, Any] = Field(default_factory=dict)
+    # 回溯控制（correct/supplement）绑定被修改/补充的上一轮 turn_id，
+    # 由 control 端点在受理回溯 turn 时回填到新 TurnContext.prior_turn_id。
+    prior_turn_id: str | None = Field(default=None, max_length=26)
 
 
 class TargetRef(ContractModel):
@@ -199,19 +203,41 @@ class RecallResult(ContractModel):
     degradation_reason: str | None = Field(default=None, max_length=256)
 
 
+class IntentMethod(str, Enum):
+    """意图识别方法来源（确定性规则 / 单次 LLM 全局推理）。用于统计埋点与可解释性。"""
+
+    RULE = "rule"
+    LLM = "llm"
+
+
 class IntentCandidate(ContractModel):
     intent_id: str = Field(min_length=1, max_length=128)
     confidence: float = Field(ge=0.0, le=1.0)
+    # 候选来源：确定性规则 or 单次 LLM 全局推理（方案③升级路径）。
+    method: IntentMethod = IntentMethod.RULE
+    # 该候选对应的原始分句（segmentation，方案②）。纯规则无分句时为整句。
+    raw_segment: str | None = Field(default=None, max_length=2048)
+    # 检测到的细分信号词（如命中哪个 WORDS 表），便于日志与调试。
+    signals: list[str] = Field(default_factory=list)
 
 
 class UnderstandingResult(ContractModel):
     utterance_frame: UtteranceFrame = Field(default_factory=UtteranceFrame)
     sir_delta: SirDelta = Field(default_factory=SirDelta)
     intent_candidates: list[IntentCandidate] = Field(default_factory=list)
+    # 已解析的完整意图集合（多意图，按分句/多信号采集，最多 MAX_ACTION_ITEMS 个）。
+    # S4 直接据此生成 IntentBundle / BoundedPlan；彻底取代旧「单 utterance_frame」假设。
+    resolved_intents: list[IntentItem] = Field(default_factory=list)
+    # 社交前缀（问候/寒暄），会前置到最终回复，避免「过度裁剪」把寒暄整句丢弃。
+    social_prefix: str = Field(default="", max_length=512)
+    # 分层槽位栈（A 方案）：S2 按行业/类型确定性拼装，序列化为 dict。
+    # 含 required/optional/implicit 三类槽位 key 列表，供下游 prompt 引导「该问哪些槽位」。
+    slot_stack: dict | None = Field(default=None)
     top2_margin: float | None = Field(default=None, ge=0.0, le=1.0)
     needs_clarification: bool = False
     model_call_id: str | None = Field(default=None, max_length=128)
     degradation_reason: str | None = Field(default=None, max_length=256)
+    escalated: bool = False
 
 
 class IntentItem(ContractModel):
@@ -225,6 +251,14 @@ class IntentItem(ContractModel):
     executable: bool
     risk_hint: RiskLevel = RiskLevel.LOW
     depends_on: list[str] = Field(default_factory=list)
+    # 候选来源与原始分句（与 IntentCandidate 对齐，供下游 analytics/调试）。
+    method: IntentMethod = IntentMethod.RULE
+    raw_segment: str | None = Field(default=None, max_length=2048)
+    # 仅建站域需要落地项目时的检索/细化用信号。
+    skill: str | None = Field(default=None, max_length=128)
+    # 回溯控制（correct/supplement）时，绑定被修改的上一轮 turn_id。
+    # S6 据此锁定原 project 做受控 edit，而非另起新站。
+    prior_turn_id: str | None = Field(default=None, max_length=26)
 
 
 class IntentBundle(ContractModel):
@@ -252,6 +286,8 @@ class ActionItem(ContractModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
     depends_on: list[str] = Field(default_factory=list)
     dependency_kind: Literal["hard", "soft"] = "hard"
+    # 回溯控制（correct/supplement）时，绑定被修改的上一轮 turn_id。
+    prior_turn_id: str | None = Field(default=None, max_length=26)
 
 
 class BoundedPlan(ContractModel):
@@ -259,6 +295,11 @@ class BoundedPlan(ContractModel):
     action_items: list[ActionItem] = Field(default_factory=list, max_length=MAX_ACTION_ITEMS)
     max_items: Literal[3] = MAX_ACTION_ITEMS
     serial: Literal[True] = True
+    # 计划整体最高风险（取所有 action 的 risk_hint 上界），供 S9 / finalize 决策。
+    max_risk: RiskLevel = RiskLevel.LOW
+    # 是否含有需审批的高危动作（publish/purge/trash）。若有，S5 将以审批闸门覆盖整个 turn，
+    # 避免「高危动作旁路执行 + 低危动作已落」的错盘。
+    has_gated: bool = False
 
     @model_validator(mode="after")
     def validate_item_ids(self) -> "BoundedPlan":
@@ -412,6 +453,13 @@ class StageResult(ContractModel):
     duration_ms: int = Field(default=0, ge=0)
     output_refs: list[str] = Field(default_factory=list)
     error: ErrorEnvelope | None = None
+    # ── 链路快照（仅用于审计落库/回放，不参与 wire 序列化）────────────────────
+    # pipeline.run 在 stage.run 前后各取一次 context.snapshot_state()，经 _log_safe
+    # 截断后挂在这里，由 DbAuditSink 落 trace_events，供管理后台「回放」还原完整链路。
+    # exclude=True：SSE / 契约快照一律不带这两坨大 JSON，避免把流打爆。
+    io_in: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
+    io_out: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
+    io_changed: list[str] | None = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="after")
     def validate_timing_and_failure(self) -> "StageResult":
@@ -434,6 +482,7 @@ class StreamEvent(ContractModel):
         "task",
         "tool",
         "token",
+        "think",
         "state_diff",
         "approval",
         "attempt_output",

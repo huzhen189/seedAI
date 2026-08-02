@@ -60,6 +60,7 @@ class TurnService:
         client_msg_id: str,
         raw_message: str,
         expected_conversation_version: int | None,
+        prior_turn_id: str | None = None,
     ) -> AcceptedTurn:
         """受理一个新 Turn(幂等)。
 
@@ -110,6 +111,7 @@ class TurnService:
                 conversation_id=conversation.id,
                 project_id=conversation.project_id,
                 turn_id=turn_id,
+                trace_id=turn.trace_id,
                 role="user",
                 content=clean,
                 content_refs=[],
@@ -139,6 +141,7 @@ class TurnService:
                 session=SessionInfo(conversation_id=conversation.id, project_id=conversation.project_id),
                 clean_message=clean,
                 trust=trust,
+                prior_turn_id=prior_turn_id,
                 budget=ExecutionBudget(max_model_calls=1, reserved_model_calls=1),
             ),
             existing=False,

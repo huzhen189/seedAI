@@ -9,7 +9,7 @@ const props = withDefaults(
     role: string
     content: string
     time?: string
-    traceId?: string
+    traceId?: string | null
     /** 后置 QC 单裁判结果(来自 SSE `qc` 事件) */
     qc?: QcResult | null
     /** 当前用户已提交的评分(1-10), 缺省 null=未评价 */
@@ -19,15 +19,19 @@ const props = withDefaults(
     myComment?: string | null
     /** 是否允许评价(已登录可评) */
     canRate?: boolean
+    /** 当前会话 id(用于提交评价时回写 feedbacks.conversation_id) */
+    conversationId?: number | null
     /** 是否正在流式生成(逐字 token 推送中)。流式阶段不进 MarkdownView,
      *  直接渲染原始文本, 避免每 token 整篇重解析+全量语法高亮导致卡死(O(n²))。 */
     streaming?: boolean
+    /** LLM 思考过程(来自 SSE think 事件), 实时累计; 非空时展示可折叠块 */
+    thinking?: string
   }>(),
   { qc: null, myRating: null, myDims: null, myComment: null, canRate: true },
 )
 
 const emit = defineEmits<{
-  (e: 'rate', p: { rating: number; comment: string; dimensions: RatingDims }): void
+  (e: 'rate', p: { rating: number; comment: string; dimensions: RatingDims; traceId?: string | null; conversationId?: number | null }): void
   /** 点击建站产物里的某个文件: 通知父组件联动右侧预览面板 */
   (e: 'open-file', name: string): void
 }>()
@@ -36,6 +40,8 @@ const expanded = ref(false)
 const showQc = ref(false)
 const editing = ref(false)
 const expandedDims = ref(false)
+/** 思考过程折叠态(默认展开, 流式时可实时观察 AI 推理) */
+const showThink = ref(true)
 
 // 评价编辑态
 const overall = ref(0)
@@ -62,7 +68,13 @@ function submitRate() {
   for (const d of QC_DIMENSIONS) {
     if (typeof dims[d] === 'number' && dims[d]! > 0) sel[d] = dims[d]
   }
-  emit('rate', { rating: overall.value, comment: comment.value.trim(), dimensions: sel })
+  emit('rate', {
+    rating: overall.value,
+    comment: comment.value.trim(),
+    dimensions: sel,
+    traceId: props.traceId,
+    conversationId: props.conversationId,
+  })
   editing.value = false
 }
 
@@ -113,6 +125,13 @@ function fmtTime(t: string): string {
     <div class="role">
       {{ role === 'user' ? '你' : 'AI' }}
       <span v-if="time" class="time">{{ fmtTime(time) }}</span>
+    </div>
+    <!-- LLM 思考过程(实时流式, 可折叠) -->
+    <div v-if="role === 'assistant' && thinking" class="think-card">
+      <button class="think-toggle" type="button" @click="showThink = !showThink">
+        🧠 思考过程 <span class="think-caret">{{ showThink ? '▾' : '▸' }}</span>
+      </button>
+      <pre v-if="showThink" class="think-body">{{ thinking }}</pre>
     </div>
 
     <div class="body" :class="{ expanded: expanded }">
@@ -232,6 +251,7 @@ function fmtTime(t: string): string {
         </div>
       </div>
     </div>
+
   </div>
 </template>
 
@@ -255,6 +275,38 @@ function fmtTime(t: string): string {
 }
 .body { max-height: 50vh; overflow-y: auto; }
 .body.expanded { max-height: none; overflow-y: visible; }
+
+/* ---- LLM 思考过程(流式) ---- */
+.think-card {
+  margin: 2px 0 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--surface-3, #f6f7f9);
+  overflow: hidden;
+}
+.think-toggle {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted, #6b7280);
+  padding: 5px 8px;
+}
+.think-caret { font-size: 10px; }
+.think-body {
+  margin: 0;
+  padding: 0 10px 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-3, #4b5563);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 30vh;
+  overflow-y: auto;
+}
 /* 流式阶段的原始文本: 轻量"正在输出"反馈, 不做 Markdown/高亮。
    限高+弱化, 不喧宾夺主(用户不关心逐字原文, 关心最终富文本); 高度超限可滚动。 */
 .raw-stream {
@@ -378,4 +430,5 @@ function fmtTime(t: string): string {
   font-size: 12px; cursor: pointer; border: 1px solid var(--border); background: var(--surface-2);
   border-radius: 6px; padding: 4px 12px; color: var(--muted);
 }
+
 </style>

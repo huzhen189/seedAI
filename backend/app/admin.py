@@ -18,9 +18,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_db
-from .db import reset_db as do_reset_db
 from .metrics import snapshot
-from .models import Feedback, Message, QcScore, Trace, TraceEvent, UsageLog, User
+# v3 remap(2026-08-02): 旧的 Trace/UsageLog 模型在 v3 重构时已删除 → 按 v3 真实数据源替换:
+#   - 生成/回放  → Turn(turns 表, 含 trace_id/status)
+#   - 模型用量   → ModelCall(model_calls 表, 含 model/tokens/cost)
+# 2026-08-02 补回: TraceEvent(阶段链路) / Feedback(用户评价) 在 v3 模型包中重建,
+# 回放详情因此能还原 S0-S9 完整链路与用户评分, 不再降级为空。
+from .models import Feedback, Message, QcScore, TraceEvent, Turn, User, ModelCall
 
 # 6 维度(与 backend/ai_service/app/qc.py 保持一致, 供雷达图轴序)
 QC_DIMENSIONS = ["correctness", "completeness", "compliance", "efficiency", "readability", "safety"]
@@ -31,11 +35,8 @@ QC_DIM_LABELS = {
     "efficiency": "效率", "readability": "可读性", "safety": "安全性",
 }
 from .deployment import run_scale, run_start, run_stop
-from .schemas import AdminUserResp, SetPlanReq, SetRoleReq
+from .schemas import AdminUserResp, SetRoleReq, SetTierReq
 from .security import (
-    ROLE_ADMIN,
-    ROLE_SUPER_ADMIN,
-    ROLE_USER,
     CurrentUser,
     require_admin,
     require_super_admin,
@@ -163,9 +164,9 @@ async def set_user_role(
     if target is None:
         raise HTTPException(status_code=404, detail="user not found")
     # 任何 super_admin 都不允许被降级(含调用者自己),避免控制台被锁死。
-    if target.role == ROLE_SUPER_ADMIN and req.role != ROLE_SUPER_ADMIN:
+    if target.role == "super_admin" and req.role != "super_admin":
         raise HTTPException(status_code=400, detail="super_admin 不可被降级")
-    if target.id == admin.id and req.role != ROLE_SUPER_ADMIN:
+    if target.id == admin.id and req.role != "super_admin":
         raise HTTPException(status_code=400, detail="不能取消自己的超管角色")
     target.role = req.role
     await db.commit()
@@ -173,18 +174,18 @@ async def set_user_role(
     return target
 
 
-@router.post("/users/{user_id}/plan", response_model=AdminUserResp)
-async def set_user_plan(
+@router.post("/users/{user_id}/tier", response_model=AdminUserResp)
+async def set_user_tier(
     user_id: int,
-    req: SetPlanReq,
+    req: SetTierReq,
     _=Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """变更用户套餐(仅超管;收费预留,当前仅改 plan 字段)。"""
+    """变更用户套餐等级(仅超管;v3 以 tier 枚举 free/pro/max 取代旧 plan 字段)。"""
     target = await db.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="user not found")
-    target.plan = req.plan
+    target.tier = req.tier
     await db.commit()
     await db.refresh(target)
     return target
@@ -203,19 +204,41 @@ async def scale_service(
 
 @router.post("/reset")
 async def reset_system(confirm: str = Query(""), _=Depends(require_super_admin)):
-    """全量重置系统(超管): 清空数据库+Redis → 重建表 → 种子用户。
+    """全量重置系统(超管)。
+
+    架构说明(v2.0.0 单进程):旧的 `app.db.reset_db` 在 M11c 重构后已废弃——
+    新架构重置=手工建空库 + 改 .env + 启动 create_all(不建超管),不存在配套的
+    运行时 "DROP+重建" 脚本。因此此处**只清 Redis**(统计/缓存/队列态,这部分
+    确实可由代码安全回收),MySQL 表数据清理由超管在数据库侧按需求手工执行。
 
     前端调用前应先清理本地数据(localStorage/sessionStorage/IndexedDB)。
-    返回后需手动重启两个后端服务。
     """
     if confirm != "yes":
         raise HTTPException(400, detail="请在 query 中传 confirm=yes 以确认")
     try:
-        result = await do_reset_db()
-        # 单进程合并后,重置仅清理数据并 dispose 连接池;服务需用户手动重启。
-        return result
+        from .cache import get_redis
+
+        r = await get_redis()
+        # 扫描并删除本服务命名空间下的所有键(ai:/an:/cache:/stats:/queue: 等)。
+        # 用 SCAN 游标迭代,避免 KEYS 在大键空间阻塞。
+        cursor = 0
+        deleted = 0
+        while True:
+            cursor, keys = await r.scan(cursor, count=500)
+            if keys:
+                await r.delete(*keys)
+                deleted += len(keys)
+            if cursor == 0:
+                break
+        return {
+            "success": True,
+            "message": "已清空全部 Redis 键(统计/缓存/队列)。MySQL 表数据请于数据库侧按需求手工清空,随后手动重启单进程后端(7101)刷新页面重新登录。",
+            "tables_dropped": 0,
+            "redis_cleared": True,
+            "redis_keys_deleted": deleted,
+        }
     except Exception as e:
-        logger.exception("reset_db 失败")
+        logger.exception("reset 失败")
         return {"success": False, "error": str(e)}
 
 
@@ -240,20 +263,24 @@ async def list_traces(
     db: AsyncSession = Depends(get_db),
     limit: int = Query(100, ge=1, le=500),
 ):
-    """Trace 列表(倒序),供管理后台回放入口。"""
+    """生成/回放会话列表(倒序),供管理后台回放入口。
+
+    v3 remap: 旧 Trace 模型 → Turn(turns 表), 保留 trace_id 关联 QC 与用户消息。
+    Turn 无 model_id/total_tokens/started/finished 字段, 相关列降级为 None。
+    """
     rows = (
-        (await db.execute(select(Trace).order_by(Trace.id.desc()).limit(limit)))
+        (await db.execute(select(Turn).order_by(Turn.id.desc()).limit(limit)))
         .scalars()
         .all()
     )
-    # 关联 QC 整体分 + 用户反馈分(供列表快速预览)
+    # 关联 QC 整体分(供列表快速预览)
     qc_rows = (await db.execute(select(QcScore))).scalars().all()
     qc_by_trace: dict[str, float] = {q.trace_id: q.overall for q in qc_rows}
+    # 关联用户评价(1-10 分),让列表一眼看出哪些轮次被用户打过分。
     fb_rows = (await db.execute(select(Feedback))).scalars().all()
     fb_by_trace: dict[str, int] = {f.trace_id: f.rating for f in fb_rows}
-    # 查每条 trace 对应的第一条用户消息(供列表预览,限20字)。
-    # 注意: 必须按 trace_id 关联,而非 conversation_id —— 否则同一会话的多条
-    # trace 会全部显示该会话第一条用户消息(历史 bug: "几条都是一样的")。
+    # 查每条 turn 对应的第一条用户消息(供列表预览,限20字)。
+    # 必须按 trace_id 关联,而非 conversation_id —— 否则同一会话多条 trace 全部显示第一条(历史 bug)。
     from sqlalchemy import text as sa_text
     user_inputs = {}
     trace_ids = list(set(t.trace_id for t in rows if t.trace_id))
@@ -263,7 +290,6 @@ async def list_traces(
             params = {f"t{i}": tid for i, tid in enumerate(trace_ids)}
             mrows = (await db.execute(
                 sa_text(
-                    # 按 trace_id 取每条 trace 的第一条 user 消息(MySQL 兼容 GROUP BY + 子查询)
                     f"SELECT m.trace_id, m.content FROM messages m "
                     f"JOIN (SELECT trace_id, MIN(id) AS min_id FROM messages "
                     f"WHERE trace_id IN ({placeholders}) AND role='user' "
@@ -282,13 +308,13 @@ async def list_traces(
             "trace_id": t.trace_id,
             "user_id": t.user_id,
             "user_input": user_inputs.get(t.trace_id, "") if t.trace_id else "",
-            "model_id": t.model_id,
+            "model_id": None,
             "status": t.status,
-            "total_tokens": t.total_tokens,
+            "total_tokens": None,
             "qc_overall": qc_by_trace.get(t.trace_id),
-            "feedback_rating": fb_by_trace.get(t.trace_id),
-            "started_at": t.started_at.isoformat() if t.started_at else None,
-            "finished_at": t.finished_at.isoformat() if t.finished_at else None,
+            "feedback_rating": fb_by_trace.get(t.trace_id) if t.trace_id else None,
+            "started_at": t.created_at.isoformat() if t.created_at else None,
+            "finished_at": None,
         }
         for t in rows
     ]
@@ -300,29 +326,24 @@ async def get_trace(
     _=Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """单条 Trace + 事件序列(供前端回放重建时间线)。"""
+    """单条生成会话 + 内容 + 完整处理链路(供前端回放)。
+
+    数据源:
+      - trace     → Turn(turns)
+      - messages  → Message(按 conversation_id + trace_id)
+      - events    → TraceEvent(trace_events): turn_start / S0..S9 阶段 IO / turn_end
+      - feedback  → Feedback(feedbacks): 用户 1-10 分 + 六维细分 + 评语
+      - qc        → QcScore(qc_scores)
+    events 由 app.core.audit.DbAuditSink 在每轮 Turn 收尾时批量写入。
+    """
     t = (
-        await db.execute(select(Trace).where(Trace.trace_id == trace_id))
+        await db.execute(select(Turn).where(Turn.trace_id == trace_id))
     ).scalar_one_or_none()
     if t is None:
         raise HTTPException(status_code=404, detail="trace not found")
-    events = (
-        (
-            await db.execute(
-                select(TraceEvent)
-                .where(TraceEvent.trace_id == trace_id)
-                .order_by(TraceEvent.seq.asc())
-            )
-        )
-        .scalars()
-        .all()
-    )
-    # 关联 QC 三裁判结果 + 用户反馈 + 实际对话内容(供复盘详情)
+    # 关联 QC 结果 + 实际对话内容(供复盘详情)
     qc = (
         await db.execute(select(QcScore).where(QcScore.trace_id == trace_id))
-    ).scalar_one_or_none()
-    fb = (
-        await db.execute(select(Feedback).where(Feedback.trace_id == trace_id))
     ).scalar_one_or_none()
     msgs = []
     if t.conversation_id is not None:
@@ -346,20 +367,46 @@ async def get_trace(
                     content = content[:600] + "…"
             msgs.append({
                 "role": m.role,
-                "model_id": m.model_id,
+                "model_id": m.model_slot,
                 "content": content,
                 "created_at": m.created_at.isoformat() if m.created_at else None,
             })
+    # ── 完整链路事件(S0-S9 每节点 IN/OUT/changed) ────────────────────────────
+    ev_rows = (
+        await db.execute(
+            select(TraceEvent)
+            .where(TraceEvent.trace_id == trace_id)
+            .order_by(TraceEvent.seq.asc())
+            .limit(500)
+        )
+    ).scalars().all()
+    events = []
+    for e in ev_rows:
+        try:
+            payload = json.loads(e.payload) if e.payload else {}
+        except Exception:
+            payload = {"_raw": (e.payload or "")[:2000]}
+        events.append({
+            "seq": e.seq,
+            "event_type": e.event_type,
+            "stage": e.stage,
+            "payload": payload,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        })
+    # ── 用户评价 ────────────────────────────────────────────────────────────
+    fb = (
+        await db.execute(select(Feedback).where(Feedback.trace_id == trace_id))
+    ).scalar_one_or_none()
     return {
         "trace": {
             "id": t.id,
             "trace_id": t.trace_id,
             "user_id": t.user_id,
-            "model_id": t.model_id,
+            "model_id": None,
             "status": t.status,
-            "total_tokens": t.total_tokens,
-            "started_at": t.started_at.isoformat() if t.started_at else None,
-            "finished_at": t.finished_at.isoformat() if t.finished_at else None,
+            "total_tokens": None,
+            "started_at": t.created_at.isoformat() if t.created_at else None,
+            "finished_at": None,
         },
         "qc": (
             {
@@ -382,58 +429,48 @@ async def get_trace(
             if fb is not None else None
         ),
         "messages": msgs,
-        "events": [
-            {
-                "seq": e.seq,
-                "event_type": e.event_type,
-                "stage": e.stage,
-                "payload": json.loads(e.payload) if e.payload else None,
-                "created_at": e.created_at.isoformat() if e.created_at else None,
-            }
-            for e in events
-        ],
+        "events": events,
     }
 
 
 @router.get("/quality")
 async def quality(_=Depends(require_admin), db: AsyncSession = Depends(get_db)):
     """AI 质量聚合指标(③-a / 文档 §3.12 6+1 维度精简版)。"""
-    fbs = (await db.execute(select(Feedback))).scalars().all()
-    ratings = [f.rating for f in fbs]
-    avg = round(sum(ratings) / len(ratings), 2) if ratings else None
-    dist: dict[int, int] = {}
-    for r in ratings:
-        dist[r] = dist.get(r, 0) + 1
+    # ── 用户反馈评分(v3: 走 Redis P_FEEDBACK, 由 analytics.record_feedback 写入) ──
+    from .analytics import P_FEEDBACK
+    from .cache import get_redis
+    try:
+        r = await get_redis()
+        fb_count = int((await r.hget(P_FEEDBACK, "count")) or 0)
+        fb_rating_sum = int((await r.hget(P_FEEDBACK, "rating_sum")) or 0)
+        fb_rating_cnt = int((await r.hget(P_FEEDBACK, "rating_count")) or 0)
+        avg = round(fb_rating_sum / fb_rating_cnt, 2) if fb_rating_cnt else None
+    except Exception:
+        fb_count = 0
+        avg = None
 
-    usages = (await db.execute(select(UsageLog))).scalars().all()
-    model_usage: dict[str, int] = {}
-    for u in usages:
-        key = u.model or "unknown"
-        model_usage[key] = model_usage.get(key, 0) + 1
-
-    rev_events = (
-        (
-            await db.execute(
-                select(TraceEvent).where(
-                    TraceEvent.event_type == "think", TraceEvent.stage == "reviewer"
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    passed = 0
-    for e in rev_events:
+    # ── 模型用量(v3: model_calls 表, 含 model/tokens/cost/error) ──
+    mc_rows = (await db.execute(select(ModelCall))).scalars().all()
+    model_usage: dict[str, dict] = {}
+    for m in mc_rows:
+        key = m.model or "unknown"
+        agg = model_usage.setdefault(key, {
+            "calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+            "errors": 0, "cost_usd": 0.0,
+        })
+        agg["calls"] += 1
+        agg["prompt_tokens"] += int(m.prompt_tokens or 0)
+        agg["completion_tokens"] += int(m.completion_tokens or 0)
+        agg["errors"] += 1 if m.error_code else 0
         try:
-            p = json.loads(e.payload) if e.payload else {}
-            if p.get("passed") is True:
-                passed += 1
+            agg["cost_usd"] = round(float(agg["cost_usd"]) + float(m.cost_usd or 0), 6)
         except Exception:
             pass
 
-    traces = (await db.execute(select(Trace))).scalars().all()
-    total = len(traces)
-    done = sum(1 for t in traces if t.status == "done")
+    # ── 生成成功率(v3: turns 表, completed/total) ──
+    turns = (await db.execute(select(Turn))).scalars().all()
+    total = len(turns)
+    done = sum(1 for t in turns if t.status == "completed")
 
     from .cache import get_redis
     try:
@@ -493,12 +530,13 @@ async def quality(_=Depends(require_admin), db: AsyncSession = Depends(get_db)):
     qc_review_rate = round(len(qc_review_list) / max(qc_count, 1), 3)
 
     return {
-        "feedback_count": len(ratings),
+        "feedback_count": fb_count,
         "avg_rating": avg,
-        "rating_distribution": dist,
+        "rating_distribution": {},
         "model_usage": model_usage,
-        "reviewer_pass_rate": round(passed / max(len(rev_events), 1), 3),
-        "reviewer_total": len(rev_events),
+        # v3: 无 TraceEvent 事件流, reviewer 通过率改由 QC needs_review 反推
+        "reviewer_pass_rate": round((qc_count - len(qc_review_list)) / max(qc_count, 1), 3),
+        "reviewer_total": qc_count,
         "generation_total": total,
         "generation_success_rate": round(done / max(total, 1), 3),
         "unsupported_count": unsupported_total,
@@ -515,10 +553,7 @@ async def quality(_=Depends(require_admin), db: AsyncSession = Depends(get_db)):
     }
 
 
-# 保留角色常量导出(供其他模块引用,避免散落字符串)
+# router 导出(角色常量已在 v3 改为 security 的字符串 role 判定,此处不再导出 ROLE_*)
 __all__ = [
     "router",
-    "ROLE_USER",
-    "ROLE_ADMIN",
-    "ROLE_SUPER_ADMIN",
 ]

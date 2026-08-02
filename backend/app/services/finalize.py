@@ -42,6 +42,7 @@ class FinalizeService:
                     conversation_id=context.session.conversation_id,
                     project_id=context.session.project_id or 0,
                     turn_id=context.turn_id,
+                    trace_id=context.trace_id,
                     role="assistant",
                     content=context.reply_final,
                     content_refs=[{"artifact_id": ref} for ref in (context.execution.artifact_refs if context.execution else [])],
