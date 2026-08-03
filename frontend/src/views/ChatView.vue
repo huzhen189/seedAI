@@ -112,9 +112,12 @@ const publishedUrl = computed<string | null>(
   () => projectStore.projects.find((p) => p.id === projectStore.currentProjectId)?.published_url ?? null,
 )
 
+// 执行进度面板(StageRail/ActivityPanel/ApprovalCard 等)是否显示。
+// 仅当「正在生成 / 有待审批 / 已暂停 / 出错」时展示；done 终态后(generating=false 且无上述卡片)
+// 整块隐藏, 不再占用版面(用户诉求: 最终结果出来后需要隐藏)。
+// 注意: 早期用 stream.lastSeq>0 作为判据, 导致 done 后 lastSeq 仍 >0 → 面板残留不隐藏, 现已移除。
 const hasLivePanel = computed(() =>
   generating.value
-  || stream.lastSeq > 0
   || !!stream.approval
   || !!stream.suspended
   || !!stream.error,
@@ -192,17 +195,26 @@ async function send(clientMsgId?: string): Promise<void> {
 }
 
 // 离线队列补发: 逐条串行执行(后端按 client_msg_id 幂等去重, 重复提交只重挂接已有流)。
+// 重入锁: 本函数在 onMounted(在线且队列非空) 与 onOnline 回调两处都会触发。两者可能
+// 在同一时刻并发执行(onMounted 刚跑完判断, 紧接着 window 触发 online), 各自读到同一批 pending
+// 条目 → 各调一次 performSend → 同一条消息被生成两次(用户侧表现为"发送一次却出现 2 条回复")。
+// 故用 _flushing 互斥, 保证任意时刻只有一路补发在进行。
+let _flushing = false
 async function flushOfflineQueue(): Promise<void> {
+  if (_flushing) return
   if (generating.value) return
   if ((await offlineQueue.count()) === 0) return
-  offlineNote.value = '正在补发离线消息…'
+  _flushing = true
   try {
+    offlineNote.value = '正在补发离线消息…'
     const sent = await offlineQueue.flush(async (item: QueuedMessage) => {
       await performSend(item.message, item.client_msg_id)
     })
     offlineNote.value = sent > 0 ? `已补发 ${sent} 条离线消息` : ''
   } catch {
     offlineNote.value = '离线消息补发失败，联网后将自动重试'
+  } finally {
+    _flushing = false
   }
   setTimeout(() => {
     if (offlineNote.value.startsWith('已补发') || offlineNote.value.startsWith('正在补发')) {
@@ -509,7 +521,7 @@ watch(() => stream.response, scrollToBottom)
           :content="message.content"
           :time="message.created_at"
           :streaming="message === activeAssistant && generating"
-          :thinking="message === activeAssistant ? stream.thinking : ''"
+          :thinking="message === activeAssistant && generating ? stream.thinking : ''"
           :trace-id="message.trace_id"
           :conversation-id="convStore.currentConvId"
           :can-rate="!!auth.user.value && message.role === 'assistant'"
