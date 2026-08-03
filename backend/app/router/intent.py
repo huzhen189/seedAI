@@ -26,6 +26,7 @@ from app.core.contracts import (
     IntentBundle,
     IntentCandidate,
     IntentItem,
+    MAX_ACTION_ITEMS,
     IntentMethod,
     RiskLevel,
     SirDelta,
@@ -405,7 +406,7 @@ async def escalate_if_needed(message: str, current: UnderstandingResult) -> Unde
         resolved: list[IntentItem] = []
         # 规则层是否已发现非闲聊域（site/research/project）——用于检测 LLM 是否过度纠正成闲聊。
         rule_had_nonchat = any(r.domain != Domain.CHAT for r in current.resolved_intents)
-        for idx, it in enumerate(intents[:3], start=1):
+        for idx, it in enumerate(intents[:MAX_ACTION_ITEMS], start=1):
             dom = _safe_domain(it.get("domain"))
             sp = _safe_speech(it.get("speech"))
             seg = str(it.get("text") or message)[:2048]
@@ -565,7 +566,7 @@ def classify(message: str, understanding: UnderstandingResult, prior_turn_id: st
     prior_turn_id：回溯控制(correct/supplement)时非空，会把 site 域 action 绑定上一轮 turn，
     使 S6 锁定原 project 做受控 edit（而非另起新站）。
     """
-    items = understanding.resolved_intents[:3]
+    items = understanding.resolved_intents[:MAX_ACTION_ITEMS]
     bundle_items: list[IntentItem] = []
     actions: list[ActionItem] = []
     max_risk = RiskLevel.LOW
@@ -579,7 +580,7 @@ def classify(message: str, understanding: UnderstandingResult, prior_turn_id: st
         # 关键：CHAT(ask) 虽 executable=False，也必须成为 action 被 S6 执行，
         # 否则「闲聊 + 建站」复合句里的闲聊会被静默丢弃（即旧版过度裁剪的根因）。
         is_action = it.executable or it.domain == Domain.CHAT
-        if is_action and len(actions) < 3:
+        if is_action and len(actions) < MAX_ACTION_ITEMS:
             actions.append(ActionItem(
                 id=it.id, intent_id=it.intent_id, domain=it.domain,
                 speech_act=it.speech_act, target=it.target, arguments=it.arguments,

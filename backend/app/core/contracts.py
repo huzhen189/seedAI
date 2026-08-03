@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 SCHEMA_VERSION: Final[Literal["1.0"]] = "1.0"
-MAX_ACTION_ITEMS: Final[Literal[3]] = 3
+MAX_ACTION_ITEMS: Final[Literal[5]] = 5
 MAX_INTERNAL_TASKS: Final[int] = 20
 
 
@@ -293,7 +293,7 @@ class ActionItem(ContractModel):
 class BoundedPlan(ContractModel):
     mode: Literal["bounded"] = "bounded"
     action_items: list[ActionItem] = Field(default_factory=list, max_length=MAX_ACTION_ITEMS)
-    max_items: Literal[3] = MAX_ACTION_ITEMS
+    max_items: Literal[5] = MAX_ACTION_ITEMS
     serial: Literal[True] = True
     # 计划整体最高风险（取所有 action 的 risk_hint 上界），供 S9 / finalize 决策。
     max_risk: RiskLevel = RiskLevel.LOW
