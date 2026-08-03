@@ -12,8 +12,11 @@ logger = logging.getLogger("app.domains.chat")
 from app.prompts import CHAT_SYSTEM_PROMPT, CHAT_TEMPERATURE
 from app.slots import SlotStack  # A 方案：分层槽位栈（引导建站提问）
 
-# token / think 帧前端节流：每 ≥1.0s 合并下发一次，避免高吞吐时帧洪泛导致前端卡顿/丢失。
-_EMIT_INTERVAL_S = 1.0  # 提示词集中于 app/prompts
+# token / think 帧前端节流：每 ≥0.2s 合并下发一次。
+# 0.2s 是「实时感」与「防帧洪泛」的折中：肉眼看是连续流动(5 帧/秒)，
+# 同时把 SSE 帧数压到裸流的 1/10 以内，前端 reducer 不会因高频 patch 掉帧。
+# 全后端仅此一处产出 token/think 流(research 域已委托 chat_service)，改这里即全局生效。
+_EMIT_INTERVAL_S = 0.2  # 提示词集中于 app/prompts
 
 
 class ChatService:
@@ -21,7 +24,7 @@ class ChatService:
         """纯聊天回复(S6 无 plan 分支调用)。
 
         流式产出：逐块把 ``think``(思考过程) 与 ``token``(回复正文) 经 ``context.emit``
-        实时推到前端(每 ≥1s 合并一次, 防帧洪泛); 同时仍把完整文本塞回 ``response_fragments``,
+        实时推到前端(每 ≥0.2s 合并一次, 防帧洪泛); 同时仍把完整文本塞回 ``response_fragments``,
         保证 S8 汇总与会话落库逻辑不变(向后兼容)。LLM 不可用时降级到本地静态回复。
         """
         user_text = context.clean_message or ""

@@ -1,11 +1,17 @@
 from __future__ import annotations
+import logging
+import time
+
+logger = logging.getLogger(__name__)
 
 from app.core.contracts import ExecutionResult, ResponseFragment, StageId, StageStatus, TaskResult
+from app.core.intent_labels import intent_label
 from app.core.turn_context import TurnContext
 from app.domains.chat import chat_service
 from app.domains.project import project_ops
 from app.domains.research import research_service
 from app.domains.site import site_service
+from app.analytics import record_skill_outcome, record_ai_subtask
 from .base import BaseStage
 
 # 高危项目操作由 S5 审批闸门承载，决策端点负责真实执行；
@@ -13,15 +19,38 @@ from .base import BaseStage
 _GATED_PROJECT_ACTIONS = frozenset({"publish", "trash", "purge"})
 
 
+async def _emit_task(
+    context: TurnContext,
+    task_id: str,
+    label: str,
+    status: str,
+    *,
+    duration_ms: float | None = None,
+) -> None:
+    """下发子任务状态帧（SSE ``task`` 事件）。
+
+    ``task_id`` 必须与 S4 下发的执行计划条目 id 同源（ActionItem.id / 纯聊天固定 "chat"），
+    前端才能把状态回填到正确的行。fail-soft：推流失败不得影响业务执行本身。
+    """
+    payload: dict[str, object] = {"task_id": task_id, "label": label, "status": status}
+    if duration_ms is not None:
+        payload["duration_ms"] = round(duration_ms, 1)
+    try:
+        await context.emit("task", payload)
+    except Exception as exc:  # noqa: BLE001 — 推流是旁路，不能反噬主流程
+        logger.warning("[S6] task 事件下发失败 task=%s: %s", task_id, exc)
+
+
 class S6ExecuteStage(BaseStage):
     """S6 执行(§5.6,真实副作用唯一落点)。
 
     前置:必须由 S5 校验通过(``validation.status == "pass"``)才会进入;否则 SKIPPED。
-    按首个 action 的域分派:
-      - 无 plan → 纯聊天(chat_service.respond);
-      - site → site_service.create_or_edit(建站,落不可变 Artifact);
-      - research → research_service.research(当前后端未接,会明确失败);
-      - project → _run_project_action(低危直落 ProjectOps,高危必须由 S5 闸门拦截)。
+    多意图串行执行(BoundedPlan.serial=True)：
+      - 规划 0 个 action → 纯聊天(chat_service.respond) 兜底;
+      - 规划 1..N 个低风险 action → 依次按域分派(site/research/project/chat);
+      - 每个 action 独立计时、独立写 analytics(ai:sub / skill_outcome)，并 append 各自的 ResponseFragment;
+      - 所有 fragment 由 S8 汇总拼成回复(S8 逻辑不变)，``done.reply`` 携带合并结果，
+        彻底解决「复合句只返回部分动作结果」的漏盘。
     """
 
     stage_id = StageId.S6
@@ -30,84 +59,193 @@ class S6ExecuteStage(BaseStage):
         if context.validation is None or context.validation.status != "pass":
             logger.debug("[S6] 校验未通过,跳过 turn=%s", context.turn_id)
             return self.result(StageStatus.SKIPPED, "validation_not_pass")
-        if context.plan is None or not context.plan.action_items:
+
+        actions = list(context.plan.action_items) if (context.plan and context.plan.action_items) else []
+        t_total = time.time()
+
+        # 纯聊天兜底：没有任何可执行 action（例如整句都是 CHAT 兜底意图）。
+        # task_id 固定 "chat"，与 turns._plan_payload 的虚拟条目对齐，
+        # 让「纯聊天」在前端执行计划列表里也有一行并能实时变状态。
+        if not actions:
             logger.debug("[S6] 纯聊天回复 turn=%s", context.turn_id)
+            t0 = time.time()
+            await _emit_task(context, "chat", "对话答疑", "running")
             text = await chat_service.respond(context)
+            elapsed = (time.time() - t0) * 1000
             context.response_fragments.append(ResponseFragment(status="success", text=text, producer_stage=StageId.S6))
             context.execution = ExecutionResult(status="succeeded", committed=True)
+            await _emit_task(context, "chat", "对话答疑", "succeeded", duration_ms=elapsed)
+            await record_skill_outcome("chat", "ok", elapsed)
+            await record_ai_subtask(skill="chat", status="succeeded", risk="low", duration_ms=elapsed)
             return self.result(StageStatus.COMPLETED, "chat_completed")
-        if self.session is None:
-            raise RuntimeError("S6 requires a database session")
-        action = context.plan.action_items[0]
-        logger.info("[S6] 执行动作 domain=%s speech=%s turn=%s", action.domain.value, action.speech_act.value, context.turn_id)
-        if action.domain.value == "site":
-            artifact, text = await site_service.create_or_edit(self.session, context)
-            context.execution = ExecutionResult(status="succeeded", committed=True, artifact_refs=[str(artifact.id)], task_results=[TaskResult(task_id=action.id, status="succeeded", output_refs=[str(artifact.id)])])
-            context.response_fragments.append(ResponseFragment(status="success", text=text, producer_stage=StageId.S6, output_refs=[str(artifact.id)]))
-            logger.info("[S6] 建站完成 artifact=%s turn=%s", artifact.id, context.turn_id)
-            return self.result(StageStatus.COMPLETED, "site_artifact_created", output_refs=[str(artifact.id)])
-        if action.domain.value == "research":
-            text = await research_service.research(context)
-            context.execution = ExecutionResult(status="succeeded", committed=True, task_results=[TaskResult(task_id=action.id, status="succeeded")])
-            context.response_fragments.append(ResponseFragment(status="success", text=text, producer_stage=StageId.S6))
-            return self.result(StageStatus.COMPLETED, "research_completed")
-        if action.domain.value == "project":
-            return await self._run_project_action(context, action)
-        context.execution = ExecutionResult(status="failed", committed=False)
-        context.response_fragments.append(ResponseFragment(status="error", text="当前操作尚未具备可执行实现。", producer_stage=StageId.S6))
-        return self.result(StageStatus.BLOCKED, "unsupported_project_action")
 
-    async def _run_project_action(self, context: TurnContext, action):
-        """项目域执行：低危动作直落 ProjectOps，高危动作留给审批链路。"""
+        if self.session is None:
+            logger.error("[S6] 缺少数据库会话,无法执行动作 turn=%s", context.turn_id)
+            return self.result(StageStatus.FAILED, "no_session")
+
+        succeeded = 0
+        total = len(actions)
+        has_error = False
+        artifact_refs: list[str] = []
+        task_results: list[TaskResult] = []
+        for action in actions:
+            ok, refs, tr = await self._run_one(context, action)
+            artifact_refs.extend(refs)
+            if tr is not None:
+                task_results.append(tr)
+            if ok:
+                succeeded += 1
+            else:
+                has_error = True
+
+        context.response_fragments.append(ResponseFragment(
+            status="info",
+            text=f"已完成 {succeeded}/{total} 项操作。",
+            producer_stage=StageId.S6,
+        ))
+
+        elapsed = (time.time() - t_total) * 1000
+        if has_error and succeeded == 0:
+            context.execution = ExecutionResult(status="failed", committed=False,
+                                                artifact_refs=artifact_refs, task_results=task_results)
+            return self.result(StageStatus.BLOCKED, "all_actions_failed")
+        context.execution = ExecutionResult(
+            status="succeeded" if not has_error else "partial",
+            committed=True,
+            artifact_refs=artifact_refs,
+            task_results=task_results,
+        )
+        return self.result(
+            StageStatus.COMPLETED,
+            "multi_action_completed" if total > 1 else "single_action_completed",
+        )
+
+    async def _run_one(self, context: TurnContext, action):
+        """执行单个 action_item。
+
+        返回 (ok, artifact_refs, task_result)。成功 ok=True；失败落 error fragment 并返回
+        ok=False（不中断兄弟动作，闭合「单动作失败整轮崩」的漏盘分支）。
+        """
+        logger.info("[S6] 执行动作 domain=%s speech=%s turn=%s", action.domain.value, action.speech_act.value, context.turn_id)
+        label = intent_label(action.intent_id, action.domain.value, action.speech_act.value)
+        t_item = time.time()
+        # 逐项发 task 事件：running → succeeded/failed。前端按 task_id 回填到
+        # S4 下发的执行计划列表对应行，实现「子任务状态」实时可见（此前后端从未发过 task 事件，
+        # 前端 activities 永远为空，列表看起来是死的）。
+        await _emit_task(context, action.id, label, "running")
+        ok = False
+        try:
+            ok, refs, tr = await self._dispatch(context, action)
+            return ok, refs, tr
+        except Exception as exc:  # noqa: BLE001 — 单个动作失败不影响兄弟动作，但必须被记录
+            logger.exception("[S6] 动作执行异常 domain=%s: %s", action.domain.value, exc)
+            context.response_fragments.append(ResponseFragment(
+                status="error",
+                text=f"执行「{label}」时出现问题，其它动作不受影响。",
+                producer_stage=StageId.S6))
+            await record_skill_outcome(action.intent_id, "fail", 0.0)
+            await record_ai_subtask(skill=action.intent_id, status="blocked", risk="low")
+            return False, [], None
+        finally:
+            # finally 收口保证异常路径也能把行状态从 running 落到 failed，
+            # 否则前端计划列表会有一行永远转圈。
+            await _emit_task(
+                context, action.id, label,
+                "succeeded" if ok else "failed",
+                duration_ms=(time.time() - t_item) * 1000,
+            )
+
+    async def _dispatch(self, context: TurnContext, action):
+        """按域分派到具体领域服务（异常向上抛给 _run_one 统一收口）。"""
+        if action.domain.value == "site":
+            return await self._run_site(context, action)
+        if action.domain.value == "research":
+            return await self._run_research(context, action)
+        if action.domain.value == "project":
+            return await self._run_project(context, action)
+        if action.domain.value == "chat":
+            return await self._run_chat(context, action)
+        # 未知域：兜底 fragment，不抛错，避免整轮崩溃（闭合未知分支）。
+        context.response_fragments.append(ResponseFragment(
+            status="error", text="当前操作尚未具备可执行实现。", producer_stage=StageId.S6))
+        await record_skill_outcome("unknown", "fail", 0.0)
+        await record_ai_subtask(skill="unknown", status="blocked", risk="low")
+        return False, [], None
+
+    async def _run_site(self, context: TurnContext, action):
+        if self.session is None:
+            raise RuntimeError("S6 site action requires a database session")
+        t0 = time.time()
+        artifact, text = await site_service.create_or_edit(self.session, context)
+        elapsed = (time.time() - t0) * 1000
+        context.response_fragments.append(ResponseFragment(
+            status="success", text=text, producer_stage=StageId.S6, output_refs=[str(artifact.id)]))
+        await record_skill_outcome("site", "ok", elapsed)
+        await record_ai_subtask(skill="site", status="succeeded", risk="low", duration_ms=elapsed)
+        return True, [str(artifact.id)], TaskResult(task_id=action.id, status="succeeded", output_refs=[str(artifact.id)])
+
+    async def _run_research(self, context: TurnContext, action):
+        t0 = time.time()
+        text = await research_service.research(context)
+        elapsed = (time.time() - t0) * 1000
+        context.response_fragments.append(ResponseFragment(status="success", text=text, producer_stage=StageId.S6))
+        await record_skill_outcome("research", "ok", elapsed)
+        await record_ai_subtask(skill="research", status="succeeded", risk="low", duration_ms=elapsed)
+        return True, [], TaskResult(task_id=action.id, status="succeeded")
+
+    async def _run_chat(self, context: TurnContext, action):
+        seg = (action.arguments or {}).get("message") or context.clean_message
+        t0 = time.time()
+        text = await chat_service.respond(context)
+        elapsed = (time.time() - t0) * 1000
+        context.response_fragments.append(ResponseFragment(status="success", text=text, producer_stage=StageId.S6))
+        await record_skill_outcome("chat", "ok", elapsed)
+        await record_ai_subtask(skill="chat", status="succeeded", risk="low", duration_ms=elapsed)
+        return True, [], TaskResult(task_id=action.id, status="succeeded")
+
+    async def _run_project(self, context: TurnContext, action):
+        """项目域执行：低危动作直落 ProjectOps（高危在 S5 已被拦截）。"""
         session = self.session
         if session is None:
             raise RuntimeError("S6 project action requires a database session")
         act = action.speech_act.value
+        risk = "critical" if act in {"publish", "purge"} else "high" if act == "trash" else "low"
+        t0 = time.time()
         if act in _GATED_PROJECT_ACTIONS:
-            # 正常不会到这里(S5 会 PAUSED)；到了说明闸门被绕过，必须拒绝而不是执行。
-            context.execution = ExecutionResult(status="failed", committed=False)
-            context.response_fragments.append(
-                ResponseFragment(status="error", text="该操作需要先通过审批确认。", producer_stage=StageId.S6)
-            )
-            return self.result(StageStatus.BLOCKED, "project_action_requires_approval")
+            # 正常不会到这里(S5 已 PAUSED)；到了说明闸门被绕过，必须拒绝而不是执行。
+            context.response_fragments.append(ResponseFragment(
+                status="error", text="该操作需要先通过审批确认。", producer_stage=StageId.S6))
+            elapsed = (time.time() - t0) * 1000
+            await record_skill_outcome(f"project_{act}", "fail", elapsed)
+            await record_ai_subtask(skill=f"project_{act}", status="blocked", risk=risk, duration_ms=elapsed)
+            return False, [], None
 
         target_id = action.target.id
         project_id = int(target_id) if (target_id or "").isdigit() else (context.session.project_id or 0)
         if not project_id:
-            context.execution = ExecutionResult(status="failed", committed=False)
-            context.response_fragments.append(
-                ResponseFragment(status="error", text="未能确定目标项目，请先选择项目。", producer_stage=StageId.S6)
-            )
-            return self.result(StageStatus.BLOCKED, "project_target_missing")
+            context.response_fragments.append(ResponseFragment(
+                status="error", text="未能确定目标项目，请先选择项目。", producer_stage=StageId.S6))
+            elapsed = (time.time() - t0) * 1000
+            await record_skill_outcome(f"project_{act}", "fail", elapsed)
+            await record_ai_subtask(skill=f"project_{act}", status="blocked", risk=risk, duration_ms=elapsed)
+            return False, [], None
 
         outcome = await project_ops.execute(
-            session,
-            action=act,
-            project_id=project_id,
-            user_id=context.user.user_id,
-            trace_id=context.trace_id,
+            session, action=act, project_id=project_id,
+            user_id=context.user.user_id, trace_id=context.trace_id,
         )
         succeeded = outcome.status == "succeeded"
-        context.execution = ExecutionResult(
+        elapsed = (time.time() - t0) * 1000
+        context.response_fragments.append(ResponseFragment(
+            status="success" if succeeded else "error",
+            text=outcome.text, producer_stage=StageId.S6,
+            output_refs=list(outcome.output_refs)))
+        await record_skill_outcome(f"project_{act}", "ok" if succeeded else "fail", elapsed)
+        await record_ai_subtask(
+            skill=f"project_{act}", status="succeeded" if succeeded else "failed",
+            risk=risk, duration_ms=elapsed)
+        return succeeded, [], TaskResult(
+            task_id=action.id,
             status="succeeded" if succeeded else "failed",
-            committed=outcome.committed,
-            artifact_refs=list(outcome.output_refs),
-            task_results=[
-                TaskResult(
-                    task_id=action.id,
-                    status="succeeded" if succeeded else "failed",
-                    output_refs=list(outcome.output_refs),
-                )
-            ],
+            output_refs=list(outcome.output_refs),
         )
-        context.response_fragments.append(
-            ResponseFragment(
-                status="success" if succeeded else "error",
-                text=outcome.text,
-                producer_stage=StageId.S6,
-                output_refs=list(outcome.output_refs),
-            )
-        )
-        if not succeeded:
-            return self.result(StageStatus.BLOCKED, outcome.error_code or "project_action_failed")
-        return self.result(StageStatus.COMPLETED, f"project_{act}_completed", output_refs=list(outcome.output_refs))

@@ -29,6 +29,7 @@ from starlette.responses import StreamingResponse
 
 from app.core.audit import DbAuditSink
 from app.core.contracts import ApprovalStatus, StageId, StreamEvent, TurnStatus
+from app.core.intent_labels import intent_payload, plan_item_payload
 from app.core.pipeline import StageResult
 from app.core.stages import build_pipeline
 from app.core.turn_context import TurnContext
@@ -298,6 +299,22 @@ async def _run_pipeline(context: TurnContext) -> None:
                     payload["output_refs"] = list(result.output_refs)
                 if result.stage is StageId.S3 and context.sir_diff:
                     payload["sir_diff"] = context.sir_diff
+                # S2 出栈即把「识别到的意图」中文列表随阶段事件下发：前端的
+                # “理解意图” token 框收流后直接换成这张列表（单/多意图统一列表渲染）。
+                # 放在 stage 事件而非 done，是因为 done 已是整轮末尾，那时列表才出来就失去了过程感。
+                # 注意：pipeline 每阶段先发一条 reason_code="enter" 的合成 running 事件（在 stage.run 之前），
+                # 彼时 understanding 尚未算好，必须跳过合成事件，只在真实出栈结果上挂意图列表，否则会重复下发。
+                if result.stage is StageId.S2 and result.reason_code != "enter" and context.understanding is not None:
+                    payload["intents"] = [
+                        intent_payload(item) for item in context.understanding.resolved_intents
+                    ]
+                # S4 出栈即下发「执行计划」：BoundedPlan.action_items 的中文列表，
+                # id 与 S6 的 task 事件 task_id 同源，前端据此把子任务状态回填到对应行。
+                # 纯聊天(0 action)在此补一条虚拟 chat 条目，保证列表风格统一、不出现空列表。
+                # 同样要跳过 reason_code="enter" 的合成事件：enter 时 context.plan 还没算（classify 在 S4.run 内才写），
+                # 若在此下发会得到空的虚拟 chat 条目，紧接着真实结果又下发真实条目，前端瞬时出现重复行再被覆盖。
+                if result.stage is StageId.S4 and result.reason_code != "enter":
+                    payload["plan"] = _plan_payload(context)
                 await _publish(context, "stage", payload)
                 # 统计: 各生成阶段耗时(覆盖 S0-S9 全阶段)
                 await record_gen_stage(result.stage.value, result.duration_ms)
@@ -352,10 +369,13 @@ async def _run_pipeline(context: TurnContext) -> None:
 
     # 真实意图（S2 已算好）：下发给前端用于切换思考流/阶段叙事文案，
     # 避免前端只能用「当前是否有 project」近似判断，导致复用建站 project 后闲聊也显示"建设中"。
+    # 带 label(中文) 一起下发，前端不再维护第二份 intent_id→中文 的映射表。
     intents = [
-        {"domain": item.domain.value, "intent_id": item.intent_id, "executable": item.executable}
+        intent_payload(item)
         for item in (context.understanding.resolved_intents if context.understanding else [])
     ]
+    # 计划终态：把每条 action 的最终子任务状态回填进列表（S6 的 task_results 是权威结论），
+    # 断线重连/回放场景下前端只凭 done 也能还原完整的执行计划列表与逐项状态。
     await _publish(
         context,
         "done",
@@ -364,8 +384,37 @@ async def _run_pipeline(context: TurnContext) -> None:
             "reply": context.reply_final,
             "artifact_refs": list(context.execution.artifact_refs) if context.execution else [],
             "intents": intents,
+            "plan": _plan_payload(context, final=True),
         },
     )
+
+
+def _plan_payload(context: TurnContext, *, final: bool = False) -> list[dict[str, Any]]:
+    """构造前端「执行计划列表」。
+
+    - 常规：BoundedPlan.action_items 逐条转中文条目；
+    - 纯聊天（S4 产出 0 个 action，S6 走 chat 兜底分支）：补一条虚拟 ``chat`` 条目，
+      让「纯聊天」也作为列表中的一个元素展示，保持与多意图一致的视觉风格；
+    - ``final=True``：用 ``execution.task_results`` 回填每条的终态；虚拟条目按整轮终态推断。
+    """
+    results: dict[str, str] = {}
+    if final and context.execution is not None:
+        results = {tr.task_id: tr.status for tr in (context.execution.task_results or [])}
+
+    actions = list(context.plan.action_items) if (context.plan and context.plan.action_items) else []
+    if actions:
+        return [plan_item_payload(a, status=results.get(a.id, "succeeded" if final else "pending")) for a in actions]
+
+    # 纯聊天兜底条目：id 固定 "chat"，与 S6 兜底分支发出的 task 事件 task_id 对齐。
+    exec_ok = final and context.execution is not None and context.execution.status == "succeeded"
+    return [{
+        "id": "chat",
+        "domain": "chat",
+        "intent_id": "chat_ask",
+        "speech_act": "ask",
+        "label": "对话答疑",
+        "status": "succeeded" if exec_ok else ("failed" if final else "pending"),
+    }]
 
 
 async def _mark_failed(turn_id: str) -> None:

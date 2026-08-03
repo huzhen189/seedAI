@@ -1,26 +1,40 @@
 <script setup lang="ts">
-// ThinkingTrail：合并原 StageRail（阶段进度）+ ActivityPanel（工具活动）+ think 流（思考过程）
-// 为 WorkBuddy 式「逐段追加展示，终态后折叠可回看」的单一组件。
+// ThinkingTrail：单一「思考与执行过程」组件（合并原 StageRail + ActivityPanel + think 流）。
 //
-// 行为：
-// - 生成中(generating=true)：实时逐段追加展示当前阶段、思考片段、工具活动；
-//   "一段一段"播放，最后一条高亮，形成持续反馈感。
-// - 终态后(generating=false)：整块折叠为「🧠 查看思考过程（N 段）」入口，可点开回看（A 方案）。
+// ── 结构（三段式，单/多意图统一，纯聊天也走同一套骨架）─────────────────────────
+//   ① 理解意图    S0–S3   token 框(有流才出) → 收流后换成「识别到的意图」中文列表
+//   ② 构建网站 / 思考并组织回复
+//                 site: S4–S6 ；其它: S4–S8
+//                 执行计划列表(每行一个子任务 + 实时状态) + token 框(有流才出)
+//   ③ 检查并生成预览  S7–S8（仅 site，纯聊天无此段）
+//   ④ 完成        S9      纯终点，不承载任何流；整轮结束后本组件自动折叠
 //
-// 文案按意图区分：isSiteBuild=true 时走「理解需求 / 构建网站 / 生成预览」等建站叙事；
-// 否则走中性文案（闲聊/问答只显示「理解中 / 思考中 / 回复完成」），杜绝"闲聊也被说成在建设中"。
-import { computed, ref } from 'vue'
+// ── token 框规则 ─────────────────────────────────────────────────────────────
+//   · 固定高度盒子内滚动（不是 max-height：高度恒定，避免流式期间整个面板反复抖动撑高）
+//   · 新内容自动吸底
+//   · 所属分组进入 completed 后立即消失（“token 流结束之后 token 框消失”）
+//   · 后端 0.2s 合并下发一帧（app/domains/chat/service.py::_EMIT_INTERVAL_S）
+//
+// 数据全部由后端下发，前端不再自造映射：
+//   intents ← S2 stage 事件 / done ；plan ← S4 stage 事件 ；子任务状态 ← S6 task 事件
+import { computed, nextTick, ref, watch } from 'vue'
 import type { StageId } from '../types/contracts.generated'
-import type { ActivityItem, CapabilityNotice, StageView } from '../stream/reducer'
+import type { CapabilityNotice, IntentInfo, PlanItem, StageView } from '../stream/reducer'
 
 const props = defineProps<{
   stages: Record<StageId, StageView>
-  activities: ActivityItem[]
+  /** LLM 思考过程（think 事件累计） */
   thinking: string
+  /** 正文 token 累计（无 think 流的模型下用它作为 token 框内容） */
+  response: string
+  /** 本轮识别到的意图（中文 label 由后端给） */
+  intents: IntentInfo[]
+  /** 本轮执行计划 + 子任务实时状态 */
+  plan: PlanItem[]
   capabilityNotices: CapabilityNotice[]
   usage: Record<string, unknown> | null
   generating: boolean
-  /** 本轮是否建站上下文（建站时才用"构建网站/生成预览"等叙事文案） */
+  /** 本轮是否建站上下文（决定第②段标题与是否出现「检查并生成预览」段） */
   isSiteBuild: boolean
   showDevelopment?: boolean
 }>()
@@ -28,80 +42,146 @@ const props = defineProps<{
 // 终态后是否展开回看（默认收起，只留入口）
 const expanded = ref(false)
 
-// 建站叙事文案 vs 中性文案（闲聊/问答）
-const STEP_LABELS = computed(() => {
-  if (props.isSiteBuild) {
-    return {
-      S0: '接收需求', S1: '加载上下文', S2: '理解需求', S3: '合并状态', S4: '确定路径',
-      S5: '检查条件', S6: '构建网站', S7: '整理结果', S8: '检查并生成预览', S9: '完成归档',
-    }
-  }
-  return {
-    S0: '接收消息', S1: '加载上下文', S2: '理解意图', S3: '合并状态', S4: '确定路径',
-    S5: '检查条件', S6: '思考并组织回复', S7: '整理结果', S8: '生成回复', S9: '完成',
-  }
-})
+// 开发者面板用的 S0–S9 全量中文名
+const STEP_LABELS = computed<Record<string, string>>(() => ({
+  S0: props.isSiteBuild ? '接收需求' : '接收消息',
+  S1: '加载上下文',
+  S2: '理解意图',
+  S3: '合并状态',
+  S4: '确定路径',
+  S5: '检查条件',
+  S6: props.isSiteBuild ? '构建网站' : '思考并组织回复',
+  S7: '整理结果',
+  S8: props.isSiteBuild ? '检查并生成预览' : '生成回复',
+  S9: '完成',
+}))
 
-const productGroups = computed(() => {
+type GroupKind = 'understand' | 'execute' | 'preview' | 'finish'
+interface GroupDef {
+  id: GroupKind
+  label: string
+  ids: StageId[]
+}
+
+// 分组定义：
+// - 「准备回复(S5)」与「组织回复(S6–S8)」已合并为单一「思考并组织回复」，不再是两段；
+// - 执行段整体前移，紧跟在「理解意图」之后，让计划列表尽早可见；
+// - 建站额外保留「检查并生成预览」（S7/S8 是真实的产物校验+预览生成，值得单列）。
+const productGroups = computed<GroupDef[]>(() => {
+  const understand: GroupDef = { id: 'understand', label: '理解意图', ids: ['S0', 'S1', 'S2', 'S3'] }
+  const finish: GroupDef = { id: 'finish', label: '完成', ids: ['S9'] }
   if (props.isSiteBuild) {
     return [
-      { id: 'understand', label: '理解需求', ids: ['S0', 'S1', 'S2', 'S3', 'S4'] as StageId[] },
-      { id: 'check', label: '检查条件', ids: ['S5'] as StageId[] },
-      { id: 'build', label: '构建网站', ids: ['S6'] as StageId[] },
-      { id: 'preview', label: '检查并生成预览', ids: ['S7', 'S8'] as StageId[] },
-      { id: 'finish', label: '完成/等待操作', ids: ['S9'] as StageId[] },
+      understand,
+      { id: 'execute', label: '构建网站', ids: ['S4', 'S5', 'S6'] },
+      { id: 'preview', label: '检查并生成预览', ids: ['S7', 'S8'] },
+      finish,
     ]
   }
   return [
-    { id: 'understand', label: '理解意图', ids: ['S0', 'S1', 'S2', 'S3', 'S4'] as StageId[] },
-    { id: 'check', label: '准备回复', ids: ['S5'] as StageId[] },
-    { id: 'respond', label: '组织回复', ids: ['S6', 'S7', 'S8'] as StageId[] },
-    { id: 'finish', label: '完成', ids: ['S9'] as StageId[] },
+    understand,
+    { id: 'execute', label: '思考并组织回复', ids: ['S4', 'S5', 'S6', 'S7', 'S8'] },
+    finish,
   ]
 })
+
+type GroupStatus = 'pending' | 'active' | 'completed' | 'paused' | 'blocked' | 'failed'
 
 const visibleGroups = computed(() => productGroups.value.map((group) => {
   const members = group.ids.map((id) => props.stages[id])
   const active = members.find((item) => item.status === 'active')
   const issue = members.find((item) => ['paused', 'blocked', 'failed'].includes(item.status))
   const completed = members.every((item) => item.status === 'completed')
+  const status = (issue?.status || active?.status || (completed ? 'completed' : 'pending')) as GroupStatus
   return {
     ...group,
-    status: issue?.status || active?.status || (completed ? 'completed' : 'pending'),
+    status,
     detail: active?.detail || issue?.detail || members.map((item) => item.detail).find(Boolean) || '',
   }
 }))
 
-// 已出现的阶段段数（用于"一段一段"计数与折叠入口文案）
+/** 每段的 token 流内容：目前只有执行段(S6)会产出流；理解段预留（S2 若将来接 LLM 会自动生效）。 */
+function streamTextOf(kind: GroupKind): string {
+  if (kind !== 'execute') return ''
+  // 优先展示思考流；模型不吐 think 时退回正文 token，保证「有 token 流的地方都能看到流」。
+  return props.thinking || props.response
+}
+
+/**
+ * token 框可见性：有内容 + 所属段尚未完成。
+ * 段一旦 completed 立刻收起，避免终态还残留一个空转的流框（用户明确要求「流结束框消失」）。
+ */
+function showStreamBox(kind: GroupKind, status: GroupStatus): boolean {
+  if (status === 'completed' || status === 'pending') return false
+  return streamTextOf(kind).length > 0
+}
+
+/** 意图列表在理解段收流后展示；单意图 / 多意图统一列表渲染，风格一致。 */
+function showIntentList(kind: GroupKind, status: GroupStatus): boolean {
+  return kind === 'understand' && status !== 'pending' && props.intents.length > 0
+}
+
+/** 执行计划列表：S4 一出计划就展示，纯聊天也有一行（后端补的虚拟 chat 条目）。 */
+function showPlanList(kind: GroupKind, status: GroupStatus): boolean {
+  return kind === 'execute' && status !== 'pending' && props.plan.length > 0
+}
+
+// ── token 框自动吸底 ────────────────────────────────────────────────────────
+// 用 Map 存每个段的 DOM ref：段是 v-for 出来的，不能用单一 ref。
+const streamBoxes = new Map<string, HTMLElement>()
+function bindStreamBox(kind: string, el: unknown): void {
+  if (el instanceof HTMLElement) streamBoxes.set(kind, el)
+  else streamBoxes.delete(kind)
+}
+watch(
+  () => [props.thinking, props.response],
+  async () => {
+    await nextTick()
+    streamBoxes.forEach((el) => {
+      // 仅当用户没有主动上滑回看时才吸底（留 24px 容差）。
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24 + 40
+      if (atBottom) el.scrollTop = el.scrollHeight
+    })
+  },
+)
+
+// 已出现的段数（折叠入口文案）
 const segmentCount = computed(() => {
-  let n = 0
-  visibleGroups.value.forEach((g) => { if (g.status !== 'pending') n++ })
-  if (props.thinking) n++
-  if (props.activities.length) n++
+  let n = visibleGroups.value.filter((g) => g.status !== 'pending').length
+  if (props.intents.length) n++
+  if (props.plan.length) n++
   return Math.max(n, 1)
 })
 
-// 是否整块显示：生成中始终展开；终态后仅当展开回看时显示细节
+// 生成中始终展开；终态后仅当用户点开才显示细节
 const showDetails = computed(() => props.generating || expanded.value)
 
-const TOOL_ICONS: Record<string, string> = {
-  web_search: '🔍', cos_upload: '📤', fetch_url: '🌐', rag_retrieve: '🧠',
-  image_generate: '🎨', browser_screenshot: '📸', html_validate: '✅', file_io: '📁',
+const PLAN_STATUS_LABELS: Record<string, string> = {
+  pending: '待执行',
+  running: '执行中',
+  succeeded: '已完成',
+  failed: '失败',
+  blocked: '已阻断',
 }
-function iconForTool(name: string): string {
-  return TOOL_ICONS[name] || '🔧'
+function planStatusLabel(status: string): string {
+  return PLAN_STATUS_LABELS[status] || status
+}
+function planStatusIcon(status: string): string {
+  if (status === 'succeeded') return '✓'
+  if (status === 'failed') return '✕'
+  if (status === 'blocked') return '!'
+  if (status === 'running') return '●'
+  return '○'
+}
+function fmtDuration(ms?: number): string {
+  if (!ms || ms <= 0) return ''
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`
 }
 function compact(value: unknown): string {
   if (typeof value === 'string') return value
   if (value == null) return ''
   const text = JSON.stringify(value)
   return text.length > 180 ? `${text.slice(0, 180)}…` : text
-}
-function statusLabel(status: string): string {
-  return ({
-    pending: '未开始', active: '进行中', completed: '已完成',
-    paused: '已暂停', blocked: '已阻断', failed: '失败',
-  } as Record<string, string>)[status] || status
 }
 </script>
 
@@ -116,7 +196,6 @@ function statusLabel(status: string): string {
     </button>
 
     <div v-if="showDetails" class="tt-body">
-      <!-- 阶段逐段 -->
       <div
         v-for="(g, i) in visibleGroups"
         :key="g.id"
@@ -127,36 +206,45 @@ function statusLabel(status: string): string {
         <div class="tt-group-body">
           <div class="tt-group-label">
             {{ g.label }}
-            <span v-if="g.status === 'active' && generating" class="tt-pulse">进行中<span class="typing"><i></i><i></i><i></i></span></span>
+            <span v-if="g.status === 'active' && generating" class="tt-pulse">
+              进行中<span class="typing"><i></i><i></i><i></i></span>
+            </span>
             <span v-else-if="g.status === 'completed'" class="tt-ok">✓</span>
           </div>
-          <div v-if="g.detail" class="tt-group-detail">{{ g.detail }}</div>
-        </div>
-      </div>
+          <div v-if="g.detail && g.id !== 'finish'" class="tt-group-detail">{{ g.detail }}</div>
 
-      <!-- 思考流（LLM think），逐段追加在阶段之后 -->
-      <div v-if="thinking" class="tt-think">
-        <span class="tt-ico">💡</span>
-        <pre class="tt-think-body">{{ thinking }}</pre>
-      </div>
-
-      <!-- 工具/任务活动（建站等会用到；闲聊通常为空，自动不显示） -->
-      <div v-if="activities.length" class="tt-activities">
-        <div
-          v-for="item in activities"
-          :key="item.id"
-          class="tt-act"
-          :class="[item.kind, item.status]"
-        >
-          <span class="tt-ico">{{ iconForTool(item.label) }}</span>
-          <div class="tt-act-body">
-            <div class="tt-act-head">
-              <span class="tt-kind">{{ item.kind === 'task' ? '任务' : '工具' }}</span>
-              <b>{{ item.label }}</b>
-              <span class="tt-status" :class="item.status">{{ statusLabel(item.status) }}</span>
-            </div>
-            <p v-if="item.detail" class="tt-act-detail">{{ item.detail }}</p>
+          <!-- token 流框：固定高度内滚动，所属段完成后整体消失 -->
+          <div
+            v-if="showStreamBox(g.id, g.status)"
+            class="tt-stream"
+            :ref="(el) => bindStreamBox(g.id, el)"
+          >
+            <pre class="tt-stream-text">{{ streamTextOf(g.id) }}</pre>
           </div>
+
+          <!-- 理解段：收流后的意图列表（单/多意图统一列表） -->
+          <ul v-if="showIntentList(g.id, g.status)" class="tt-list intents">
+            <li v-for="(it, idx) in intents" :key="`${it.intent_id}-${idx}`" class="tt-list-row">
+              <span class="tt-idx">{{ idx + 1 }}</span>
+              <b class="tt-list-label">{{ it.label }}</b>
+              <span class="tt-tag" :class="it.domain">{{ it.domain }}</span>
+            </li>
+          </ul>
+
+          <!-- 执行段：执行计划列表 + 子任务实时状态 -->
+          <ul v-if="showPlanList(g.id, g.status)" class="tt-list plan">
+            <li
+              v-for="(item, idx) in plan"
+              :key="item.id || idx"
+              class="tt-list-row"
+              :class="item.status"
+            >
+              <span class="tt-idx" :class="item.status">{{ planStatusIcon(item.status) }}</span>
+              <b class="tt-list-label">{{ item.label }}</b>
+              <span v-if="fmtDuration(item.durationMs)" class="tt-dur">{{ fmtDuration(item.durationMs) }}</span>
+              <span class="tt-state" :class="item.status">{{ planStatusLabel(item.status) }}</span>
+            </li>
+          </ul>
         </div>
       </div>
 
@@ -173,7 +261,9 @@ function statusLabel(status: string): string {
       <details v-if="showDevelopment" class="tt-dev">
         <summary>开发阶段 S0–S9</summary>
         <div class="tt-dev-grid">
-          <span v-for="stage in stages" :key="stage.id" :class="stage.status">{{ stage.id }} · {{ STEP_LABELS[stage.id] || stage.label }}</span>
+          <span v-for="stage in stages" :key="stage.id" :class="stage.status">
+            {{ stage.id }} · {{ STEP_LABELS[stage.id] || stage.label }}
+          </span>
         </div>
       </details>
     </div>
@@ -209,12 +299,12 @@ function statusLabel(status: string): string {
   padding: 4px 13px 12px;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 9px;
   animation: ttIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 @keyframes ttIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
-/* 阶段段：逐段追加，live 段高亮 */
+/* ---- 段 ---- */
 .tt-group { display: flex; gap: 9px; align-items: flex-start; }
 .tt-marker {
   flex: 0 0 20px; width: 20px; height: 20px; display: inline-grid; place-items: center;
@@ -238,26 +328,64 @@ function statusLabel(status: string): string {
 .typing i:nth-child(3) { animation-delay: 0.4s; }
 @keyframes typingDot { 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
 
-/* 思考流 */
-.tt-think { display: flex; gap: 9px; align-items: flex-start; background: var(--brand-bg); border: 1px solid var(--brand-border); border-radius: 10px; padding: 8px 10px; }
-.tt-ico { flex: 0 0 auto; font-size: 14px; line-height: 1.2; margin-top: 1px; }
-.tt-think-body { margin: 0; flex: 1; min-width: 0; font-size: 12px; line-height: 1.55; color: #0e9b86; white-space: pre-wrap; word-break: break-word; max-height: 26vh; overflow-y: auto; }
+/* ---- token 流框：固定高度 + 内部滚动 ---- */
+.tt-stream {
+  margin-top: 6px;
+  height: 132px;              /* 固定高度：流式期间面板不再上下抖动 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--brand-bg);
+  border: 1px solid var(--brand-border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  /* 顶部渐隐，暗示上方还有内容 */
+  mask-image: linear-gradient(180deg, transparent 0, #000 14px);
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 14px);
+}
+.tt-stream::-webkit-scrollbar { width: 6px; }
+.tt-stream::-webkit-scrollbar-thumb { background: var(--brand-border); border-radius: 3px; }
+.tt-stream-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #0e9b86;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+}
 
-/* 活动 */
-.tt-activities { display: flex; flex-direction: column; gap: 6px; }
-.tt-act { display: flex; gap: 9px; align-items: flex-start; border: 1px solid var(--border); border-left: 3px solid var(--brand); border-radius: 8px; padding: 7px 9px; background: var(--surface-2); }
-.tt-act.failed { border-left-color: var(--err); }
-.tt-act.completed, .tt-act.succeeded { border-left-color: var(--ok); }
-.tt-act-body { flex: 1; min-width: 0; }
-.tt-act-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.tt-kind { border-radius: 999px; background: var(--brand-bg); color: var(--brand); padding: 1px 7px; font-size: 10px; font-weight: 700; }
-.tt-act-head b { flex: 1; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.tt-status { font-size: 11px; color: var(--muted); }
-.tt-status.completed, .tt-status.succeeded { color: var(--ok); }
-.tt-status.failed { color: var(--err); }
-.tt-act-detail { margin: 4px 0 0; font-size: 12px; color: var(--text-3); line-height: 1.5; }
+/* ---- 列表（意图 / 执行计划共用骨架，保持风格统一）---- */
+.tt-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.tt-list-row {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface-2); padding: 5px 9px;
+}
+.tt-list.plan .tt-list-row.running { border-color: var(--brand); background: var(--brand-bg); }
+.tt-list.plan .tt-list-row.succeeded { border-left: 3px solid var(--ok); }
+.tt-list.plan .tt-list-row.failed { border-left: 3px solid var(--err); }
+.tt-list.plan .tt-list-row.blocked { border-left: 3px solid var(--warn); }
+.tt-idx {
+  flex: 0 0 16px; width: 16px; height: 16px; display: inline-grid; place-items: center;
+  border-radius: 50%; background: var(--surface-3); color: var(--muted);
+  font-size: 10px; font-weight: 700;
+}
+.tt-idx.running { background: var(--brand); color: #fff; animation: ttPulse 1.1s ease-in-out infinite; }
+.tt-idx.succeeded { background: var(--ok); color: #fff; }
+.tt-idx.failed { background: var(--err); color: #fff; }
+.tt-idx.blocked { background: var(--warn); color: #fff; }
+@keyframes ttPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+.tt-list-label { flex: 1; min-width: 0; font-size: 12px; font-weight: 600; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tt-tag { font-size: 10px; font-weight: 700; border-radius: 999px; padding: 1px 7px; background: var(--surface-3); color: var(--muted); }
+.tt-tag.site { background: var(--brand-bg); color: var(--brand); }
+.tt-dur { font-size: 10px; color: var(--muted); }
+.tt-state { font-size: 11px; color: var(--muted); flex: 0 0 auto; }
+.tt-state.running { color: var(--brand); }
+.tt-state.succeeded { color: var(--ok); }
+.tt-state.failed { color: var(--err); }
+.tt-state.blocked { color: var(--warn); }
 
-/* 能力提示 */
+/* ---- 能力提示 / 用量 / 开发面板 ---- */
 .tt-notices { display: flex; flex-direction: column; gap: 6px; }
 .tt-notice { display: flex; flex-direction: column; gap: 2px; border-left: 3px solid var(--warn); border-radius: 6px; background: var(--warn-bg); padding: 6px 9px; font-size: 12px; }
 .tt-notice b { color: var(--warn); }

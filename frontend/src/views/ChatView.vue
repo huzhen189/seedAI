@@ -544,8 +544,10 @@ watch(() => stream.response, scrollToBottom)
                  按 isSiteBuild 切换建站叙事 vs 中性文案，闲聊不再显示"网站建设中"。 -->
             <ThinkingTrail
               :stages="stream.stages"
-              :activities="stream.activities"
               :thinking="stream.thinking"
+              :response="stream.response"
+              :intents="stream.intents"
+              :plan="stream.plan"
               :capability-notices="stream.capabilityNotices"
               :usage="stream.usage"
               :generating="generating"

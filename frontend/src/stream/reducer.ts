@@ -22,7 +22,20 @@ export interface ActivityItem {
 export interface IntentInfo {
   domain: string
   intent_id: string
+  /** 后端下发的中文短语（唯一真相源在 backend/app/core/intent_labels.py） */
+  label: string
+  speechAct: string
   executable: boolean
+}
+
+/** 执行计划条目：来自 S4 stage 事件的 plan，状态由 S6 的 task 事件实时回填。 */
+export interface PlanItem {
+  id: string
+  domain: string
+  intentId: string
+  label: string
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'blocked'
+  durationMs?: number
 }
 
 export interface CapabilityNotice {
@@ -55,8 +68,13 @@ export interface StreamUiState {
   reconnect: Record<string, unknown> | null
   error: Record<string, unknown> | null
   done: Record<string, unknown> | null
-  /** 本轮真实意图（来自 done 事件中的 intents），用于切换思考流文案。 */
+  /**
+   * 本轮真实意图。S2 出栈时即由 stage 事件下发（不再等到 done），
+   * 前端「理解意图」token 框收流后立刻换成这张中文列表；done 会再覆盖一次做终态对账。
+   */
   intents: IntentInfo[]
+  /** 本轮执行计划（S4 下发 + S6 task 事件回填状态 + done 终态对账）。 */
+  plan: PlanItem[]
 }
 
 export interface ReduceResult {
@@ -106,6 +124,7 @@ export function createStreamUiState(): StreamUiState {
     error: null,
     done: null,
     intents: [],
+    plan: [],
   }
 }
 
@@ -147,8 +166,12 @@ function applyEvent(state: StreamUiState, event: StreamEvent): void {
       applyStage(state, event.data)
       break
     case 'task':
+      // task 事件双写：既进 activities（调试面板/明细），也回填执行计划列表对应行的状态。
+      upsertActivity(state, 'task', event.data, event.event_id)
+      patchPlanStatus(state, event.data)
+      break
     case 'tool':
-      upsertActivity(state, event.type, event.data, event.event_id)
+      upsertActivity(state, 'tool', event.data, event.event_id)
       break
     case 'token':
       state.response += textFrom(event.data)
@@ -191,17 +214,9 @@ function applyEvent(state: StreamUiState, event: StreamEvent): void {
       const reply = textFrom(event.data)
       if (reply) state.response = reply
       state.done = event.data
-      // 本轮真实意图：前端据此切换思考流文案（建站 vs 闲聊中性），取代"有没有 project"的近似判据。
-      const rawIntents = (event.data as Record<string, unknown>)?.intents
-      if (Array.isArray(rawIntents)) {
-        state.intents = rawIntents
-          .filter((it): it is Record<string, unknown> => Boolean(it))
-          .map((it) => ({
-            domain: String(it.domain ?? ''),
-            intent_id: String(it.intent_id ?? ''),
-            executable: Boolean(it.executable),
-          }))
-      }
+      // 本轮真实意图与执行计划的终态对账：断线重连/回放只拿到 done 时也能还原完整列表。
+      applyIntents(state, event.data)
+      applyPlan(state, event.data)
       break
     }
   }
@@ -235,6 +250,56 @@ function applyStage(state: StreamUiState, data: Record<string, unknown>): void {
     label: stringValue(data.label) || state.stages[id].label,
     detail: stringValue(data.detail) || stringValue(data.reason_code) || state.stages[id].detail,
   }
+
+  // S2 携带识别到的意图列表、S4 携带执行计划列表：在阶段出栈的那一刻就落到 state，
+  // 让「理解意图」token 框收流后能立刻切换成中文意图列表，而不必等整轮 done。
+  applyIntents(state, data)
+  applyPlan(state, data)
+}
+
+/** 解析 intents（S2 stage 事件与 done 事件共用同一份 payload 结构）。 */
+function applyIntents(state: StreamUiState, data: Record<string, unknown>): void {
+  const raw = data?.intents
+  if (!Array.isArray(raw)) return
+  state.intents = raw
+    .filter((it): it is Record<string, unknown> => Boolean(it) && typeof it === 'object')
+    .map((it) => ({
+      domain: String(it.domain ?? ''),
+      intent_id: String(it.intent_id ?? ''),
+      speechAct: String(it.speech_act ?? ''),
+      // label 由后端统一给（intent_labels.py）；老版本后端没有该字段时退回 intent_id，
+      // 保证不会渲染出空行。
+      label: stringValue(it.label) || String(it.intent_id ?? ''),
+      executable: Boolean(it.executable),
+    }))
+}
+
+const PLAN_STATUSES = new Set<PlanItem['status']>(['pending', 'running', 'succeeded', 'failed', 'blocked'])
+
+/** 解析 plan（S4 stage 事件下发骨架，done 事件回填终态）。 */
+function applyPlan(state: StreamUiState, data: Record<string, unknown>): void {
+  const raw = data?.plan
+  if (!Array.isArray(raw)) return
+  const prev = new Map(state.plan.map((item) => [item.id, item]))
+  state.plan = raw
+    .filter((it): it is Record<string, unknown> => Boolean(it) && typeof it === 'object')
+    .map((it) => {
+      const id = String(it.id ?? '')
+      const incoming = stringValue(it.status) as PlanItem['status']
+      const before = prev.get(id)
+      // 乱序保护：S4 骨架里的 pending 不得把 task 事件已推进的 running/succeeded 打回去。
+      const status: PlanItem['status'] = PLAN_STATUSES.has(incoming)
+        ? (incoming === 'pending' && before && before.status !== 'pending' ? before.status : incoming)
+        : (before?.status ?? 'pending')
+      return {
+        id,
+        domain: String(it.domain ?? ''),
+        intentId: String(it.intent_id ?? ''),
+        label: stringValue(it.label) || String(it.intent_id ?? ''),
+        status,
+        durationMs: before?.durationMs,
+      }
+    })
 }
 
 function upsertActivity(
@@ -256,6 +321,35 @@ function upsertActivity(
   }
   if (existing) Object.assign(existing, next)
   else state.activities.push(next)
+}
+
+/**
+ * 用 S6 的 task 事件回填执行计划行状态。
+ *
+ * task_id 与 S4 计划条目 id 同源（ActionItem.id / 纯聊天固定 "chat"）。
+ * 若计划列表尚未到达（极端乱序），就地补一行，保证状态不丢。
+ */
+function patchPlanStatus(state: StreamUiState, data: Record<string, unknown>): void {
+  const id = stringValue(data.task_id) || stringValue(data.id)
+  if (!id) return
+  const incoming = stringValue(data.status) as PlanItem['status']
+  if (!PLAN_STATUSES.has(incoming)) return
+  const durationMs = numberValue(data.duration_ms) ?? undefined
+  const row = state.plan.find((item) => item.id === id)
+  if (row) {
+    row.status = incoming
+    if (durationMs !== undefined) row.durationMs = durationMs
+    if (!row.label) row.label = stringValue(data.label)
+    return
+  }
+  state.plan.push({
+    id,
+    domain: '',
+    intentId: '',
+    label: stringValue(data.label) || id,
+    status: incoming,
+    durationMs,
+  })
 }
 
 function applyStateDiff(state: StreamUiState, data: Record<string, unknown>): void {
