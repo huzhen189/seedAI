@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import ActivityPanel from '../components/ActivityPanel.vue'
 import ApprovalCard from '../components/ApprovalCard.vue'
 import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
 import RightPanel from '../components/RightPanel.vue'
-import StageRail from '../components/StageRail.vue'
+import ThinkingTrail from '../components/ThinkingTrail.vue'
 import {
   controlTurn,
   getPendingApprovals,
@@ -112,9 +111,15 @@ const publishedUrl = computed<string | null>(
   () => projectStore.projects.find((p) => p.id === projectStore.currentProjectId)?.published_url ?? null,
 )
 
-// 执行进度面板(StageRail/ActivityPanel/ApprovalCard 等)是否显示。
+// 建站上下文判据：当前有 project 即视为建站叙事（用"构建网站/生成预览"文案）；
+// 闲聊/纯问答无 project 时走中性文案，绝不把普通对话说成"网站建设中"。
+// 注：后端 SSE 未下发 intent，这里用本地 projectStore 是否已有工程来近似判断，
+// 比之前硬挂建站阶段条更贴合实际语义。
+const isSiteBuild = computed(() => projectStore.currentProjectId != null)
+
+// 执行进度面板(ThinkingTrail/ApprovalCard 等)是否显示。
 // 仅当「正在生成 / 有待审批 / 已暂停 / 出错」时展示；done 终态后(generating=false 且无上述卡片)
-// 整块隐藏, 不再占用版面(用户诉求: 最终结果出来后需要隐藏)。
+// ThinkingTrail 自动折叠为"查看思考过程"入口，不再占用版面(用户诉求: 最终结果出来后隐藏)。
 // 注意: 早期用 stream.lastSeq>0 作为判据, 导致 done 后 lastSeq 仍 >0 → 面板残留不隐藏, 现已移除。
 const hasLivePanel = computed(() =>
   generating.value
@@ -528,12 +533,17 @@ watch(() => stream.response, scrollToBottom)
           @rate="onRate"
         >
           <template v-if="message === activeAssistant && hasLivePanel" #trail>
-            <!-- 执行进度条：仅在流式生成中(回复未完整产出)显示；回复生成完成后隐藏，避免终态后再占用版面 -->
-            <StageRail v-if="generating" :stages="stream.stages" :show-development="devMode" />
-            <ActivityPanel
+            <!-- 合并后的思考/执行流：生成中逐段追加展示；done 后折叠为「查看思考过程」可回看(A方案)。
+                 按 isSiteBuild 切换建站叙事 vs 中性文案，闲聊不再显示"网站建设中"。 -->
+            <ThinkingTrail
+              :stages="stream.stages"
               :activities="stream.activities"
+              :thinking="stream.thinking"
               :capability-notices="stream.capabilityNotices"
               :usage="stream.usage"
+              :generating="generating"
+              :is-site-build="isSiteBuild"
+              :show-development="devMode"
             />
             <div v-if="stream.attemptOutputs.length" class="attempt-output">
               <b>本次尝试输出</b>

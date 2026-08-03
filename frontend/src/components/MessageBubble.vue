@@ -40,9 +40,6 @@ const expanded = ref(false)
 const showQc = ref(false)
 const editing = ref(false)
 const expandedDims = ref(false)
-/** 思考过程折叠态(默认展开, 流式时可实时观察 AI 推理) */
-const showThink = ref(true)
-
 // 评价编辑态
 const overall = ref(0)
 const dims = reactive<RatingDims>({})
@@ -126,13 +123,8 @@ function fmtTime(t: string): string {
       {{ role === 'user' ? '你' : 'AI' }}
       <span v-if="time" class="time">{{ fmtTime(time) }}</span>
     </div>
-    <!-- LLM 思考过程(实时流式, 可折叠) -->
-    <div v-if="role === 'assistant' && thinking" class="think-card">
-      <button class="think-toggle" type="button" @click="showThink = !showThink">
-        🧠 思考过程 <span class="think-caret">{{ showThink ? '▾' : '▸' }}</span>
-      </button>
-      <pre v-if="showThink" class="think-body">{{ thinking }}</pre>
-    </div>
+    <!-- LLM 思考过程已统一合并到 ChatView 注入的 ThinkingTrail（#trail 槽），
+         避免与阶段进度/工具活动重复出现两份思考流；此处不再单独渲染 thinking。 -->
 
     <div class="body" :class="{ expanded: expanded }">
       <!-- 纯文本 / 闲聊 / 建站文字总结(A#485: 去 site-card 双卡, 只留总结文案) -->
