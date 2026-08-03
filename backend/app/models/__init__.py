@@ -1,5 +1,6 @@
 from .base import Base, CreatedAtMixin, LongText, TimestampMixin, UnsignedBigInt, enum_type
 from .content import Artifact, Conversation, Message, Project, User, UserModelKey
+from .memory import Memory, ProjectEvent, ProjectFact, UserFact, UserSoftPreference
 from .runtime import (
     Approval,
     ApprovalDecision,
@@ -44,6 +45,7 @@ __all__ = [
     "IntentDecision",
     "KbChangeLog",
     "LongText",
+    "Memory",
     "Message",
     "MetricsDaily",
     "MetricsEvent",
@@ -51,6 +53,8 @@ __all__ = [
     "OutboxEvent",
     "OutputGuardLog",
     "Project",
+    "ProjectEvent",
+    "ProjectFact",
     "ProjectTombstone",
     "PurgeJob",
     "QcScore",
@@ -64,6 +68,8 @@ __all__ = [
     "UnsignedBigInt",
     "UsageLedger",
     "User",
+    "UserFact",
     "UserModelKey",
+    "UserSoftPreference",
     "enum_type",
 ]

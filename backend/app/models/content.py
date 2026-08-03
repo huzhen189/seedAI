@@ -84,6 +84,9 @@ class Message(Base, TimestampMixin):
     role: Mapped[str] = mapped_column(enum_type("message_role", "user", "assistant", "system"), nullable=False)
     content: Mapped[str] = mapped_column(LongText(), nullable=False)
     content_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    # 记忆 v2：本轮 LLM 总结（f"{title}\n\n{body}" 标题+压缩正文），由异步提炼写入；
+    # content 仍存原文（短期记忆保真），二者双轨互不干扰。
+    summary: Mapped[str | None] = mapped_column(LongText(), nullable=True)
     model_slot: Mapped[str | None] = mapped_column(String(32))
 
 

@@ -324,6 +324,14 @@ class Settings(BaseSettings):
     chroma_collection_rag_corpus: str = "rag_corpus"
     rag_top_k: int = Field(default=5, ge=1, le=20)
 
+    # ── 记忆模块 v2（docs/plan-memory-v2-landing.md）──
+    # 是否启用 s7 之后的 LLM 异步提取+双写（关闭则仅跑 S0-S9 不写记忆）。
+    memory_extraction_enabled: bool = True
+    # 跨轮上下文预算信封（token 估算，len//4）；超限按 L5→L3最旧→不动L2/L4 淘汰。
+    memory_token_budget: int = Field(default=5000, ge=1)
+    # L5 向量召回硬上限（常数额，与历史长度解耦，防爆）。
+    memory_recall_top_k: int = Field(default=5, ge=1, le=20)
+
     split_b_enabled: bool = True
     split_b_max_subtasks: int = Field(default=6, ge=1, le=20)
     split_escalate_low_conf: float = Field(default=0.6, ge=0.0, le=1.0)
