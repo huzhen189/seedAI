@@ -111,11 +111,18 @@ const publishedUrl = computed<string | null>(
   () => projectStore.projects.find((p) => p.id === projectStore.currentProjectId)?.published_url ?? null,
 )
 
-// 建站上下文判据：当前有 project 即视为建站叙事（用"构建网站/生成预览"文案）；
-// 闲聊/纯问答无 project 时走中性文案，绝不把普通对话说成"网站建设中"。
-// 注：后端 SSE 未下发 intent，这里用本地 projectStore 是否已有工程来近似判断，
-// 比之前硬挂建站阶段条更贴合实际语义。
-const isSiteBuild = computed(() => projectStore.currentProjectId != null)
+// 建站叙事判据：优先以「后端下发的本轮真实意图」为准——done 事件里带 intents，
+// 含 site 域才显示"构建网站/生成预览"等建站文案；否则（chat/research/project）一律走中性文案。
+// 杜绝"复用已存在的建站 project 后，闲聊也被说成网站建设中"的近似误判。
+// 生成早期（intents 尚未随 done 下发）一律按中性处理，不提前误报"建设中"，避免文案抖动。
+const isSiteBuild = computed(() => {
+  if (stream.intents && stream.intents.length > 0) {
+    return stream.intents.some((i) => i.domain === 'site')
+  }
+  // 尚未拿到真实意图：仅当非生成态（历史已完成的轮，且当时没有 site 意图）才由 project 兜底，
+  // 生成中同样按中性，防止闲聊在 project 内显示建设流程。
+  return !generating.value && projectStore.currentProjectId != null
+})
 
 // 执行进度面板(ThinkingTrail/ApprovalCard 等)是否显示。
 // 仅当「正在生成 / 有待审批 / 已暂停 / 出错」时展示；done 终态后(generating=false 且无上述卡片)

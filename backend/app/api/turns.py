@@ -350,6 +350,12 @@ async def _run_pipeline(context: TurnContext) -> None:
     # 成功路径统一在业务事务之外落审计（失败路径已在 except 分支落过，保留现场）。
     await audit_sink.flush()
 
+    # 真实意图（S2 已算好）：下发给前端用于切换思考流/阶段叙事文案，
+    # 避免前端只能用「当前是否有 project」近似判断，导致复用建站 project 后闲聊也显示"建设中"。
+    intents = [
+        {"domain": item.domain.value, "intent_id": item.intent_id, "executable": item.executable}
+        for item in (context.understanding.resolved_intents if context.understanding else [])
+    ]
     await _publish(
         context,
         "done",
@@ -357,6 +363,7 @@ async def _run_pipeline(context: TurnContext) -> None:
             "status": terminal,
             "reply": context.reply_final,
             "artifact_refs": list(context.execution.artifact_refs) if context.execution else [],
+            "intents": intents,
         },
     )
 

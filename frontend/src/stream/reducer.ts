@@ -19,6 +19,12 @@ export interface ActivityItem {
   output?: unknown
 }
 
+export interface IntentInfo {
+  domain: string
+  intent_id: string
+  executable: boolean
+}
+
 export interface CapabilityNotice {
   id: string
   feature: string
@@ -37,6 +43,8 @@ export interface StreamUiState {
   stages: Record<StageId, StageView>
   activities: ActivityItem[]
   response: string
+  /** LLM 思考过程实时累计(来自 think 事件), 前端折叠展示 */
+  thinking: string
   attemptOutputs: string[]
   state: Record<string, unknown>
   stateVersion: number
@@ -47,6 +55,8 @@ export interface StreamUiState {
   reconnect: Record<string, unknown> | null
   error: Record<string, unknown> | null
   done: Record<string, unknown> | null
+  /** 本轮真实意图（来自 done 事件中的 intents），用于切换思考流文案。 */
+  intents: IntentInfo[]
 }
 
 export interface ReduceResult {
@@ -84,6 +94,7 @@ export function createStreamUiState(): StreamUiState {
     stages,
     activities: [],
     response: '',
+    thinking: '',
     attemptOutputs: [],
     state: {},
     stateVersion: 0,
@@ -94,6 +105,7 @@ export function createStreamUiState(): StreamUiState {
     reconnect: null,
     error: null,
     done: null,
+    intents: [],
   }
 }
 
@@ -141,6 +153,9 @@ function applyEvent(state: StreamUiState, event: StreamEvent): void {
     case 'token':
       state.response += textFrom(event.data)
       break
+    case 'think':
+      state.thinking += textFrom(event.data)
+      break
     case 'state_diff':
       applyStateDiff(state, event.data)
       break
@@ -169,9 +184,26 @@ function applyEvent(state: StreamUiState, event: StreamEvent): void {
     case 'reconnect':
       state.reconnect = event.data
       break
-    case 'done':
+    case 'done': {
+      // 终态事件可能携带最终回复文本(reply)。纯聊天/建站完成的回复只在 done
+      // 里下发(不走 token 增量流), 必须把 reply 折进 state.response, 否则助手气泡
+      // 永远收不到最终回答(用户侧表现为"没收到结果返回")。
+      const reply = textFrom(event.data)
+      if (reply) state.response = reply
       state.done = event.data
+      // 本轮真实意图：前端据此切换思考流文案（建站 vs 闲聊中性），取代"有没有 project"的近似判据。
+      const rawIntents = (event.data as Record<string, unknown>)?.intents
+      if (Array.isArray(rawIntents)) {
+        state.intents = rawIntents
+          .filter((it): it is Record<string, unknown> => Boolean(it))
+          .map((it) => ({
+            domain: String(it.domain ?? ''),
+            intent_id: String(it.intent_id ?? ''),
+            executable: Boolean(it.executable),
+          }))
+      }
       break
+    }
   }
 }
 
@@ -250,7 +282,10 @@ function upsertCapabilityNotice(state: StreamUiState, data: Record<string, unkno
 }
 
 function textFrom(data: Record<string, unknown>): string {
-  return stringValue(data.delta) || stringValue(data.text) || stringValue(data.content) || stringValue(data.message)
+  // done 事件下发的正文在 reply 字段（后端 turns.py 构造 payload={"status","reply","artifact_refs"}），
+  // 之前的取值顺序里没有 reply，导致终态回复永远取不到、助手气泡空白。reply 优先于增量字段，
+  // 因为它是后端裁剪/聚合后的最终文本。
+  return stringValue(data.reply) || stringValue(data.delta) || stringValue(data.text) || stringValue(data.content) || stringValue(data.message)
 }
 
 // 合并审批卡: 保留一次性 nonce(明文只下发一次), 后续事件只更新状态/风险等字段。
