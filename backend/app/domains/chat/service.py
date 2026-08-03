@@ -9,8 +9,17 @@ from app.llm import LLMError, chat_completion_stream
 
 logger = logging.getLogger("app.domains.chat")
 
+from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db import transaction
+from app.models import Message
 from app.prompts import CHAT_SYSTEM_PROMPT, CHAT_TEMPERATURE
 from app.slots import SlotStack  # A 方案：分层槽位栈（引导建站提问）
+
+# 短期记忆：每轮直接从 messages 表取本会话最近 N 条 (user+assistant) 拼进对话窗口。
+# 这是真正可靠的「多轮衔接」——此前靠向量召回近似、承接相邻上一句不可靠，现降级为远场补充。
+_RECENT_CHAT_LIMIT = 5
 
 # token / think 帧前端节流：每 ≥0.2s 合并下发一次。
 # 0.2s 是「实时感」与「防帧洪泛」的折中：肉眼看是连续流动(5 帧/秒)，
@@ -38,39 +47,53 @@ class ChatService:
                 "\n\n【已知该用户的偏好与历史信息】——用于个性化回复，以下已提供的项不要再重复追问：\n"
                 + prefs_block
             )
-        # 多轮关联：把 S1 从向量库召回的「历史对话上下文」注入 prompt，让模型能承接上一轮。
-        # 这是之前一直没接上的环节（project_context 召回后未被消费），导致 Agent 像没记忆一样。
+        # 多轮关联（远场补充）：S1 从向量库召回的「历史对话上下文」作为补充提示。
+        # 注：真正的近场多轮衔接已由下方的「最近对话窗口」承担（查 messages 表），
+        # 向量召回在此仅作远场兜底（弥补长期偏好/跨会话上下文），不再作为唯一记忆来源。
         if context.project_context:
             ctx_block = "\n".join(f"- {t}" for t in context.project_context)
             system_content += (
-                "\n\n【与本消息相关的历史对话片段】——用户可能在本轮承接、追问或纠正上一轮的话题，"
-                "请结合这些上下文连贯作答，不要忽略前文已达成一致的内容：\n"
+                "\n\n【相关历史背景（远场补充）】——以下为可能与本消息相关的历史片段，"
+                "仅供必要时的背景参考，不要凭空关联到无关主题：\n"
                 + ctx_block
             )
-        # A 方案：若本轮带建站意图且已拼装分层槽位栈，把「待收集必填/可选槽」注入 prompt，
-        # 引导模型向用户补齐信息（已填的不必再问），解决「建站太随意、不收集信息」的问题。
+        # SIR 状态拼接（所有意图都需注入，不再限定建站）：把 S3 合并后的「已收集信息」与
+        # 分层槽位栈的「待确认项」送入 prompt，让模型知晓当前会话已沉淀的事实，避免重复追问、
+        # 并能延续上一轮的话题（这是进入 LLM 必做的上下文，与具体意图无关）。
         if context.understanding is not None and context.understanding.slot_stack:
             try:
                 stack_obj = SlotStack.model_validate(context.understanding.slot_stack)
             except Exception:  # noqa: BLE001
                 stack_obj = None
             if stack_obj is not None:
-                has_site = any(r.domain.value == "site" for r in context.understanding.resolved_intents)
-                if has_site:
-                    filled = set((context.sir_after_dst.slots or {}).keys()) if context.sir_after_dst else set()
-                    g = stack_obj.guidance(filled)
-                    req_block = "、".join(g["missing_required"]) or "（已齐）"
-                    opt_block = "、".join(g["suggested_optional"]) or "（无）"
-                    system_content += (
-                        "\n\n【本次建站待收集信息】优先向用户确认以下必填项（已填的不必再问）：\n"
-                        f"- 必填：{req_block}\n"
-                        f"- 可选建议：{opt_block}\n"
-                        "请用简洁提问引导用户补齐，不要一次性罗列过多。"
-                    )
-        messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_text},
-        ]
+                filled = set((context.sir_after_dst.slots or {}).keys()) if context.sir_after_dst else set()
+                g = stack_obj.guidance(filled)
+                req_block = "、".join(g["missing_required"]) or "（已齐）"
+                opt_block = "、".join(g["suggested_optional"]) or "（无）"
+                system_content += (
+                    "\n\n【本轮待确认的收集信息】——涉及结构化收集时，优先向用户确认以下必填项"
+                    "（已收集的不必再问）：\n"
+                    f"- 必填：{req_block}\n"
+                    f"- 可选建议：{opt_block}\n"
+                    "请用简洁提问引导用户补齐，不要一次性罗列过多。"
+                )
+        # 已沉淀的会话事实（SIR slots，全意图）：模型据此个性化、不重复问已表达项。
+        if context.sir_after_dst and context.sir_after_dst.slots:
+            known = "\n".join(f"- {k}：{v}" for k, v in context.sir_after_dst.slots.items())
+            system_content += (
+                "\n\n【当前会话已收集的信息】——以下事实已在前面轮次达成一致或用户已表达，"
+                "请直接沿用、不要重复追问：\n"
+                + known
+            )
+        # 拼装对话窗口：system → 最近 N 条历史(user/assistant) → 当前 user。
+        # 最近对话从 messages 表按本会话实时拉取（fail-soft 降级为空），保证相邻上一句 100% 衔接；
+        # 这是真正的短期记忆，优先于上面的向量召回远场补充。
+        recent = await _load_recent_messages(context)
+        messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
+        for role, content in recent:
+            if content:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": user_text})
         try:
             text_parts: list[str] = []
             think_parts: list[str] = []
@@ -116,6 +139,48 @@ class ChatService:
         from app.llm import get_llm_client
 
         return get_llm_client().available
+
+
+async def _load_recent_messages(context: TurnContext) -> list[tuple[str, str]]:
+    """取本会话最近 _RECENT_CHAT_LIMIT 条 (user+assistant) 对话，按时间升序返回。
+
+    这是真正的「短期记忆」窗口：让 LLM 直接看到相邻上一轮（含 assistant 回复），
+    从根本上解决此前「承接上一句失败」的问题。fail-soft：任何异常都降级为空列表，
+    绝不能因读历史而阻断本轮回复。
+    """
+    # S6 执行阶段自带注入的 DB 会话（services/turns.py 构造 context 时已挂 db_session），
+    # 优先复用同一事务会话，避免额外开连接；拿不到时再用只读事务兜底（仍然 fail-soft）。
+    conv_id = context.session.conversation_id
+    if not conv_id:
+        return []
+    session = context.db_session
+    try:
+        if session is None:
+            async with transaction() as s:
+                rows = await _fetch_recent(s, conv_id)
+        else:
+            rows = await _fetch_recent(session, conv_id)
+    except Exception as exc:  # noqa: BLE001 — 旁路读取，失败不得反噬主流程
+        logger.warning("[chat] 读取最近对话失败 conv=%s: %s", conv_id, exc)
+        return []
+    return rows
+
+
+async def _fetch_recent(session: AsyncSession, conv_id: int) -> list[tuple[str, str]]:
+    """按 conversation_id 取最近 _RECENT_CHAT_LIMIT 条 user/assistant（升序）。"""
+    recent = (
+        await session.execute(
+            select(Message.role, Message.content)
+            .where(
+                Message.conversation_id == conv_id,
+                Message.role.in_(["user", "assistant"]),
+            )
+            .order_by(desc(Message.id))
+            .limit(_RECENT_CHAT_LIMIT)
+        )
+    ).all()
+    # 倒序回原始时间顺序（最旧的在前），保证多轮上下文连贯。
+    return [(role, content) for role, content in reversed(recent)]
 
 
 def _graceful_fallback(user_text: str) -> str:

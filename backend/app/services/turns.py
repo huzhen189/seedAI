@@ -77,7 +77,7 @@ class TurnService:
             if existing.request_digest != digest:
                 raise HTTPException(status_code=409, detail={"code": "IDEMPOTENCY_DIGEST_CONFLICT"})
             logger.info("[turn] 幂等复用 turn=%s client_msg_id=%s", existing.turn_id, client_msg_id)
-            context = self._context_from_existing(existing, user, raw_message)
+            context = self._context_from_existing(existing, user, raw_message, session)
             return AcceptedTurn(context=context, existing=True)
 
         clean, trust = clean_message(raw_message)
@@ -139,6 +139,7 @@ class TurnService:
                 fencing_token=fencing_token,
                 user=UserIdentity(user_id=user.id, tier=user.tier, roles=(user.role,)),
                 session=SessionInfo(conversation_id=conversation.id, project_id=conversation.project_id),
+                db_session=session,
                 clean_message=clean,
                 trust=trust,
                 prior_turn_id=prior_turn_id,
@@ -162,7 +163,9 @@ class TurnService:
             "last_event_id": turn.last_event_id,
         }
 
-    def _context_from_existing(self, turn: Turn, user: CurrentUser, raw_message: str) -> TurnContext:
+    def _context_from_existing(
+        self, turn: Turn, user: CurrentUser, raw_message: str, session: AsyncSession
+    ) -> TurnContext:
         clean, trust = clean_message(raw_message)
         return TurnContext(
             schema_version="1.0",
@@ -174,6 +177,7 @@ class TurnService:
             fencing_token=turn.fencing_token,
             user=UserIdentity(user_id=user.id, tier=user.tier, roles=(user.role,)),
             session=SessionInfo(conversation_id=turn.conversation_id),
+            db_session=session,
             clean_message=clean,
             trust=trust,
             budget=ExecutionBudget(max_model_calls=1, reserved_model_calls=1),
