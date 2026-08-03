@@ -13,6 +13,10 @@ from .base import BaseStage
 # 多值槽位：按**并集**合并（保序去重），而不是整体覆盖。
 # 语义原因：「再加一个联系我板块」不应抹掉上一轮已确认的板块。
 _UNION_SLOTS = frozenset({"site.sections", "site.style"})
+# 多值槽位防御性上限：union 分支只增不删（除非显式给 [] 清空），不封顶会被多轮
+# 狂加板块/风格撑爆 system prompt。超出则保留最近 N 个（旧者视为过期遗忘），
+# 与 constraints/pending 的 [-20:] 同套路；N 取少量冗余余量（真实站点极少超 12 板块）。
+_UNION_SLOT_CAP = 24
 # 清空指令的哨兵值：delta 里显式给 [] 表示"用户要求清空该多值槽位"，
 # 与"本轮没提到"（key 不存在）严格区分，否则永远无法删除已沉淀的板块。
 _CLEAR = "__clear__"
@@ -152,6 +156,10 @@ class S3DstStage(BaseStage):
                 for item in (new_value if isinstance(new_value, list) else [new_value]):
                     if item not in union:
                         union.append(item)
+                # 防御性上限：超出保留最近 _UNION_SLOT_CAP 个，旧者过期遗忘。
+                # 注意保留语义为"最近追加优先"，故截断头部（最旧）而非尾部。
+                if len(union) > _UNION_SLOT_CAP:
+                    union = union[-_UNION_SLOT_CAP:]
                 if union != current:
                     merged[key] = union
                     if key in base:
