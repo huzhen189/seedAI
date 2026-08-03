@@ -61,6 +61,13 @@ class S6ExecuteStage(BaseStage):
             return self.result(StageStatus.SKIPPED, "validation_not_pass")
 
         actions = list(context.plan.action_items) if (context.plan and context.plan.action_items) else []
+        if context.plan:
+            for idx, a in enumerate(actions):
+                logger.info(
+                    "[S6] plan.action[%d] id=%s intent=%s domain=%s speech=%s prior_turn=%s args=%s",
+                    idx, a.id, a.intent_id, a.domain.value, a.speech_act.value,
+                    a.prior_turn_id, (a.arguments or {}),
+                )
         t_total = time.time()
 
         # 纯聊天兜底：没有任何可执行 action（例如整句都是 CHAT 兜底意图）。
@@ -178,6 +185,8 @@ class S6ExecuteStage(BaseStage):
         t0 = time.time()
         artifact, text = await site_service.create_or_edit(self.session, context)
         elapsed = (time.time() - t0) * 1000
+        logger.info("[S6] site 动作产物 artifact_id=%s v=%s 文本首120=%r",
+                     artifact.id, getattr(artifact, "version", "?"), text[:120])
         context.response_fragments.append(ResponseFragment(
             status="success", text=text, producer_stage=StageId.S6, output_refs=[str(artifact.id)]))
         await record_skill_outcome("site", "ok", elapsed)
@@ -188,6 +197,7 @@ class S6ExecuteStage(BaseStage):
         t0 = time.time()
         text = await research_service.research(context)
         elapsed = (time.time() - t0) * 1000
+        logger.info("[S6] research 动作产物 文本首200=%r", text[:200])
         context.response_fragments.append(ResponseFragment(status="success", text=text, producer_stage=StageId.S6))
         await record_skill_outcome("research", "ok", elapsed)
         await record_ai_subtask(skill="research", status="succeeded", risk="low", duration_ms=elapsed)
@@ -198,6 +208,7 @@ class S6ExecuteStage(BaseStage):
         t0 = time.time()
         text = await chat_service.respond(context)
         elapsed = (time.time() - t0) * 1000
+        logger.info("[S6] chat 动作产物 文本首200=%r", text[:200])
         context.response_fragments.append(ResponseFragment(status="success", text=text, producer_stage=StageId.S6))
         await record_skill_outcome("chat", "ok", elapsed)
         await record_ai_subtask(skill="chat", status="succeeded", risk="low", duration_ms=elapsed)
@@ -236,6 +247,8 @@ class S6ExecuteStage(BaseStage):
         )
         succeeded = outcome.status == "succeeded"
         elapsed = (time.time() - t0) * 1000
+        logger.info("[S6] project 动作(%s) 产物 status=%s refs=%s 文本首120=%r",
+                     act, outcome.status, list(outcome.output_refs), outcome.text[:120])
         context.response_fragments.append(ResponseFragment(
             status="success" if succeeded else "error",
             text=outcome.text, producer_stage=StageId.S6,

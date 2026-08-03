@@ -117,10 +117,13 @@ class S3DstStage(BaseStage):
                 diff["snapshot_error"] = str(exc)[:200]
 
         context.sir_diff = diff
+        updated_full = [
+            f"{u['key']}: {u['from']!r} -> {u['to']!r}" for u in diff["updated"]
+        ]
         logger.info(
-            "[S3] DST 合并 turn=%s base_snap=%s -> snap=%s | +%s ~%s -%s (unchanged=%d)",
+            "[S3] DST 合并 turn=%s base_snap=%s -> snap=%s |\n  added=%s\n  updated=%s\n  removed=%s\n  (unchanged=%d)",
             context.turn_id, context.sir_base_snapshot_id, context.sir_after_dst_snapshot_id,
-            diff["added"], [u["key"] for u in diff["updated"]], diff["removed"], diff["unchanged_count"],
+            diff["added"], updated_full, diff["removed"], diff["unchanged_count"],
         )
 
         status = StageStatus.COMPLETED if changed else StageStatus.NO_OP

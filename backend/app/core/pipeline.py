@@ -16,9 +16,10 @@ from .turn_context import TurnContext
 
 logger = logging.getLogger("app.core.pipeline")
 
-# IO 日志截断上限，避免 reply_final / understanding 等长字段把日志打爆。
-_IO_MAX_STR = 1200
-_IO_MAX_LIST_SAMPLE = 4
+# IO 日志截断上限。调试阶段放开为「尽量看全」：SIR/plan/向量召回内容不再被切没。
+# 上限仍保留以防 reply_final 等超长字段把日志打爆，但足够覆盖正常 SIR 规模。
+_IO_MAX_STR = 4000
+_IO_MAX_LIST_SAMPLE = 20
 
 
 def _log_safe(obj: object, max_str: int = _IO_MAX_STR, max_list: int = _IO_MAX_LIST_SAMPLE) -> object:
