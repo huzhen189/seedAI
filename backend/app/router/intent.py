@@ -26,7 +26,6 @@ from app.core.contracts import (
     IntentBundle,
     IntentCandidate,
     IntentItem,
-    MAX_ACTION_ITEMS,
     IntentMethod,
     RiskLevel,
     SirDelta,
@@ -50,6 +49,8 @@ from .intent_config import (  # noqa: E402
 from app.prompts import INTENT_ESCALATION_PROMPT as _ESCALATION_PROMPT  # 提示词集中于 app/prompts
 from app.config import settings
 from app.slots import compose, detect_dynamic_slots, detect_industry  # A 方案：分层槽位体系（确定性拼装）
+# 运行期软上限（可配置），硬护栏仍是 contracts.MAX_ACTION_ITEMS（数据模型 max_length）。
+_MAX_ACTION_ITEMS = settings.max_action_items
 from app.ragstore import (
     retrieve as _rag_retrieve,
     safe_upsert_bg as _rag_upsert_bg,
@@ -406,7 +407,7 @@ async def escalate_if_needed(message: str, current: UnderstandingResult) -> Unde
         resolved: list[IntentItem] = []
         # 规则层是否已发现非闲聊域（site/research/project）——用于检测 LLM 是否过度纠正成闲聊。
         rule_had_nonchat = any(r.domain != Domain.CHAT for r in current.resolved_intents)
-        for idx, it in enumerate(intents[:MAX_ACTION_ITEMS], start=1):
+        for idx, it in enumerate(intents[:_MAX_ACTION_ITEMS], start=1):
             dom = _safe_domain(it.get("domain"))
             sp = _safe_speech(it.get("speech"))
             seg = str(it.get("text") or message)[:2048]
@@ -559,14 +560,14 @@ def inherit_retro_domain(
 
 
 def classify(message: str, understanding: UnderstandingResult, prior_turn_id: str | None = None) -> tuple[IntentBundle, BoundedPlan]:
-    """S4：把已解析意图直接映射为 IntentBundle + BoundedPlan（受 MAX_ACTION_ITEMS 约束）。
+    """S4：把已解析意图直接映射为 IntentBundle + BoundedPlan（运行期上限跟随 settings.max_action_items，硬护栏为 contracts.MAX_ACTION_ITEMS）。
 
     依赖推断：后继意图若显式 depends_on 则保留其依赖边；否则默认串行（BoundedPlan.serial）。
     has_gated / max_risk 用于 S5 闸门与 S9 收口。
     prior_turn_id：回溯控制(correct/supplement)时非空，会把 site 域 action 绑定上一轮 turn，
     使 S6 锁定原 project 做受控 edit（而非另起新站）。
     """
-    items = understanding.resolved_intents[:MAX_ACTION_ITEMS]
+    items = understanding.resolved_intents[:_MAX_ACTION_ITEMS]
     bundle_items: list[IntentItem] = []
     actions: list[ActionItem] = []
     max_risk = RiskLevel.LOW
@@ -580,7 +581,7 @@ def classify(message: str, understanding: UnderstandingResult, prior_turn_id: st
         # 关键：CHAT(ask) 虽 executable=False，也必须成为 action 被 S6 执行，
         # 否则「闲聊 + 建站」复合句里的闲聊会被静默丢弃（即旧版过度裁剪的根因）。
         is_action = it.executable or it.domain == Domain.CHAT
-        if is_action and len(actions) < MAX_ACTION_ITEMS:
+        if is_action and len(actions) < _MAX_ACTION_ITEMS:
             actions.append(ActionItem(
                 id=it.id, intent_id=it.intent_id, domain=it.domain,
                 speech_act=it.speech_act, target=it.target, arguments=it.arguments,

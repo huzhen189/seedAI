@@ -3,11 +3,12 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from app.core.contracts import ActionItem, BoundedPlan, Domain, IntentBundle, IntentItem, SpeechAct
+from app.core.contracts import MAX_ACTION_ITEMS, ActionItem, BoundedPlan, Domain, IntentBundle, IntentItem, SpeechAct
 from app.core.ids import new_ulid
 
 
-def test_bounded_plan_rejects_more_than_three_user_actions() -> None:
+def test_bounded_plan_rejects_more_than_hard_cap() -> None:
+    # 恰好硬上限 + 1 个必须被数据模型 max_length 拒绝（护栏不随运行期软上限放宽）。
     actions = [
         ActionItem(
             id=f"a{index}",
@@ -15,10 +16,25 @@ def test_bounded_plan_rejects_more_than_three_user_actions() -> None:
             domain=Domain.SITE,
             speech_act=SpeechAct.EDIT,
         )
-        for index in range(4)
+        for index in range(MAX_ACTION_ITEMS + 1)
     ]
     with pytest.raises(ValidationError):
         BoundedPlan(action_items=actions)
+
+
+def test_bounded_plan_accepts_up_to_hard_cap() -> None:
+    # 恰等于硬上限（当前 5）应合法。
+    actions = [
+        ActionItem(
+            id=f"a{index}",
+            intent_id="site_edit",
+            domain=Domain.SITE,
+            speech_act=SpeechAct.EDIT,
+        )
+        for index in range(MAX_ACTION_ITEMS)
+    ]
+    plan = BoundedPlan(action_items=actions)
+    assert len(plan.action_items) == MAX_ACTION_ITEMS
 
 
 def test_intent_bundle_requires_primary_to_reference_an_item() -> None:

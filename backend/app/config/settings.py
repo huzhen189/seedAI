@@ -14,6 +14,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from app.core.contracts import MAX_ACTION_ITEMS  # noqa: E402  # 硬上限校验 le 用，单向依赖不形成循环
 
 
 CONFIG_DIR = Path(__file__).resolve().parent
@@ -282,6 +283,9 @@ class Settings(BaseSettings):
 
     chat_recent_redis_ttl: int = Field(default=1800, ge=60)
     chat_recent_limit: int = Field(default=10, ge=1, le=100)
+    # S4 BoundedPlan 运行期意图数量软上限（数据模型硬上限见 contracts.MAX_ACTION_ITEMS）。
+    # 改此处即可调整单轮最多拆解多少意图/动作；配置值超过硬上限会在导入阶段 fail-fast。
+    max_action_items: int = Field(default=MAX_ACTION_ITEMS, ge=1, le=MAX_ACTION_ITEMS)
     conversation_summary_ttl: int = Field(default=1800, ge=60)
     cache_user_ttl: int = Field(default=9000, ge=60)
     worker_pool_size: int = Field(default=4, ge=1, le=128)
@@ -313,8 +317,11 @@ class Settings(BaseSettings):
     chroma_collection_user_preferences: str = "user_preferences"
     chroma_collection_project_memory: str = "project_memory"
     chroma_collection_project_code: str = "project_code"
+    chroma_collection_conversation_context: str = "conversation_context"
     chroma_collection_error_patterns: str = "error_patterns"
     chroma_collection_intents: str = "intents"
+    chroma_collection_kb_design: str = "kb_design"
+    chroma_collection_rag_corpus: str = "rag_corpus"
     rag_top_k: int = Field(default=5, ge=1, le=20)
 
     split_b_enabled: bool = True
