@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import * as projectsApi from '../api/projects'
 import type { Conversation, Message } from '../types'
-import { loadCache, saveCache, type MessageCacheEntry } from '../utils/messageCache'
+import { loadCache, saveCache, dedupeMessages, type MessageCacheEntry } from '../utils/messageCache'
 
 export interface PastSession {
   conv: Conversation
@@ -74,6 +74,9 @@ export const useConversationStore = defineStore('conversation', () => {
             messages.value = dbMsgs
           }
         }
+        // ④ 去重兜底: 合并后仍可能对 DB 真实行 & 本地占位(id:0)残留重复, 统一自愈。
+        // 以 id>0 为权威, 同 (role+content) 下丢弃 id<=0 占位(防御历史脏缓存沉淀)。
+        messages.value = dedupeMessages(messages.value as MessageCacheEntry[]) as Message[]
         // ④ 更新 localStorage 缓存(保存最终展示的消息, 含本地乐观更新的部分)
         if (messages.value.length) saveCache(projectId, messages.value as MessageCacheEntry[])
 
@@ -197,8 +200,10 @@ export const useConversationStore = defineStore('conversation', () => {
     try { dbMsgs = await projectsApi.getConversationMessages(convId) } catch { /* ignore */ }
     if (dbMsgs.length > 0) {
       messages.value = dbMsgs
-      saveCache(pid!, dbMsgs as MessageCacheEntry[])
     }
+    // 去重兜底: 同 (role+content) 以 id>0 真实行为权威, 丢弃 id<=0 占位(防御脏缓存)。
+    messages.value = dedupeMessages(messages.value as MessageCacheEntry[]) as Message[]
+    if (dbMsgs.length > 0) saveCache(pid!, messages.value as MessageCacheEntry[])
     sessionStorage.setItem('activeConv_' + pid!, String(convId))
   }
 
