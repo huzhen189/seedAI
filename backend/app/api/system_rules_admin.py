@@ -96,14 +96,23 @@ async def api_list_rules(
     _: CurrentUser = Depends(require_super_admin),
 ):
     """列出系统规则。列表展示向量摘要(summary)，详情再取 MySQL 原文(content)。"""
+    logger.info("[system_rules_admin] list scope=%s rule_type=%s is_active=%s q=%r", scope, rule_type, is_active, q)
     return await svc.list_rules(scope=scope, rule_type=rule_type, is_active=is_active, keyword=q)
+
+
+@router.get("/stats")
+async def api_stats(_: CurrentUser = Depends(require_super_admin)):
+    """规则聚合统计：总数 / 启用禁用数 / 按作用域 / 按类型分布。供管理页概览卡。"""
+    return await svc.system_rules_stats()
 
 
 @router.get("/{rule_key:path}")
 async def api_get_rule(rule_key: str, _: CurrentUser = Depends(require_super_admin)):
     """单条规则详情（含 content 全文）。"""
+    logger.info("[system_rules_admin] get rule_key=%s", rule_key)
     r = await svc.get_rule(rule_key)
     if r is None:
+        logger.warning("[system_rules_admin] get 未命中 rule_key=%s", rule_key)
         raise HTTPException(404, {"code": "NOT_FOUND", "message": "规则不存在"})
     return r
 

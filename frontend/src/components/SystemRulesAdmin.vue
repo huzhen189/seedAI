@@ -51,6 +51,24 @@ async function fetchRules() {
 
 const filteredCount = computed(() => rules.value.length)
 
+// ── 概览统计（来自 /admin/system-rules/stats 聚合接口：总数/启用/按作用域/按类型分布）──
+interface RuleStats {
+  total: number
+  active: number
+  inactive: number
+  by_scope: Record<string, number>
+  by_type: Record<string, number>
+}
+const stats = ref<RuleStats | null>(null)
+async function fetchStats() {
+  // 统计为非关键展示，失败静默不阻断列表。
+  try {
+    stats.value = await get('/admin/system-rules/stats')
+  } catch {
+    /* ignore */
+  }
+}
+
 // ── 详情弹层 ──
 const detail = ref<SystemRule | null>(null)
 
@@ -119,6 +137,9 @@ async function save() {
   if (verr) { formErr.value = verr; return }
   saving.value = true
   formErr.value = ''
+  const mode = editing.value ? 'update' : 'create'
+  const key = form.value.rule_key.trim()
+  console.info(`[SystemRulesAdmin] ${mode} rule_key=${key} scope=${form.value.scope} type=${form.value.rule_type}`)
   const payload: Record<string, unknown> = {
     scope: form.value.scope,
     scope_ref: form.value.scope_ref.trim() || null,
@@ -132,14 +153,15 @@ async function save() {
   }
   try {
     if (editing.value) {
-      const key = encodeURIComponent(form.value.rule_key)
-      await put(`/admin/system-rules/${key}`, payload)
+      const k = encodeURIComponent(form.value.rule_key)
+      await put(`/admin/system-rules/${k}`, payload)
     } else {
-      payload.rule_key = form.value.rule_key.trim()
+      payload.rule_key = key
       await post('/admin/system-rules', payload)
     }
     formOpen.value = false
     await fetchRules()
+    await fetchStats() // 统计随增改刷新
   } catch (e: any) {
     formErr.value = (e as Error).message || '保存失败'
   } finally {
@@ -150,10 +172,12 @@ async function save() {
 // ── 删除 ──
 async function removeRule(r: SystemRule) {
   if (!confirm(`确认删除规则「${r.summary}」(${r.rule_key})？此操作不可撤销，将从 MySQL 与向量库一并移除。`)) return
+  console.info(`[SystemRulesAdmin] delete rule_key=${r.rule_key}`)
   try {
     await delJson(`/admin/system-rules/${encodeURIComponent(r.rule_key)}`)
     if (detail.value?.rule_key === r.rule_key) detail.value = null
     await fetchRules()
+    await fetchStats() // 统计随删除刷新
   } catch (e: any) {
     errMsg.value = (e as Error).message || '删除失败'
   }
@@ -166,6 +190,7 @@ async function reindex() {
   if (!confirm('确认用全部活跃规则重建向量索引？用于修复向量/MySQL 漂移。')) return
   reindexing.value = true
   reindexMsg.value = ''
+  console.info('[SystemRulesAdmin] reindex (重建向量索引)')
   try {
     const r = await post('/admin/system-rules/reindex', {})
     reindexMsg.value = `已重建 ${r.reindexed} 条向量索引`
@@ -190,7 +215,11 @@ const typeClass: Record<string, string> = {
   policy: 'tp-policy', preference: 'tp-preference',
 }
 
-onMounted(fetchRules)
+// 进入页面：拉列表 + 拉概览统计（分布卡）。
+onMounted(async () => {
+  await fetchRules()
+  await fetchStats()
+})
 </script>
 
 <template>
@@ -209,6 +238,19 @@ onMounted(fetchRules)
     </p>
     <p v-if="reindexMsg" class="ctrlmsg">{{ reindexMsg }}</p>
     <p v-if="errMsg" class="errmsg">{{ errMsg }}</p>
+
+    <!-- 概览统计：总数 / 启用 / 禁用 / 按作用域 / 按类型 分布 -->
+    <div v-if="stats" class="stats-strip">
+      <div class="stat"><span class="sk">总数</span><b>{{ stats.total }}</b></div>
+      <div class="stat"><span class="sk">启用</span><b class="ok">{{ stats.active }}</b></div>
+      <div class="stat"><span class="sk">禁用</span><b class="muted2">{{ stats.inactive }}</b></div>
+      <template v-for="(c, k) in stats.by_scope" :key="'s-' + k">
+        <div class="stat"><span class="sk">{{ k }}</span><b>{{ c }}</b></div>
+      </template>
+      <template v-for="(c, k) in stats.by_type" :key="'t-' + k">
+        <div class="stat"><span class="sk">{{ k }}</span><b>{{ c }}</b></div>
+      </template>
+    </div>
 
     <!-- 过滤条 -->
     <div class="filters">
@@ -410,6 +452,22 @@ onMounted(fetchRules)
   background: var(--surface-2); color: var(--text-1); font-size: 13px;
 }
 .count { font-size: 12px; color: var(--muted); margin-left: auto; }
+
+/* 概览统计条 */
+.stats-strip {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 8px 10px;
+}
+.stat {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 999px; padding: 2px 10px; font-size: 12px;
+}
+.stat .sk { color: var(--muted); }
+.stat b { font-size: 14px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.stat b.ok { color: #22c55e; }
+.stat b.muted2 { color: var(--muted); }
 
 .sr-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .sr-table th {

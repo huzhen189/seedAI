@@ -128,6 +128,11 @@ async def recall(
             break
         used += len(text)
         out.append({k: v for k, v in r.items() if k != "_sortkey"})
+    # 召回链路统计日志：向量命中 → 回查命中 → 仲裁去重 → 注入裁剪，便于观测刚性规则覆盖率。
+    logger.info(
+        "[system_rules] recall scopes=%s top_k=%d -> 向量命中 %d, 回查命中 %d, 仲裁去重后 %d, 注入 %d(字符预算 %d 已用 %d)",
+        sorted(scopes), top_k, len(hits), len(rule_ids), len(best), len(out), char_budget, used,
+    )
     return out
 
 
@@ -262,6 +267,10 @@ async def list_rules(
     keyword: str | None = None,
 ) -> list[dict[str, Any]]:
     """列出系统规则（管理页表格）。可按 scope / rule_type / is_active 过滤，关键词模糊匹配摘要/标题/关键词。"""
+    logger.info(
+        "[system_rules] list scope=%s rule_type=%s is_active=%s q=%r",
+        scope, rule_type, is_active, keyword,
+    )
     async with transaction() as session:
         stmt = select(SystemRule)
         if scope:
@@ -282,11 +291,14 @@ async def list_rules(
             SystemRule.priority.desc(), SystemRule.id,
         )
         rows = (await session.execute(stmt)).scalars().all()
-        return [rule_obj_to_dict(r) for r in rows]
+        result = [rule_obj_to_dict(r) for r in rows]
+    logger.info("[system_rules] list -> %d 条", len(result))
+    return result
 
 
 async def get_rule(rule_key: str) -> dict[str, Any] | None:
     """取单条规则完整详情（含 content 全文）；不存在返回 None。"""
+    logger.info("[system_rules] get rule_key=%s", rule_key)
     async with transaction() as session:
         r = (
             await session.execute(
@@ -324,6 +336,7 @@ async def create_rule(spec: dict[str, Any]) -> dict[str, Any]:
         await session.flush()
         rdict = rule_obj_to_dict(r)
     await _sync_rule_vector(rdict)
+    logger.info("[system_rules] create key=%s scope=%s type=%s version=%d 向量已同步", rule_key, rdict["scope"], rdict["rule_type"], rdict["version"])
     return rdict
 
 
@@ -332,6 +345,7 @@ async def update_rule(rule_key: str, data: dict[str, Any]) -> dict[str, Any] | N
 
     返回更新后的 dict；rule_key 不存在返回 None。
     """
+    logger.info("[system_rules] update key=%s fields=%s", rule_key, sorted(data.keys()))
     substantive = {"content", "summary", "keywords", "scope", "scope_ref", "rule_type", "title"}
     async with transaction() as session:
         r = (
@@ -350,11 +364,13 @@ async def update_rule(rule_key: str, data: dict[str, Any]) -> dict[str, Any] | N
         await session.flush()
         rdict = rule_obj_to_dict(r)
     await _sync_rule_vector(rdict)
+    logger.info("[system_rules] update key=%s -> version=%d 向量已同步", rule_key, rdict["version"])
     return rdict
 
 
 async def delete_rule(rule_key: str) -> bool:
     """删除规则（MySQL 删除 + 向量点删除）。返回是否真的删到了。"""
+    logger.info("[system_rules] delete key=%s", rule_key)
     async with transaction() as session:
         r = (
             await session.execute(
@@ -370,6 +386,7 @@ async def delete_rule(rule_key: str) -> bool:
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[system_rules] 删除向量点失败(已忽略) key=%s: %s", rule_key, exc)
+    logger.info("[system_rules] delete key=%s -> deleted=%s", rule_key, True)
     return True
 
 
@@ -382,7 +399,40 @@ async def reindex_rules() -> int:
             )
         ).scalars().all()
         rdicts = [rule_obj_to_dict(r) for r in rows]
-    return await rebuild_vector_collection(rdicts)
+    n = await rebuild_vector_collection(rdicts)
+    logger.info("[system_rules] reindex -> 重建 %d 条向量索引", n)
+    return n
+
+
+async def system_rules_stats() -> dict[str, Any]:
+    """聚合统计：规则总数、启用/禁用数、按 scope / rule_type 分布。供管理页概览卡与监控用。
+
+    纯只读聚合，fail-safe：异常时返回空计数（绝不中断调用方）。
+    """
+    try:
+        async with transaction() as session:
+            rows = (await session.execute(select(SystemRule))).scalars().all()
+        by_scope: dict[str, int] = {}
+        by_type: dict[str, int] = {}
+        active = 0
+        for r in rows:
+            by_scope[r.scope] = by_scope.get(r.scope, 0) + 1
+            by_type[r.rule_type] = by_type.get(r.rule_type, 0) + 1
+            if r.is_active:
+                active += 1
+        total = len(rows)
+        stats = {
+            "total": total,
+            "active": active,
+            "inactive": total - active,
+            "by_scope": by_scope,
+            "by_type": by_type,
+        }
+        logger.info("[system_rules] stats total=%d active=%d", total, active)
+        return stats
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[system_rules] stats 统计失败(已忽略): %s", exc, exc_info=True)
+        return {"total": 0, "active": 0, "inactive": 0, "by_scope": {}, "by_type": {}}
 
 
 __all__ = [
@@ -396,6 +446,7 @@ __all__ = [
     "get_active_rules_block",
     "get_rule",
     "list_rules",
+    "system_rules_stats",
     "create_rule",
     "update_rule",
     "delete_rule",

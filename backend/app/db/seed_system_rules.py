@@ -186,6 +186,8 @@ async def seed_system_rules(*, rebuild_vector: bool = True) -> int:
     整库重置后调用，保证刚性规则随 schema 重建而回归；若向量不可达，MySQL 仍落库成功。
     """
     async with transaction() as session:
+        inserted = 0
+        updated = 0
         for spec in CANONICAL_RULES:
             existing = (
                 await session.execute(
@@ -208,6 +210,7 @@ async def seed_system_rules(*, rebuild_vector: bool = True) -> int:
                         is_active=True,
                     )
                 )
+                inserted += 1
                 continue
             changed = (
                 existing.content != spec["content"]
@@ -230,6 +233,11 @@ async def seed_system_rules(*, rebuild_vector: bool = True) -> int:
             existing.is_active = True
             if changed:
                 existing.version = (existing.version or 1) + 1
+                updated += 1
+        logger.info(
+            "[seed_system_rules] 比对完成: 新增 %d 条, 内容变更更新 %d 条, 共 %d 条候选",
+            inserted, updated, len(CANONICAL_RULES),
+        )
         await session.flush()
         rows = (
             await session.execute(select(SystemRule).where(SystemRule.is_active.is_(True)))

@@ -23,6 +23,7 @@ const tabs: { key: Tab; label: string; superOnly: boolean }[] = [
   { key: 'vector', label: '向量库', superOnly: true },
   { key: 'users', label: '用户管理', superOnly: true },
   { key: 'control', label: '控制面', superOnly: true },
+  // 系统规则：双轨(MySQL 原文 × 向量摘要)管理页，超管专用 CRUD + 统计，见 SystemRulesAdmin.vue。
   { key: 'sysrules', label: '系统规则', superOnly: true },
 ]
 const activeTab = ref<Tab>('metrics')
