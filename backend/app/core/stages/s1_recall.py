@@ -1,8 +1,43 @@
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+# ── 软偏好 rerank 关键词提取（低成本、纯子串，非语义） ──────────────────
+# 把 tag / content 拆成多个候选关键词：按标点/空白切分；长且无空格的中文片段
+# 再用 2~4 字滑窗补齐，避免「喜欢极简留白」这类无标点短语永远匹配不到。
+_PREF_SPLIT_RE = re.compile(r"[\s,，。、；;.!?！？:：\n\t]+")
+
+
+def _is_cjk(s: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in s)
+
+
+def _pref_keywords(p) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for src in (getattr(p, "tag", ""), getattr(p, "content", "")):
+        s = (src or "").strip()
+        if not s:
+            continue
+        for piece in _PREF_SPLIT_RE.split(s):
+            piece = piece.strip()
+            if len(piece) >= 2:
+                if piece not in seen:
+                    seen.add(piece)
+                    out.append(piece)
+            # 较长且无空格的中文片段：滑窗补 2/3/4 字 n-gram（命中率↑，避免盲区）
+            if len(piece) >= 6 and _is_cjk(piece):
+                for n in (2, 3, 4):
+                    for i in range(len(piece) - n + 1):
+                        gram = piece[i : i + n]
+                        if gram not in seen:
+                            seen.add(gram)
+                            out.append(gram)
+    # 去掉单字噪声（"的""a" 之类）
+    return [k for k in out if len(k) >= 2]
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -173,9 +208,13 @@ class S1RecallStage(BaseStage):
             return refs
         user_id = int(context.user.user_id)
         project_id = int(context.session.project_id) if context.session.project_id else None
-        where: dict = {"user_id": user_id}
+        # Chroma 铁律：顶层 where 只允许一个操作符，多条件须用 $and 包裹，否则
+        # ``ValueError: Expected where to have exactly one operator``。记忆集合按
+        # (user_id, project_id) 双维度隔离召回，必须用 $and 合成。
+        where_conds = [{"user_id": user_id}]
         if project_id is not None:
-            where["project_id"] = project_id
+            where_conds.append({"project_id": project_id})
+        where: dict = {"$and": where_conds} if len(where_conds) > 1 else where_conds[0]
         try:
             hits = await _rag_retrieve(
                 settings.chroma_collection_memory,
@@ -225,16 +264,15 @@ class S1RecallStage(BaseStage):
         except Exception:  # noqa: BLE001
             soft_prefs = []
 
+        # 预提取每条软偏好的关键词集合（tag+content 拆词+中文滑窗），只算一次。
+        pref_kw = [(int(p.weight), _pref_keywords(p)) for p in soft_prefs]
+
         def _score(text: str) -> int:
             s = 0
-            for p in soft_prefs:
-                tag = (p.tag or "").strip()
-                if tag and tag in text:
-                    s += int(p.weight)
-                else:
-                    content_head = (p.content or "")[:12]
-                    if content_head and content_head in text:
-                        s += int(p.weight)
+            for weight, kws in pref_kw:
+                # 每条软偏好只计一次权重：命中任一词即 +weight（不再整串前缀限制）。
+                if any(k in text for k in kws):
+                    s += weight
             return s
 
         backfilled.sort(key=lambda x: _score(x[0]), reverse=True)
