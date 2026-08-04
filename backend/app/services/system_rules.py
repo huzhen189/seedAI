@@ -21,7 +21,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.db import transaction
 from app.models import SystemRule
-from app.ragstore import clear_collection, retrieve, upsert
+from app.ragstore import clear_collection, delete_points, retrieve, upsert
 
 logger = logging.getLogger("app.services.system_rules")
 
@@ -200,12 +200,208 @@ async def rebuild_vector_collection(rules: list[dict[str, Any]]) -> int:
     return await upsert(collection, docs, metadatas=metas, ids=ids)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 管理面 CRUD（MySQL 真相 + 单条向量同步）。seed 与前端管理页共用。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 合法枚举（与管理页表单校验保持一致）。
+SCOPE_VALUES: set[str] = {"global", "domain", "user", "project", "session"}
+RULE_TYPE_VALUES: set[str] = {"constraint", "guardrail", "policy", "preference"}
+
+
+def rule_obj_to_dict(r: "SystemRule") -> dict[str, Any]:
+    """把 SystemRule 行转成纯 dict（含时间戳 ISO 串），供 API/前端消费。"""
+    return {
+        "id": r.id,
+        "rule_key": r.rule_key,
+        "scope": r.scope,
+        "scope_ref": r.scope_ref,
+        "rule_type": r.rule_type,
+        "title": r.title,
+        "content": r.content,
+        "summary": r.summary,
+        "keywords": r.keywords,
+        "priority": r.priority or 0,
+        "version": r.version or 1,
+        "is_active": r.is_active,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    }
+
+
+async def _sync_rule_vector(rule_dict: dict[str, Any]) -> None:
+    """单条规则的向量同步（fail-soft）：活跃则 upsert，否则删除索引点。
+
+    向量点 id 固定为 ``sysrule_{rule_key}``（rule_key 即稳定锚），更新天然幂等覆盖。
+    MySQL 才是真相源，向量失败只告警不抛错，绝不回滚 MySQL。
+    """
+    try:
+        collection = settings.chroma_collection_system_rules
+        rid = f"sysrule_{rule_dict['rule_key']}"
+        if not rule_dict.get("is_active", True):
+            await delete_points(collection, ids=[rid])
+            return
+        doc, meta, _ = _rule_to_vector(rule_dict)
+        if not doc:
+            # 摘要+关键词皆空，无索引意义，清理可能存在的陈旧点。
+            await delete_points(collection, ids=[rid])
+            return
+        await upsert(collection, [doc], metadatas=[meta], ids=[rid])
+    except Exception as exc:  # noqa: BLE001 — 向量不可达不影响真相源
+        logger.warning(
+            "[system_rules] 向量同步失败(已忽略, MySQL 真相仍有效) key=%s: %s",
+            rule_dict.get("rule_key"), exc, exc_info=True,
+        )
+
+
+async def list_rules(
+    *,
+    scope: str | None = None,
+    rule_type: str | None = None,
+    is_active: bool | None = None,
+    keyword: str | None = None,
+) -> list[dict[str, Any]]:
+    """列出系统规则（管理页表格）。可按 scope / rule_type / is_active 过滤，关键词模糊匹配摘要/标题/关键词。"""
+    async with transaction() as session:
+        stmt = select(SystemRule)
+        if scope:
+            stmt = stmt.where(SystemRule.scope == scope)
+        if rule_type:
+            stmt = stmt.where(SystemRule.rule_type == rule_type)
+        if is_active is not None:
+            stmt = stmt.where(SystemRule.is_active.is_(is_active))
+        if keyword:
+            like = f"%{keyword}%"
+            stmt = stmt.where(
+                (SystemRule.summary.like(like))
+                | (SystemRule.title.like(like))
+                | (SystemRule.keywords.like(like))
+            )
+        stmt = stmt.order_by(
+            SystemRule.scope, SystemRule.rule_type,
+            SystemRule.priority.desc(), SystemRule.id,
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+        return [rule_obj_to_dict(r) for r in rows]
+
+
+async def get_rule(rule_key: str) -> dict[str, Any] | None:
+    """取单条规则完整详情（含 content 全文）；不存在返回 None。"""
+    async with transaction() as session:
+        r = (
+            await session.execute(
+                select(SystemRule).where(SystemRule.rule_key == rule_key)
+            )
+        ).scalar_one_or_none()
+        return rule_obj_to_dict(r) if r else None
+
+
+async def create_rule(spec: dict[str, Any]) -> dict[str, Any]:
+    """新增规则（MySQL 落库 + 向量索引）。rule_key 已存在抛 ValueError（调用方转 409）。"""
+    rule_key = spec["rule_key"]
+    async with transaction() as session:
+        existing = (
+            await session.execute(
+                select(SystemRule).where(SystemRule.rule_key == rule_key)
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            raise ValueError(f"rule_key 已存在: {rule_key}")
+        r = SystemRule(
+            rule_key=rule_key,
+            scope=spec["scope"],
+            scope_ref=spec.get("scope_ref"),
+            rule_type=spec["rule_type"],
+            title=spec["title"],
+            content=spec["content"],
+            summary=spec["summary"],
+            keywords=spec.get("keywords") or "",
+            priority=spec.get("priority", 50),
+            version=1,
+            is_active=spec.get("is_active", True),
+        )
+        session.add(r)
+        await session.flush()
+        rdict = rule_obj_to_dict(r)
+    await _sync_rule_vector(rdict)
+    return rdict
+
+
+async def update_rule(rule_key: str, data: dict[str, Any]) -> dict[str, Any] | None:
+    """更新规则。rule_key 不可改（稳定锚）；字段缺失则不更新；内容类字段变更自动 version+1。
+
+    返回更新后的 dict；rule_key 不存在返回 None。
+    """
+    substantive = {"content", "summary", "keywords", "scope", "scope_ref", "rule_type", "title"}
+    async with transaction() as session:
+        r = (
+            await session.execute(
+                select(SystemRule).where(SystemRule.rule_key == rule_key)
+            )
+        ).scalar_one_or_none()
+        if r is None:
+            return None
+        for field in ("scope", "scope_ref", "rule_type", "title", "content",
+                      "summary", "keywords", "priority", "is_active"):
+            if field in data:
+                setattr(r, field, data[field])
+        if any(f in data for f in substantive):
+            r.version = (r.version or 1) + 1
+        await session.flush()
+        rdict = rule_obj_to_dict(r)
+    await _sync_rule_vector(rdict)
+    return rdict
+
+
+async def delete_rule(rule_key: str) -> bool:
+    """删除规则（MySQL 删除 + 向量点删除）。返回是否真的删到了。"""
+    async with transaction() as session:
+        r = (
+            await session.execute(
+                select(SystemRule).where(SystemRule.rule_key == rule_key)
+            )
+        ).scalar_one_or_none()
+        if r is None:
+            return False
+        await session.delete(r)
+    try:
+        await delete_points(
+            settings.chroma_collection_system_rules, ids=[f"sysrule_{rule_key}"]
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[system_rules] 删除向量点失败(已忽略) key=%s: %s", rule_key, exc)
+    return True
+
+
+async def reindex_rules() -> int:
+    """用全部活跃 MySQL 行重建向量集合（clear + 批量 upsert）。管理页「重建索引」按钮用。"""
+    async with transaction() as session:
+        rows = (
+            await session.execute(
+                select(SystemRule).where(SystemRule.is_active.is_(True))
+            )
+        ).scalars().all()
+        rdicts = [rule_obj_to_dict(r) for r in rows]
+    return await rebuild_vector_collection(rdicts)
+
+
 __all__ = [
     "RULE_CHAR_BUDGET",
     "RULE_RECALL_TOP_K",
+    "RULE_TYPE_PRIORITY",
+    "SCOPE_PRIORITY",
+    "RULE_TYPE_VALUES",
+    "SCOPE_VALUES",
     "format_rules_for_prompt",
     "get_active_rules_block",
+    "get_rule",
+    "list_rules",
+    "create_rule",
+    "update_rule",
+    "delete_rule",
+    "reindex_rules",
     "rebuild_vector_collection",
     "recall",
+    "rule_obj_to_dict",
     "scope_key_of",
 ]

@@ -55,6 +55,7 @@ async function request(method: string, path: string, body?: unknown): Promise<an
 
 export const get = (path: string) => request('GET', path)
 export const post = (path: string, body?: unknown) => request('POST', path, body)
+export const put = (path: string, body?: unknown) => request('PUT', path, body)
 export const patch = (path: string, body?: unknown) => request('PATCH', path, body)
 export const del = (path: string) => request('DELETE', path)
 export const delJson = (path: string, body?: unknown) => request('DELETE', path, body)

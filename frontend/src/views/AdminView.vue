@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { get, post, delJson } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import RadarChart from '../components/RadarChart.vue'
+import SystemRulesAdmin from '../components/SystemRulesAdmin.vue'
 import { ROLE_LABELS, QC_DIM_LABELS, type AdminUser, type DbCapacity, type MetricsSnapshot, type Role } from '../types'
 
 const auth = useAuthStore()
@@ -13,7 +14,7 @@ const currentRoleLabel = computed(
 
 // ---- 标签页(RBAC:用户管理 / 控制面 仅超管可见) ----
 // v2.0.0 重组: 运行指标(服务器/三库/模型用量/API延迟) · AI质量(雷达/Skill/生成阶段/LLM) · 前端分析(UV/PV/性能/点击)
-type Tab = 'metrics' | 'users' | 'control' | 'quality' | 'replay' | 'frontend' | 'vector'
+type Tab = 'metrics' | 'users' | 'control' | 'quality' | 'replay' | 'frontend' | 'vector' | 'sysrules'
 const tabs: { key: Tab; label: string; superOnly: boolean }[] = [
   { key: 'metrics', label: '运行指标', superOnly: false },
   { key: 'quality', label: 'AI 质量', superOnly: false },
@@ -22,6 +23,7 @@ const tabs: { key: Tab; label: string; superOnly: boolean }[] = [
   { key: 'vector', label: '向量库', superOnly: true },
   { key: 'users', label: '用户管理', superOnly: true },
   { key: 'control', label: '控制面', superOnly: true },
+  { key: 'sysrules', label: '系统规则', superOnly: true },
 ]
 const activeTab = ref<Tab>('metrics')
 const visibleTabs = computed(() => tabs.filter((t) => !t.superOnly || isSuper.value))
@@ -1549,6 +1551,11 @@ function fmtMeta(meta: Record<string, any> | undefined): string {
           </div>
         </div>
       </div>
+    </section>
+
+    <!-- 系统规则（双轨：MySQL 原文 × 向量摘要，超管专用 CRUD） -->
+    <section v-else-if="activeTab === 'sysrules' && isSuper" class="panel">
+      <SystemRulesAdmin />
     </section>
 
     <section v-else class="panel">

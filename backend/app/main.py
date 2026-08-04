@@ -34,6 +34,7 @@ from .api import (
     byok_router,
     ops_router,
     preview_router,
+    system_rules_admin_router,
     turns_router,
     vector_admin_router,
     workspace_router,
@@ -189,6 +190,8 @@ app.include_router(ops_router)
 app.include_router(byok_router)
 # 向量库可视化管理(统计系统): 超管专用, 只读浏览 + 受限写(删/建/清空, 留痕)
 app.include_router(vector_admin_router)
+# 系统规则管理(双轨: MySQL 真相 + 向量索引): 超管专用 CRUD + 重建索引
+app.include_router(system_rules_admin_router)
 
 
 if __name__ == "__main__":
