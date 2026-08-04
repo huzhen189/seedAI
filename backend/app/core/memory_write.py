@@ -127,10 +127,9 @@ async def _do_persist(
                 ],
             )
 
-        # 软偏好（仅 rerank，不进 prompt）。
-        soft_pref_ids: list[int] = []
+        # 软偏好（仅 rerank，不进 prompt，不写向量库——rerank 时由 s1 直接读 MySQL）。
         if extraction["user_prefs"]:
-            rows = await soft_pref_repo.upsert_many(
+            await soft_pref_repo.upsert_many(
                 session,
                 [
                     {
@@ -142,7 +141,6 @@ async def _do_persist(
                     for p in extraction["user_prefs"]
                 ],
             )
-            soft_pref_ids = [r.id for r in rows]
 
         # 项目过程事件（审计，不进 prompt）。仅在项目上下文存在时记录。
         if project_id is not None:
@@ -207,7 +205,6 @@ async def _do_persist(
     await _upsert_vectors(
         memory_rows=memory_rows,
         memory_ids=memory_ids,
-        soft_pref_ids=soft_pref_ids,
         user_id=user_id,
         project_id=project_id,
         conversation_id=conversation_id,
@@ -219,16 +216,16 @@ async def _upsert_vectors(
     *,
     memory_rows: list[dict],
     memory_ids: list[int],
-    soft_pref_ids: list[int],
     user_id: int,
     project_id: int | None,
     conversation_id: int | None,
     source_message_id: int | None,
 ) -> None:
-    """把 memories 行（title）与软偏好行（content）写入向量库（仅索引+元数据）。
+    """把 memories 行（title）写入向量库（仅索引+元数据）。
 
     向量 documents 只放精简标题/文本，正文永远在 MySQL（§1.3）。命中后经
     metadatas.(source_type, source_id) 回 MySQL 取正文。
+    （软偏好不写向量库，rerank 由 S1 直接读 MySQL user_soft_preferences。）
     """
     docs: list[str] = []
     metas: list[dict] = []
@@ -249,14 +246,6 @@ async def _upsert_vectors(
             }
         )
         ids.append(f"mem_{mid}")
-
-    # 软偏好向量：source_type=user_soft_pref，命中后仅用于 rerank（不进 prompt）。
-    if soft_pref_ids:
-        # 重新取 content 作为文档（软偏好无独立 title，用 content 前 40 字作索引）。
-        # 为避免再查库，这里用占位：实际 rerank 在 s1 内用软偏好文本加权，向量仅作召回入口。
-        # 为简化，软偏好不单独建向量点，仅依赖 user_preferences 集合既有召回即可；
-        # 若需精确再召回软偏好，可在 s1 直接读 MySQL user_soft_preferences（已这样做）。
-        pass
 
     if docs:
         asyncio.create_task(

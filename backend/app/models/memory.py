@@ -4,7 +4,7 @@
   - user_facts       用户强事实（KV，零容错）
   - project_facts    项目强事实（KV，零容错）
   - project_events   项目过程记忆/审计事件（不进 prompt）
-  - user_soft_preferences 用户软偏好（仅向量召回 rerank，不进 prompt）
+  - user_soft_preferences 用户软偏好（仅 rerank 排序信号，不进 prompt，由 s1 直接读 MySQL，不写向量库）
   - memories         长期语义记忆元数据（MySQL 真相行，向量只引 source_id）
 
 所有表由 TimestampMixin 注入 created_at/updated_at（满足要求#1）。
@@ -123,10 +123,11 @@ class ProjectEvent(Base, TimestampMixin):
 
 
 class UserSoftPreference(Base, TimestampMixin):
-    """[TS] 用户软偏好（不进 prompt，仅用于向量召回 rerank）。
+    """[TS] 用户软偏好（不进 prompt，仅用于 S1 直接读 MySQL 后对向量召回结果 rerank）。
 
     场景化经验、跨会话语义偏好（如"做科技风时偏好深色背景"）。与 UserFact 的硬事实区分：
     软偏好不进入 prompt 强事实段、不参与零容错断言，而是作为向量召回命中后的重排序信号。
+    数据源为 MySQL user_soft_preferences——软偏好不写向量库，rerank 时由 s1 直接读 MySQL。
     """
 
     __tablename__ = "user_soft_preferences"
@@ -142,10 +143,6 @@ class UserSoftPreference(Base, TimestampMixin):
     tag: Mapped[str] = mapped_column(String(64), nullable=False)
     content: Mapped[str] = mapped_column(LongText(), nullable=False)
     weight: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
-    embedding_status: Mapped[str] = mapped_column(
-        enum_type("soft_pref_embedding_status", "pending", "ready", "failed"),
-        default="pending", nullable=False,
-    )
 
 
 class Memory(Base, TimestampMixin):

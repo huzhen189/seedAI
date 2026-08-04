@@ -203,9 +203,8 @@ class S1RecallStage(BaseStage):
                 elif st == "project_event" and sid is not None:
                     # 事件不进 prompt：跳过（仅审计/间接经 mem接 摘要入 L5）
                     continue
-                elif st == "user_soft_pref":
-                    # 软偏好不进 prompt，仅参与 rerank，跳过正文注入
-                    continue
+                # 注：软偏好(source_type=user_soft_pref)从不写向量库，故此处不会命中；
+                # rerank 所需软偏好由下方 list_for_user 直接读 MySQL，不进此回查路径。
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[S1] 回查 MySQL 失败 source=%s/%s: %s", st, sid, exc)
                 text = ""
