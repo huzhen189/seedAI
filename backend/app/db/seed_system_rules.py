@@ -120,10 +120,11 @@ CANONICAL_RULES: list[dict] = [
         "rule_key": "domain:site.dark_mode_support",
         "scope": "domain", "scope_ref": "site",
         "rule_type": "preference", "priority": 40,
-        "title": "默认暗色模式",
-        "content": "默认提供暗色模式支持：用 CSS 变量定义配色，并尊重 prefers-color-scheme 自动切换。",
-        "summary": "默认提供暗色模式支持CSS变量加prefers-color-scheme",
-        "keywords": "暗色|dark|主题|css变量|prefers-color-scheme",
+        "title": "默认白色（浅色）模式",
+        "content": "默认使用白色/浅色主题：用 CSS 变量定义配色，默认浅色，并尊重 prefers-color-scheme "
+                   "自动切换（用户偏好暗色时再切）。",
+        "summary": "默认白色浅色主题，CSS变量加prefers-color-scheme自动切换",
+        "keywords": "白色|浅色|light|主题|css变量|prefers-color-scheme",
     },
     # ── 域：research ──
     {
@@ -153,10 +154,12 @@ CANONICAL_RULES: list[dict] = [
         "rule_type": "policy", "priority": 70,
         "title": "只生成静态自包含网页",
         "content": "agent 只能生成自包含的静态网页：单文件 HTML + 内联 CSS/JS（或少量同源静态资源），"
-                   "可直接用浏览器打开或用 iframe 嵌入预览，无需任何构建步骤。不使用 Vue3+Vite 等需构建的"
-                   "工程化框架——这类工程无法以静态文件直接预览，且当前环境没有配套的构建/预览服务。",
-        "summary": "只生成自包含静态网页，不用Vue3+Vite等需构建框架，可直接打开预览",
-        "keywords": "静态网页|单文件HTML|预览|iframe|Vue3|Vite|构建|无后端",
+                   "可直接用浏览器打开或用 iframe 嵌入预览，无需任何构建步骤。Vue3 可以用，但只能用「静态」"
+                   "形式——通过 CDN/UMD 等方式在页面里直接引入，单个 HTML 即可运行、无需编译打包；不支持"
+                   "需要 npm 构建、Vite 脚手架、起本地端口跑 dev server 的工程化用法（这类产物不是静态文件，"
+                   "无法以静态文件直接预览，且当前环境没有配套的构建/预览服务）。",
+        "summary": "只生成静态自包含网页；Vue3仅可用CDN静态引入，不支持编译打包跑端口",
+        "keywords": "静态网页|单文件HTML|预览|iframe|Vue3|CDN|Vite|构建|端口|无后端",
     },
     # ── 站点数据策略：无后端 → 前端静态模拟；本地库按需升级 ──
     {
