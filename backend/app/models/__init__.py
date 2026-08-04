@@ -1,6 +1,7 @@
 from .base import Base, CreatedAtMixin, LongText, TimestampMixin, UnsignedBigInt, enum_type
 from .content import Artifact, Conversation, Message, Project, User, UserModelKey
 from .memory import Memory, ProjectEvent, ProjectFact, UserFact, UserSoftPreference
+from .system_rule import SystemRule
 from .runtime import (
     Approval,
     ApprovalDecision,
@@ -56,6 +57,7 @@ __all__ = [
     "ProjectEvent",
     "ProjectFact",
     "ProjectTombstone",
+    "SystemRule",
     "PurgeJob",
     "QcScore",
     "SirSnapshot",

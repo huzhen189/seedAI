@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import transaction
 from app.models import Message
 from app.prompts import CHAT_SYSTEM_PROMPT, CHAT_TEMPERATURE
+from app.services.system_rules import get_active_rules_block
 from app.slots import SlotStack  # A 方案：分层槽位栈（引导建站提问）
 
 # 短期记忆：每轮直接从 messages 表取本会话最近 N 条 (user+assistant) 拼进对话窗口。
@@ -87,6 +88,21 @@ class ChatService:
             )
         if slot_block:
             blocks.append((80, slot_block.strip()))
+        # 系统刚性规则（双轨：MySQL 真相 + 向量语义召回 + scope/rule_type 仲裁）。
+        # 设计见对话需求 2026-08-04 与 services/system_rules。scope 由当前会话的
+        # global/domain:chat/user:<id>/project:<id> 拼出；召回后按权威度排序注入，优先级 95
+        # 压在用户偏好(85)之上、静态 Prompt(100)之下。serialize_for_llm 超预算时从最低
+        # 优先级块裁起，本块因优先级高不会被牺牲——确保刚性规则零容忍、不被遗忘。
+        try:
+            _scopes = {"global", "domain:chat"}
+            _scopes.add(f"user:{context.user.user_id}")
+            if getattr(context.session, "project_id", None):
+                _scopes.add(f"project:{context.session.project_id}")
+            _rules_block = await get_active_rules_block(_scopes, user_text)
+            if _rules_block:
+                blocks.append((95, _rules_block))
+        except Exception as exc:  # noqa: BLE001 — 规则注入失败绝不应中断闲聊主链路
+            logger.warning("[chat] 规则块注入失败(已忽略): %s", exc, exc_info=True)
         system_content = serialize_for_llm(blocks)
         # 拼装对话窗口：system → 最近 N 条历史(user/assistant) → 当前 user。
         # 最近对话从 messages 表按本会话实时拉取（fail-soft 降级为空），保证相邻上一句 100% 衔接；

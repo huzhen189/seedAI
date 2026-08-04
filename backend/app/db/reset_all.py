@@ -30,6 +30,7 @@ from app.models import Base
 
 from .schema_check import check_schema
 from .seed import ensure_super_admin
+from .seed_system_rules import seed_system_rules
 from .session import engine
 
 
@@ -39,14 +40,28 @@ CONFIRMATION_PHRASE: Final[str] = "RESET seed_ai"
 PRESERVED_CHROMA_COLLECTIONS: Final[frozenset[str]] = frozenset(
     {
         "kb_design",
-        "kb_intent",
         "rag_corpus",
         "components",
         "error_patterns",
         "intents",
+        # 系统规则语义索引（知识底座，重置保留；seed 阶段用最新 MySQL 行重建，保证 rule_id 一致）。
+        "system_rules",
     }
 )
-RUNTIME_COLLECTIONS: Final[frozenset[str]] = frozenset({"cache_generate", "cache_gen"})
+# 运行时集合 = 承载用户/项目产生的数据，重置必须清空。
+# 知识底座(components/error_patterns/intents/kb_design/rag_corpus 等 PRESERVED_*)不在此列，永远保留。
+# 注：kb_intent 已并入 intents（intents 为唯一意图语义集合），不再单独保留。
+RUNTIME_COLLECTIONS: Final[frozenset[str]] = frozenset(
+    {
+        "cache_generate",
+        "cache_gen",
+        "memory",
+        "conversation_context",
+        "user_preferences",
+        "project_memory",
+        "project_code",
+    }
+)
 
 
 class ResetSafetyError(RuntimeError):
@@ -104,6 +119,7 @@ class ResetReport:
     chroma_preserved: list[str] = field(default_factory=list)
     artifacts_removed: int = 0
     super_admin_created: bool = False
+    system_rules_seeded: int = 0
     schema_ok: bool = False
     recovery_attempted: bool = False
     recovery_succeeded: bool = False
@@ -474,6 +490,7 @@ async def reset_all(
     database_engine: AsyncEngine = engine,
     artifact_root: Path | None = None,
     seed_super_admin: bool = False,
+    reseed_system_rules: bool = True,
 ) -> ResetReport:
     """执行 MySQL/Redis/Chroma/产物全量重置；默认仅返回计划。"""
     validate_reset_request(
@@ -525,6 +542,18 @@ async def reset_all(
         schema_report = await check_schema(database_engine)
         report.schema_ok = schema_report.ok
 
+        # 系统规则（刚性、零容错）随 schema 重建而回归：幂等重插 MySQL + 重建向量集合。
+        # 整库 DROP 后无法「跳过表」，故采用「脚本内重插」保证规则不被清空（可审计/可回滚）。
+        if reseed_system_rules:
+            report.current_stage = "seed_system_rules"
+            try:
+                report.system_rules_seeded = await seed_system_rules()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("系统规则 seed 失败(已忽略): %s", exc, exc_info=True)
+                report.warnings.append(f"系统规则 seed 失败: {type(exc).__name__}: {exc}")
+        else:
+            report.warnings.append("未重插系统规则；需要时执行 app.db.seed_system_rules.seed_system_rules()")
+
         # 建超管默认不做（拆到 app.db.seed，M11d 独立执行）——
         # 「重置一下看看」不该顺手造出一个高权限账号。
         if seed_super_admin:
@@ -544,6 +573,12 @@ async def reset_all(
             schema_report = await check_schema(database_engine)
             report.recovery_succeeded = schema_report.ok
             report.schema_ok = schema_report.ok
+            # 恢复阶段也尽量把系统规则补回（幂等，失败不影响恢复结论）。
+            if reseed_system_rules:
+                try:
+                    report.system_rules_seeded = await seed_system_rules()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("恢复阶段系统规则 seed 失败: %s", exc)
         except BaseException as recovery_error:
             logger.exception("全量重置失败后的 schema 恢复也失败")
             report.warnings.append(f"schema 恢复失败: {type(recovery_error).__name__}")
@@ -575,6 +610,7 @@ __all__ = [
     "probe_redis",
     "recreate_schema",
     "reset_all",
+    "seed_system_rules",
     "validate_artifact_root",
     "validate_reset_request",
 ]

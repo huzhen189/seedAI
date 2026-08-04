@@ -322,6 +322,8 @@ class Settings(BaseSettings):
     chroma_collection_intents: str = "intents"
     chroma_collection_kb_design: str = "kb_design"
     chroma_collection_rag_corpus: str = "rag_corpus"
+    # 系统规则语义索引（PRESERVED 知识底座，重置保留并由 seed 重建；见 docs/06 同源范式）。
+    chroma_collection_system_rules: str = "system_rules"
     rag_top_k: int = Field(default=5, ge=1, le=20)
 
     # ── 记忆模块 v2（docs/plan-memory-v2-landing.md）──

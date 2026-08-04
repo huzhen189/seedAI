@@ -51,6 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="覆盖产物根目录；必须是名为 artifacts 的安全目录",
     )
+    parser.add_argument(
+        "--no-seed-system-rules",
+        action="store_true",
+        help="重置后不重插系统规则（默认会重插，保证刚性规则不被清空）",
+    )
     return parser
 
 
@@ -61,6 +66,7 @@ async def run(args: argparse.Namespace) -> int:
             allow_production=bool(args.allow_production),
             confirmation=str(args.confirm),
             artifact_root=args.artifact_root,
+            reseed_system_rules=not args.no_seed_system_rules,
         )
     except ResetSafetyError as exc:
         print(json.dumps({"ok": False, "code": "reset_safety_error", "detail": str(exc)}, ensure_ascii=False))
