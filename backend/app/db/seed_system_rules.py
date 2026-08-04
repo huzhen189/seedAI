@@ -146,15 +146,30 @@ CANONICAL_RULES: list[dict] = [
         "summary": "示例用户偏好主色避免红色，用品牌色或深蓝替代",
         "keywords": "红色|配色|禁忌|品牌色|偏好",
     },
-    # ── 项目级示例（仅当会话 scope 含 project:demo 时召回）──
+    # ── 静态输出约束（修正旧「示例项目用 Vue3+Vite」的错误认知）──
     {
-        "rule_key": "project:demo.tech_stack_vue",
-        "scope": "project", "scope_ref": "demo",
-        "rule_type": "policy", "priority": 65,
-        "title": "示例项目用 Vue3",
-        "content": "示例项目约束：前端技术栈统一使用 Vue3 + Vite + TypeScript，不混用其他框架。",
-        "summary": "示例项目前端统一用Vue3+Vite+TypeScript",
-        "keywords": "vue3|vite|typescript|技术栈|前端框架",
+        "rule_key": "global.static_output",
+        "scope": "global", "scope_ref": None,
+        "rule_type": "policy", "priority": 70,
+        "title": "只生成静态自包含网页",
+        "content": "agent 只能生成自包含的静态网页：单文件 HTML + 内联 CSS/JS（或少量同源静态资源），"
+                   "可直接用浏览器打开或用 iframe 嵌入预览，无需任何构建步骤。不使用 Vue3+Vite 等需构建的"
+                   "工程化框架——这类工程无法以静态文件直接预览，且当前环境没有配套的构建/预览服务。",
+        "summary": "只生成自包含静态网页，不用Vue3+Vite等需构建框架，可直接打开预览",
+        "keywords": "静态网页|单文件HTML|预览|iframe|Vue3|Vite|构建|无后端",
+    },
+    # ── 站点数据策略：无后端 → 前端静态模拟；本地库按需升级 ──
+    {
+        "rule_key": "domain:site.static_data",
+        "scope": "domain", "scope_ref": "site",
+        "rule_type": "policy", "priority": 62,
+        "title": "静态优先·本地库按需升级",
+        "content": "生成的站点为纯静态前端，后端能力暂不支持：所有数据交互先在前端用写死的示例数据 / 静态按钮"
+                   "模拟，不依赖任何服务端。持久化默认只用静态按钮与内存态；浏览器本地数据库（IndexedDB / "
+                   "localStorage）作为升级方案——仅当用户明确确认「升级到使用浏览器本地数据库」时才启用本地库"
+                   "读写，否则一律静态模拟。",
+        "summary": "站点纯静态无后端，数据先用前端静态模拟，本地库仅用户确认升级后启用",
+        "keywords": "静态|无后端|前端模拟|静态按钮|本地数据库|IndexedDB|localStorage|升级",
     },
 ]
 
