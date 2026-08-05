@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 import yaml
 from pydantic import BaseModel, Field, HttpUrl, model_validator
@@ -207,7 +207,10 @@ class RuntimeConfig(BaseModel):
         )
 
 
-def _load_yaml_model[T: BaseModel](path: Path, model_type: type[T]) -> T:
+T = TypeVar("T", bound=BaseModel)
+
+
+def _load_yaml_model(path: Path, model_type: type[T]) -> T:
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:

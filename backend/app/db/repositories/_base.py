@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins
 import logging
 from collections.abc import Mapping
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Generic, TypeVar
 
 from sqlalchemy import Select, delete, select, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -21,7 +21,10 @@ class RepositoryError(RuntimeError):
         self.model_name = model_name
 
 
-class BaseRepo[ModelT: Base]:
+ModelT = TypeVar("ModelT", bound=Base)
+
+
+class BaseRepo(Generic[ModelT]):
     model: ClassVar[type[Base]]
 
     def _model(self) -> type[ModelT]:

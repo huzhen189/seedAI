@@ -6,4 +6,9 @@ _build*.py
 _install*.py
 _start*.py
 _verify*.py
+_reset*.py
+_check*.py
+_smoke*.py
+_diag*.py
+_fix*.py
 _deploy_configs.py
