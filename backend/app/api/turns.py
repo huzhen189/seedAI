@@ -441,7 +441,6 @@ def _spawn(context: TurnContext) -> None:
 # ---------------------------------------------------------------- 端点
 
 
-@router.post("/chat")
 @router.get("/models")
 async def list_models_endpoint(
     user: CurrentUser = Depends(get_current_user),
@@ -452,6 +451,7 @@ async def list_models_endpoint(
     return list_models()
 
 
+@router.post("/chat")
 async def create_turn(
     payload: ChatRequest,
     user: CurrentUser = Depends(get_current_user),
