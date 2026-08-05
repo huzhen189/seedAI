@@ -69,6 +69,36 @@ class ConversationsRepository(SingleTableRepository[Conversation]):
             await session.execute(select(Conversation).where(Conversation.id == conversation_id, Conversation.user_id == user_id))
         ).scalar_one_or_none()
 
+    # ── 会话级「当前 SIR」指针 ──────────────────────────────────────────────
+    # ``conversations.canonical_sir_snapshot_id`` 这一列建表就有、却从未被读写。
+    # 复用它做"每个会话恰好一个当前 SIR"的指针，可零 DDL 解决旧实现的两个硬伤：
+    #   1. S1 靠 ``latest_for_conversation`` 取"最新一条"快照 —— 但 S3/S5 同一轮
+    #      可能各落一条，"最新"未必是"该轮真正结束时的规范态"；
+    #   2. 同会话并发轮次下，"最新"会串到别的轮。
+    # 指针由 S7（唯一状态固化点）在轮末回写，语义明确：**它就是下一轮的基态**。
+
+    async def current_sir_snapshot_id(
+        self, session: AsyncSession, conversation_id: int
+    ) -> int | None:
+        return (
+            await session.execute(
+                select(Conversation.canonical_sir_snapshot_id).where(
+                    Conversation.id == conversation_id
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def touch_current_sir(
+        self, session: AsyncSession, conversation_id: int, snapshot_id: int
+    ) -> bool:
+        """把会话的「当前 SIR」指针指向本轮固化的快照。返回是否命中行。"""
+        result = await session.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id)
+            .values(canonical_sir_snapshot_id=snapshot_id)
+        )
+        return result.rowcount == 1
+
 
 class MessagesRepository(SingleTableRepository[Message]):
     model = Message

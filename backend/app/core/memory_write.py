@@ -32,10 +32,10 @@ from app.db.repositories import (
     user_facts as user_fact_repo,
     user_soft_preferences as soft_pref_repo,
 )
+from app.core.memory_hints import merge_hints
 from app.db.repositories.qc_scores import qc_score_repo
 from app.llm.extract import llm_extract
 from app.models import Message
-from app.ragstore import safe_upsert_bg
 
 logger = logging.getLogger("app.core.memory_write")
 
@@ -54,6 +54,7 @@ async def persist_and_extract(
     user_text: str,
     assistant_text: str,
     trace_id: str | None = None,
+    hints: list[dict[str, Any]] | None = None,
 ) -> None:
     """把本轮对话压缩提炼并落库（MySQL 主 + 向量辅），并落一条聊天级 QC 评分。
 
@@ -69,6 +70,7 @@ async def persist_and_extract(
             user_text=user_text,
             assistant_text=assistant_text,
             trace_id=trace_id,
+            hints=hints,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[memory_write] 记忆提炼落库失败(已忽略): %s", exc, exc_info=True)
@@ -82,6 +84,7 @@ async def _do_persist(
     user_text: str,
     assistant_text: str,
     trace_id: str | None = None,
+    hints: list[dict[str, Any]] | None = None,
 ) -> None:
     extraction = await llm_extract(
         user_text=user_text,
@@ -89,6 +92,9 @@ async def _do_persist(
         project_id=project_id,
         conversation_id=conversation_id,
     )
+    # 批次 B：把状态机确定性产出的 memory_hints 并入抽取结果（LLM 抽取之后确定性追加，
+    # 保证结构化信号 100% 落库，不依赖 LLM 是否"听懂"提示）。
+    merge_hints(extraction, hints, project_id)
 
     # 回查本轮 user 消息 id（用于 source_message_id 双向关联）。
     # 改：按本 turn 的 turn_id 精确定位（trace_id==turn_id），不再取「会话内最新用户消息」——
@@ -266,6 +272,8 @@ async def _upsert_vectors(
     metadatas.(source_type, source_id) 回 MySQL 取正文。
     （软偏好不写向量库，rerank 由 S1 直接读 MySQL user_soft_preferences。）
     """
+    from app.ragstore import safe_upsert_bg  # 惰性：避免无向量依赖环境导入即拉起 numpy
+
     docs: list[str] = []
     metas: list[dict] = []
     ids: list[str] = []

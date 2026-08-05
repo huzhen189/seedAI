@@ -50,31 +50,12 @@ class S2UnderstandStage(BaseStage):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[S2] 承接解析异常(忽略): %s", exc, exc_info=True)
             context.continuation = None
-        # T3 承接增强：SITE 意图 + references 时，把承接摘要折进 site.brief 槽。
-        # 经 S3 合并进 sir_after_dst.slots → build_spec 消费，生成带上下文承接的站。
-        # 承接只落结构化字段，绝不回灌意图分类（blast radius 小）。
-        if (
-            context.continuation
-            and context.continuation.relation == "references"
-            and context.continuation.summary
-        ):
-            site_intent = next(
-                (r for r in result.resolved_intents if r.domain == Domain.SITE), None
-            )
-            if site_intent is not None:
-                brief = result.sir_delta.slots.get("site.brief") or ""
-                if context.continuation.summary not in brief:
-                    suffix = f"（承接：{context.continuation.summary}）"
-                    new_brief = (brief + suffix) if brief else context.continuation.summary
-                    result = result.model_copy(update={
-                        "sir_delta": result.sir_delta.model_copy(update={
-                            "slots": {**result.sir_delta.slots, "site.brief": new_brief}
-                        })
-                    })
-                    logger.info(
-                        "[S2] 承接增强 site.brief <- %.60s (conf=%.2f)",
-                        context.continuation.summary, context.continuation.confidence,
-                    )
+        # 注：承接**不再**在此处硬塞 ``site.brief``。
+        # 旧实现每轮都往 delta 里追加 ``（承接：…）``，多轮后 brief 滚成一长串重复
+        # 摘要；更根本的问题是"承接"被当成了槽位补丁，而它其实是**状态机的输入信号**。
+        # v2 起交由 S3 调用 ``core.transition.plan_round`` 统一处置：
+        # 首次承接播种 ``task.goal`` + 记 ``continuation_source``（幂等，只播一次），
+        # 并顺带把 ``site.brief`` 视作已给定、不再追问。
 
         # 续答抽槽：上一轮 S5 挂起收集（SIR pending 非空）时，本轮把待收集槽位当作答案，
         # 用一次 LLM 解析用户自由文本回填 sir_delta——只补确定性抽取仍缺失的槽位。

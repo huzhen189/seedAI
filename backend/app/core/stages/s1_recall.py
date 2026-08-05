@@ -44,9 +44,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.contracts import Domain, RecallResult, SirState, StageId, StageStatus
+from app.core.transition import migrate_legacy_sir
 from app.core.turn_context import TurnContext
 from app.db import transaction
 from app.db.repositories import (
+    conversations as conversation_repo,
     memories as memory_repo,
     project_events as project_event_repo,
     project_facts as project_fact_repo,
@@ -95,22 +97,11 @@ class S1RecallStage(BaseStage):
                 logger.warning("[S1] 回溯上下文加载失败: %s", exc, exc_info=True)
                 degraded = "retro_context_failed"
 
-        # 2) SIR 基态
+        # 2) SIR 基态（v2：按会话级 canonical 指针精确加载 + 旧快照升格）
         try:
-            snap = None
-            if context.prior_turn_id is not None:
-                snap = await sir_repo.latest_for_turn(self.session, context.prior_turn_id)
-            if snap is None:
-                snap = await sir_repo.latest_for_conversation(self.session, context.session.conversation_id)
-            if snap is not None and isinstance(snap.snapshot, dict):
-                context.sir_base = SirState.model_validate(snap.snapshot)
-                context.sir_base_snapshot_id = snap.id
+            await self._load_sir_base(context)
+            if context.sir_base_snapshot_id is not None:
                 hit = True
-                logger.info(
-                    "[S1] 加载 SIR 基态 snapshot=%s slots=%d turn=%s retro=%s\n  slots内容=%s\n  constraints=%s\n  pending=%s",
-                    snap.id, len(context.sir_base.slots), context.turn_id, context.prior_turn_id,
-                    context.sir_base.slots, context.sir_base.constraints, context.sir_base.pending,
-                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[S1] 加载 SIR 基态失败，使用空基态: %s", exc, exc_info=True)
             degraded = "sir_base_load_failed"
@@ -171,6 +162,59 @@ class S1RecallStage(BaseStage):
             return self.result(StageStatus.COMPLETED, "recall_degraded")
         context.recall = RecallResult(status="empty")
         return self.result(StageStatus.SKIPPED, "recall_gate_no_signal")
+
+    # ── SIR 基态加载（三级优先级 + 旧快照升格） ───────────────────────────────
+    async def _load_sir_base(self, context: TurnContext) -> None:
+        """确定"上一轮结束时的状态"到底是哪一条快照，并升格为 v2 状态机结构。
+
+        三级优先级（顺序即语义，不可调换）：
+          1. **回溯控制**（``prior_turn_id`` 非空）：correct/supplement 的定义就是
+             "回滚到那一轮结束时"，必须按 turn 取，不能被会话指针盖过；
+          2. **会话 canonical 指针**（``conversations.canonical_sir_snapshot_id``）：
+             S7 在轮末回写，指向该轮真正固化的规范态 —— 每会话恰好一个当前 SIR；
+          3. **兜底最新一条**：仅用于指针尚未建立的历史会话。旧实现只有这一级，
+             而 S3/S5 同一轮可能各落一条快照，"最新"未必是规范态，并发轮次下还会串轮。
+        """
+        assert self.session is not None
+        snap = None
+        source = ""
+        if context.prior_turn_id is not None:
+            snap = await sir_repo.latest_for_turn(self.session, context.prior_turn_id)
+            source = "retro_turn"
+        if snap is None:
+            canonical_id = await conversation_repo.current_sir_snapshot_id(
+                self.session, context.session.conversation_id
+            )
+            if canonical_id:
+                snap = await sir_repo.get(self.session, int(canonical_id))
+                source = "canonical"
+        if snap is None:
+            snap = await sir_repo.latest_for_conversation(
+                self.session, context.session.conversation_id
+            )
+            source = "latest_fallback"
+        if snap is None or not isinstance(snap.snapshot, dict):
+            return
+
+        state = SirState.model_validate(snap.snapshot)
+        # 旧快照（无 task、只有 pending）升格：不迁则续答识别失效，
+        # 老会话会在版本升级那一刻把正在进行的收集流程断掉。
+        state = migrate_legacy_sir(state, origin_turn_id=snap.turn_id or context.turn_id)
+        context.sir_base = state
+        context.sir_base_snapshot_id = snap.id
+        task = state.task
+        logger.info(
+            "[S1] 加载 SIR 基态 snapshot=%s(src=%s) turn=%s retro=%s\n"
+            "  task=%s phase=%s goal=%.60s\n"
+            "  slots=%s\n  agenda=%s\n  constraints=%s",
+            snap.id, source, context.turn_id, context.prior_turn_id,
+            task.id if task else None,
+            task.phase.value if task else "idle",
+            task.goal if task else "",
+            state.slots,
+            [(a.action, a.slot_key) for a in state.agenda],
+            state.constraints,
+        )
 
     async def _load_retro_context(self, context: TurnContext) -> None:
         assert self.session is not None

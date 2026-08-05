@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from app.config import settings
-from app.ragstore import upsert as _rag_upsert
 
 
 def _dyn_doc_id(user_id: int, slot_key: str) -> str:
@@ -15,7 +14,15 @@ def _dyn_doc_id(user_id: int, slot_key: str) -> str:
 
 
 async def persist_dynamic_slot(user_id: int, slot_key: str, label: str) -> int:
-    """把动态槽持久化进 user_preferences（按 user_id 隔离，同 key 更新）。返回写入条数。"""
+    """把动态槽持久化进 user_preferences（按 user_id 隔离，同 key 更新）。返回写入条数。
+
+    ``ragstore`` 采用**函数内惰性导入**：``app.slots`` 是槽位注册表（纯声明、
+    确定性、可 CI 校验），任何模块引用一个槽位定义都不该顺带把 chromadb / numpy
+    这整套向量栈拉进导入链。此前 ``app.core.transition`` 只想读 ``L0_REQUIRED``，
+    却因这条顶层 import 在无向量依赖的环境里直接 ImportError。
+    """
+    from app.ragstore import upsert as _rag_upsert
+
     doc_id = _dyn_doc_id(user_id, slot_key)
     return await _rag_upsert(
         settings.chroma_collection_user_preferences,

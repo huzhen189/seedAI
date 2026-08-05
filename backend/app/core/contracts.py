@@ -12,6 +12,8 @@ from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.core.continuation import Continuation
+
 
 SCHEMA_VERSION: Final[Literal["1.0"]] = "1.0"
 MAX_ACTION_ITEMS: Final[Literal[5]] = 5
@@ -184,11 +186,76 @@ class UtteranceFrame(ContractModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
-class SirState(ContractModel):
-    """跨轮持久状态；Turn-local 意图字段禁止写入这里。"""
+class TaskPhase(str, Enum):
+    """会话内工作任务的生命周期相位（SIR 状态机的核心枚举）。
 
+    与 ``TurnStatus``（单轮执行状态）严格区分：``TaskPhase`` 是**跨轮**的，
+    回答"这个会话当前那件事办到哪一步了"；``TurnStatus`` 只描述本轮请求。
+    """
+
+    IDLE = "idle"                            # 无进行中任务（纯聊天）
+    CLARIFYING = "clarifying"                # 意图/承接存疑，正在确认
+    COLLECTING = "collecting"                # 必填信息未齐，正在收集
+    READY = "ready"                          # 信息齐备，可执行
+    EXECUTING = "executing"                  # 执行中（S6 期间）
+    AWAITING_APPROVAL = "awaiting_approval"  # 含高危动作，等审批
+    DONE = "done"                            # 已完成
+    BLOCKED = "blocked"                      # 被外部条件阻塞
+
+
+class ActiveTask(ContractModel):
+    """会话内"当前在干什么"的一等结构（随 SIR 快照持久化）。
+
+    此前 ``SirState`` 只是被动槽位包，无法回答"当前是什么任务、到哪一步、
+    跟前情什么关系"，导致每轮都要靠 S2/S5 各自现场推断。本结构把它显式化：
+      - ``kind``/``phase``：当前任务类型与相位（跨轮稳定）；
+      - ``goal``：自然语言目标，**可由跨轮承接播种**（见 ``continuation_source``）；
+      - ``continuation_source``：本任务承接自哪条前情（lineage，可解释、可回滚）。
+    """
+
+    id: str = Field(min_length=1, max_length=64)
+    kind: Literal["site_build", "site_edit", "research", "decision_aid", "chat"] = "site_build"
+    domain: Domain = Domain.SITE
+    phase: TaskPhase = TaskPhase.IDLE
+    goal: str = Field(default="", max_length=2048)
+    status: Literal["active", "paused", "done", "cancelled"] = "active"
+    created_turn_id: str = Field(default="", max_length=64)
+    updated_turn_id: str = Field(default="", max_length=64)
+    # 承接 lineage：本 task 派生自哪条前情 turn（None = 独立发起）。
+    # 一旦写入即锁定，``continuation.already_seeded`` 据此保证只播种一次。
+    continuation_source: str | None = Field(default=None, max_length=64)
+
+
+class AgendaItem(ContractModel):
+    """"下一轮要做什么"的显式待办项（取代隐式 ``pending`` 语义）。
+
+    ``pending`` 只是一堆待收集槽位 dict，无法表达 confirm/execute/clarify；
+    ``AgendaItem`` 用 ``action`` 显式区分，S5 只需按 action 执行，不再现场拼逻辑。
+    """
+
+    action: Literal["collect", "confirm", "execute", "clarify"]
+    slot_key: str | None = Field(default=None, max_length=64)
+    label: str = Field(default="", max_length=128)
+    prompt: str = Field(default="", max_length=512)
+    done: bool = False
+
+
+class SirState(ContractModel):
+    """跨轮持久状态；Turn-local 意图字段禁止写入这里。
+
+    v2 状态机化：在原「槽位/约束包」基础上加三项跨轮语义——
+      - ``task``：当前任务（干什么、到哪一步、承接自谁）；
+      - ``agenda``：本/下轮待办（收集哪些槽、要不要确认）；
+      - ``continuation``：本轮解析出的承接边（持久化以便下一轮回看 lineage）。
+    ``pending`` 保留为**向后兼容镜像**：S3 会把 agenda 的 collect 项同步写进
+    ``pending``，使 S2 既有的「续答 LLM 抽槽」路径零改动继续工作。
+    """
+
+    task: ActiveTask | None = None
     slots: dict[str, Any] = Field(default_factory=dict)
     constraints: list[dict[str, Any]] = Field(default_factory=list)
+    agenda: list[AgendaItem] = Field(default_factory=list)
+    continuation: Continuation | None = None
     pending: list[dict[str, Any]] = Field(default_factory=list)
     memory_hints: list[dict[str, Any]] = Field(default_factory=list)
 

@@ -4,7 +4,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from app.core.contracts import SirState, StageId, StageStatus
+from app.core.contracts import Domain, SirState, SpeechAct, StageId, StageStatus
+from app.core.governance import action_requires_approval
+from app.core.transition import agenda_to_pending, plan_round
 from app.core.turn_context import TurnContext
 from app.db.repositories import sir_snapshots as sir_repo
 from app.slots import persist_dynamic_slot  # A 方案 L3：动态槽持久化（含更新语义）
@@ -63,23 +65,58 @@ class S3DstStage(BaseStage):
 
         delta = context.understanding.sir_delta
         merged_slots, diff = self._merge_slots(base.slots, delta.slots)
+
+        # ── 状态转移：唯一确定性策略（纯函数，可单测/可回放） ────────────────
+        # 输入 = 上一轮 SIR + 本轮理解 + 本轮承接；输出 = 下一轮 task/agenda + 本轮 action。
+        # 放在 slots 合并**之后**：判"槽位已填"必须以合并结果为准，
+        # 否则续答轮（本轮才补上的槽）会被判成仍缺失，收集流程原地打转。
+        plan = plan_round(
+            base,
+            context.clean_message,
+            context.understanding,
+            context.continuation,
+            turn_id=context.turn_id,
+            merged_slots=merged_slots,
+            project_bound=bool(getattr(context.session, "project_id", None)),
+            high_risk=self._has_high_risk_intent(context),
+            edit_mode=self._is_edit_mode(context),
+        )
+        context.round_plan = plan
+
+        # 承接播种落 brief：只在**首次**吸收承接的那一轮写，靠 plan 的幂等标志把关，
+        # 不再像 v1 那样每轮往 brief 后面追加 ``（承接：…）`` 滚雪球。
+        if plan.seeded_continuation and context.continuation and context.continuation.summary:
+            summary = context.continuation.summary
+            if "site.brief" not in merged_slots:
+                merged_slots["site.brief"] = summary
+                diff["added"] = sorted({*diff["added"], "site.brief"})
+                logger.info("[S3] 承接播种 site.brief <- %.60s", summary)
+
+        agenda = plan.agenda
         merged = SirState(
+            task=plan.task,
             slots=merged_slots,
             constraints=self._merge_constraints(base.constraints, delta.constraints),
-            pending=[*base.pending, *delta.pending][-20:],
+            agenda=agenda,
+            continuation=context.continuation,
+            # ``pending`` 降级为 agenda 的**只读镜像**（单一真相在 agenda）。
+            # 保留它是为了让 S2 既有的「续答 LLM 抽槽」路径零改动继续工作；
+            # 也因此不再需要旧的"自清已填 pending"逻辑——agenda 每轮由 plan_round
+            # 重算，已填的槽根本不会再出现在里面。
+            pending=agenda_to_pending(agenda),
+            # 注意：plan.memory_hints 是「本轮」状态机确定性产出，不应随 SirState 跨轮累积
+            # （否则同一承接提示被反复重放成重复记忆）。S7 直接读 context.round_plan.memory_hints
+            # （每轮新鲜），故此处只累积 base/delta 层的持久记忆提示。
             memory_hints=[*base.memory_hints, *delta.memory_hints][-20:],
         )
-        # 待收集清单自清：被本轮填充的 slot 对应的 pending 项移除，
-        # 避免「已填槽仍挂起」导致下一轮 S5 又追问同一个已回答的槽。
-        if merged.pending and merged.slots:
-            filled_keys = set(merged.slots.keys())
-            kept = [
-                p for p in merged.pending
-                if not (isinstance(p, dict) and p.get("key") in filled_keys)
-            ]
-            if len(kept) != len(merged.pending):
-                merged = merged.model_copy(update={"pending": kept[-20:]})
         context.sir_after_dst = merged
+        logger.info(
+            "[S3] 轮转决策 action=%s phase=%s task=%s seeded=%s agenda=%s",
+            plan.action, plan.phase.value,
+            plan.task.id if plan.task else None,
+            plan.seeded_continuation,
+            [(a.action, a.slot_key) for a in agenda],
+        )
 
         # A 方案 L3 动态槽持久化：把本轮识别出的 L3 动态业务槽沉淀为该用户/项目的持久偏好。
         # 来源是 understanding.slot_stack（A 方案分层槽位栈），其中 ``dyn_`` 前缀槽由
@@ -117,7 +154,9 @@ class S3DstStage(BaseStage):
                     conversation_id=context.session.conversation_id,
                     turn_id=context.turn_id,
                     kind="base",
-                    snapshot=merged.model_dump(),
+                    # mode="json"：SIR 现在含 TaskPhase/Domain 枚举与嵌套模型，
+                    # 必须先降成纯 JSON 原语，否则落 JSON 列的行为依赖驱动实现。
+                    snapshot=merged.model_dump(mode="json"),
                     prev_snapshot_id=context.sir_base_snapshot_id,
                 )
                 context.sir_after_dst_snapshot_id = snap.id
@@ -141,6 +180,45 @@ class S3DstStage(BaseStage):
             status,
             "sir_merged" if changed else "sir_no_change",
             output_refs=self._trace_refs(diff),
+        )
+
+    # ------------------------------------------------------------ 转移辅助
+
+    @staticmethod
+    def _has_high_risk_intent(context: TurnContext) -> bool:
+        """本轮是否含需审批的高危动作（供 plan_round 决定相位）。
+
+        S3 早于 S4，拿不到 ``BoundedPlan``，因此直接看 ``resolved_intents`` 的
+        ``speech_act``，仍走 ``governance`` 同一套裁决——**避免第二套真相**。
+        注意这里只影响 ``TaskPhase``（READY vs AWAITING_APPROVAL）；
+        真正的审批拦截权仍在 S5，S3 无权放行或加严。
+        """
+        if context.understanding is None:
+            return False
+        return any(
+            action_requires_approval(item.speech_act.value)
+            for item in context.understanding.resolved_intents
+        )
+
+    @staticmethod
+    def _is_edit_mode(context: TurnContext) -> bool:
+        """本轮是否是对**既有站点**的受控编辑。
+
+        两个充分条件：
+          - S1 已按事实产物锁定上一轮项目（回溯控制 correct/supplement，
+            典型是「改成浅色风格」——无域触发词、靠域继承提升上来的那类）；
+          - 意图集合里有 EDIT 且会话已绑定项目。
+        编辑模式下必填闸门整段跳过，见 ``transition.plan_round(edit_mode=...)``。
+        """
+        if context.prior_turn_id is not None and context.prior_project_id is not None:
+            return True
+        if not getattr(context.session, "project_id", None):
+            return False
+        if context.understanding is None:
+            return False
+        return any(
+            item.domain == Domain.SITE and item.speech_act == SpeechAct.EDIT
+            for item in context.understanding.resolved_intents
         )
 
     # ------------------------------------------------------------ 合并原语

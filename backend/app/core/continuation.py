@@ -19,7 +19,12 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:  # 仅类型期引用，运行期不导入 contracts（避免 contracts ←→ continuation 循环）
+    from app.core.contracts import ActiveTask
 
 # 回指词：当前句在引用前文的某样东西（但不一定是选项）。
 _ANAPHORA = (
@@ -55,8 +60,7 @@ def _has_any(text: str, markers: tuple[str, ...]) -> bool:
     return any(m in text for m in markers)
 
 
-@dataclass
-class Continuation:
+class Continuation(BaseModel):
     """跨轮承接边（一等数据结构）。
 
     - ``relation``: independent | references
@@ -65,13 +69,21 @@ class Continuation:
     - ``target_slots``: 承接应折进的槽位（抉择 2=A，固定 ["site.brief"]）
     - ``overlap_entities``: 当前句与前情共享的 n-gram（可验证用）
     - ``confidence``: 确定性评分换算的置信度（0~1），可测试
+
+    v2 起改为 pydantic ``BaseModel``（原 ``@dataclass``，构造签名不变）：
+    ``SirState.continuation`` 需要随 SIR 快照一起 JSON 序列化持久化，
+    dataclass 走不了 pydantic 的 ``model_dump``/``model_validate`` 往返。
+    **不继承 ``ContractModel``** 是刻意的——那会引入 contracts ←→ continuation 循环导入；
+    本类只依赖 pydantic，由 contracts 单向导入。
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     relation: str = "independent"
     source_turn_id: str | None = None
     summary: str | None = None
-    target_slots: list[str] = field(default_factory=list)
-    overlap_entities: list[str] = field(default_factory=list)
+    target_slots: list[str] = Field(default_factory=list)
+    overlap_entities: list[str] = Field(default_factory=list)
     confidence: float = 0.0
 
 
@@ -133,4 +145,18 @@ def resolve_continuation(
     return Continuation()
 
 
-__all__ = ["Continuation", "resolve_continuation"]
+def already_seeded(cont: Continuation | None, task: "ActiveTask | Any | None") -> bool:
+    """该 task 是否**已经吸收过承接**（幂等闸门，供 ``transition.plan_round`` 使用）。
+
+    语义比"同源判等"更强：**一个 task 生命周期内只吸收一次承接**。
+    原因——下一轮 ``resolve_continuation`` 很可能改指向"上一轮的追问消息"
+    （追问文本与当前回答天然高重叠），若按 ``source_turn_id`` 相等判定，
+    异源承接会被反复播种，``task.goal`` 每轮滚雪球膨胀（正是 v1 往 ``site.brief``
+    追加 ``（承接：…）`` 的老毛病）。首次承接即锁定 lineage，后续只更新槽位不再改 goal。
+    """
+    if cont is None or task is None:
+        return False
+    return getattr(task, "continuation_source", None) is not None
+
+
+__all__ = ["Continuation", "already_seeded", "resolve_continuation"]

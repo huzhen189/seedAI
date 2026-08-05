@@ -8,15 +8,7 @@ from app.core.governance import action_requires_approval, action_risk_label, gov
 from app.core.turn_context import TurnContext
 from app.domains.project import project_service
 from app.analytics import record_intent_decision
-from app.slots import SlotStack
-from app.db.repositories import sir_snapshots as sir_repo
 from .base import BaseStage
-
-# 建站类动作的「执行前硬闸门」：必填 ``site.*`` 槽位未收集齐，则挂起执行、先反问收集。
-# 这是此前"帮我做个网站吗"被直接建站的根因——S5 原本只检查高危/低置信/空计划，
-# 完全没有"必填信息是否收集齐"这一支。A 方案已把必填 key 对齐到 ``site.*`` 命名空间
-# （与 build_spec 实际消费的 SIR 键一致），本闸门才能成立。
-_SITE_REQUIRED_SLOT_KEYS = ("site.name", "site.theme", "site.brief", "site.deploy_target")
 
 
 class S5ValidateStage(BaseStage):
@@ -82,107 +74,43 @@ class S5ValidateStage(BaseStage):
             await record_intent_decision("confirm", skill=f"project_{action.speech_act.value}", risk=risk)
             return self.result(StageStatus.PAUSED, "approval_created", output_refs=[approval.approval_id])
 
-        # 必填信息收集闸门（方案 A+B 硬闸门）：建站类 action 在「非高危、非澄清」的前提下，
-        # 仍可能因必填槽位缺失而直接建出"无名/无主题/无风格"的空壳站。此处强制拦截：
-        #   - 从 S2 的 slot_stack(required) 取必填 key（已是 site.* 命名空间）；
-        #   - 用 S3 合并后的 sir_after_dst.slots 判"已填"（site.name 可由既有 project.name 兜底）；
-        #   - 缺失则产出 needs_info：挂起执行 + 收集引导 fragment（走 chat 风格提问），
-        #     并把首个待收集 action 绑定到 validation.pending_action_id，下一轮补齐槽位后放行 S6。
-        if context.intent_bundle is not None and context.understanding is not None:
-            missing = self._site_missing_required(context)
-            if missing:
-                logger.info(
-                    "[S5] 建站必填信息未齐,挂起收集 turn=%s 缺失=%s",
-                    context.turn_id, [s.key for s in missing],
-                )
-                labels = "、".join(s.label for s in missing)
-                questions = []
-                for s in missing:
-                    if s.prompt_hint:
-                        questions.append(s.prompt_hint)
-                ask = "；".join(questions) if questions else f"请补充以下信息：{labels}"
-                # T4 上下文澄清：若本轮承接了前情讨论，先点明承接，让追问有连贯性
-                # （如「我注意到你前面在讨论买雨伞好还是买雨衣好——这个网站是承接它来做的吗？」）。
-                cont_pref = ""
-                if (
-                    context.continuation
-                    and context.continuation.relation == "references"
-                    and context.continuation.summary
-                ):
-                    cont_pref = (
-                        f"我注意到你前面在讨论「{context.continuation.summary}」"
-                        f"——这个网站是承接它来做的吗？"
-                    )
-                # 半自由类型询问：site.type 尚未收集时主动问「做什么类型的网站」
-                # （用户原诉求：建站前应问类型；推荐值见 layers.L0_OPTIONAL.site.type prompt_hint）。
-                filled_keys = set((context.sir_after_dst.slots or {}).keys())
-                type_hint = ""
-                if "site.type" not in filled_keys:
-                    type_hint = (
-                        "另外，这个网站大致属于哪种类型？"
-                        "（如：展示官网 / 电商 / 工具-决策辅助 / 社区 / 个人 / 落地页，也可自定义描述）"
-                    )
-                parts: list[str] = []
-                if cont_pref:
-                    parts.append(cont_pref)
-                parts.append(f"在动手搭建前，我还需要确认几项关键信息（{labels}）。")
-                if ask:
-                    parts.append(ask + "。")
-                if type_hint:
-                    parts.append(type_hint)
-                frag = ResponseFragment(
-                    status="info",
-                    text="".join(parts),
-                    producer_stage=StageId.S5,
-                )
-                # 绑定首个 site action 作为 pending，待下一轮补齐槽位后由 S6 执行。
-                pending_aid = next(
-                    (a.id for a in context.plan.action_items if a.domain.value == "site"),
-                    None,
-                ) if context.plan else None
-                # 把待收集槽位写入 SIR pending，供下一轮 S2 识别「正在回答收集问题」并走 LLM 抽槽。
-                # 去重：若基态已带同名待收集项不重复追加（避免多轮 needs_info 累积重复）。
-                existing = {
-                    p.get("key") for p in context.sir_after_dst.pending
-                    if isinstance(p, dict)
-                }
-                for s in missing:
-                    if s.key not in existing:
-                        context.sir_after_dst.pending.append(
-                            {"key": s.key, "label": s.label, "prompt_hint": s.prompt_hint}
-                        )
-                        existing.add(s.key)
-                # 半自由「网站类型」：若尚未收集，也写入 pending，使下一轮 S2 续答抽槽能
-                # 把用户自由描述的类型回填进 site.type（关键词命中的走 _extract_slots 常规路径）。
-                if "site.type" not in existing and "site.type" not in filled_keys:
-                    context.sir_after_dst.pending.append({
-                        "key": "site.type",
-                        "label": "网站类型",
-                        "prompt_hint": "网站大致属于哪种类型（展示官网/电商/工具-决策辅助/社区/个人/落地页，也可自定义）",
-                    })
-                    existing.add("site.type")
-                # 持久化 pending（新建/更新 SIR base 快照），使下一轮 S1 能加载到待收集清单。
-                try:
-                    snap = await sir_repo.insert(
-                        self.session,
-                        conversation_id=context.session.conversation_id,
-                        turn_id=context.turn_id,
-                        kind="base",
-                        snapshot=context.sir_after_dst.model_dump(),
-                        prev_snapshot_id=context.sir_after_dst_snapshot_id,
-                    )
-                    context.sir_after_dst_snapshot_id = snap.id
-                except Exception as exc:  # noqa: BLE001 — 持久化失败不得中断收集
-                    logger.warning("[S5] 持久化 pending 快照失败(非致命): %s", exc)
-                context.validation = ValidationResult(
-                    status="needs_info",
-                    reason_codes=["missing_required_slots"],
-                    pending_action_id=pending_aid,
-                    response_fragments=[frag],
-                )
-                context.response_fragments.append(frag)
-                await record_intent_decision("collect", skill="site", risk="low")
-                return self.result(StageStatus.PAUSED, "needs_info")
+        # 必填信息收集闸门：**只读 S3 算好的 round_plan，不再自己推断**。
+        #
+        # 旧实现在这里现算缺失槽、现拼追问文案、还顺手往 SIR pending 里塞——
+        # 与 S2（读 pending 决定续答抽槽）、S3（自清已填 pending）三处各持一份逻辑，
+        # 结果就是用户反馈的两个症状：追问永远是那套模板、且完全不接前文。
+        # v2 起唯一策略在 ``core.transition.plan_round``（纯函数、可单测），
+        # S5 退化为**执行器**：按 action 下发，文案直接用 plan 现成的 followup_text。
+        plan = context.round_plan
+        if plan is not None and plan.action == "collect" and context.intent_bundle is not None:
+            missing_keys = [a.slot_key for a in plan.agenda if a.action == "collect"]
+            logger.info(
+                "[S5] 建站必填信息未齐,挂起收集 turn=%s phase=%s 缺失=%s",
+                context.turn_id, plan.phase.value, missing_keys,
+            )
+            frag = ResponseFragment(
+                status="info",
+                text=plan.followup_text,
+                producer_stage=StageId.S5,
+            )
+            # 绑定首个 site action 作为 pending，待下一轮补齐槽位后由 S6 执行。
+            pending_aid = next(
+                (a.id for a in context.plan.action_items if a.domain.value == "site"),
+                None,
+            ) if context.plan else None
+            # 注：**不再**在此处追加 SIR pending —— agenda 已是单一真相，
+            # S3 已把它镜像成 pending 写进 sir_after_dst，下一轮 S2 照常能读到。
+            # 快照也不再由 S5 落：轮末固化统一交给 S7（唯一状态固化点），
+            # 避免同一轮出现两条 base 快照、让"最新一条"这个概念本身失去意义。
+            context.validation = ValidationResult(
+                status="needs_info",
+                reason_codes=["missing_required_slots"],
+                pending_action_id=pending_aid,
+                response_fragments=[frag],
+            )
+            context.response_fragments.append(frag)
+            await record_intent_decision("collect", skill="site", risk="low")
+            return self.result(StageStatus.PAUSED, "needs_info")
 
         # 低置信澄清门控：LLM 升级把本有明确域的句子错判成闲聊（或内部歧义）时，
         # 不硬猜、直接反问用户，避免执行错误动作。正常高置信规则流不会进入本分支。
@@ -207,38 +135,3 @@ class S5ValidateStage(BaseStage):
         context.validation = ValidationResult(status="pass")
         await record_intent_decision("route", skill="multi_action", risk="low")
         return self.result(StageStatus.COMPLETED, "validation_passed")
-
-    # ------------------------------------------------------------ 硬闸门辅助
-    @staticmethod
-    def _site_missing_required(context: TurnContext) -> list:
-        """返回建站 action 当前缺失的必填槽位（SlotDef 列表）。
-
-        判定依据：
-          - 仅当计划中存在 site 域 action（create/edit）时才需收集；
-          - 必填 key 取自 understanding.slot_stack.required（已是 site.* 命名空间），
-            与 domains/site/workflow.build_spec 消费的 SIR 键一致；
-          - "已填"集合 = S3 合并后的 sir_after_dst.slots 键 ∪ 既有 project.name
-            （site.name 可由 session.project_id 指向的既有项目名兜底，避免对已建项目追问站名）。
-        """
-        if context.plan is None or context.understanding is None:
-            return []
-        site_actions = [a for a in context.plan.action_items if a.domain.value == "site"]
-        if not site_actions:
-            return []
-        ss = context.understanding.slot_stack
-        if not isinstance(ss, dict) or not ss.get("slots"):
-            return []
-        try:
-            stack_obj = SlotStack.model_validate(ss)
-        except Exception:  # noqa: BLE001
-            return []
-        required = [s for s in stack_obj.required if s.key in _SITE_REQUIRED_SLOT_KEYS]
-        if not required:
-            return []
-        # 已填集合：S3 合并后的 SIR 槽位键。
-        filled: set[str] = set((context.sir_after_dst.slots or {}).keys())
-        # site.name 兜底：若当前会话已绑定项目（project 已存在），其 name 即默认站名。
-        project_id = getattr(context.session, "project_id", None)
-        if project_id:
-            filled.add("site.name")
-        return [s for s in required if s.key not in filled]

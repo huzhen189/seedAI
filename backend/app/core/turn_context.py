@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .continuation import Continuation
+
+if TYPE_CHECKING:  # 运行期不导入：transition 会拉起 app.slots（含 ragstore），
+    # 而 turn_context 被全链路早期导入，实拉会把向量栈提到进程启动路径上。
+    from .transition import RoundPlan
 from .contracts import (
     SCHEMA_VERSION,
     ArchiveResult,
@@ -89,6 +93,10 @@ class TurnContext:
     # S2 解析出的跨轮承接边（一等数据结构）：independent | references。fail-soft：解析异常时为 None。
     # 承接只折进 target_slots（默认 ["site.brief"]），绝不回灌意图分类，blast radius 小。
     continuation: Continuation | None = None
+    # S3 由 ``core.transition.plan_round`` 算出的本轮转移决策（唯一确定性策略产物）：
+    # 含下一轮 task/agenda、本轮 action 与现成 followup 文案。S5 只读它下发，
+    # **不得再自行推断"缺什么、问什么"** —— 那正是旧实现三处各算一套的病根。
+    round_plan: "RoundPlan | None" = None
     # 以下三项由 S1 依据「上一轮的事实产物」回填（不是文本猜测），供 S2/S4 域继承与 S6 产物锁定。
     prior_domain: Domain | None = None
     prior_artifact_id: int | None = None
@@ -172,4 +180,5 @@ class TurnContext:
             "sir_final": self.sir_final,
             "archive_result": self.archive_result,
             "continuation": self.continuation,
+            "round_plan": self.round_plan,
         }
