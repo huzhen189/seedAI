@@ -338,3 +338,104 @@ def test_new_site_type_emits_user_pref_hint_once():
         turn_id="t10", merged_slots={"site.type": "电商", "site.sections": ["会员"]},
     )
     assert not [h for h in plan2.memory_hints if h.get("kind") == "user_pref"]
+
+
+def _collecting_site_task(turn_id: str = "t_build") -> SirState:
+    """构造一个「正在收集态」的建站 task 基态（模拟用户已说『帮我做个网站』、还差几项）。"""
+    task = ActiveTask(
+        id=f"task_{turn_id}",
+        kind="site_build",
+        domain=Domain.SITE,
+        phase=TaskPhase.COLLECTING,
+        created_turn_id=turn_id,
+        updated_turn_id=turn_id,
+    )
+    agenda = [
+        AgendaItem(action="collect", slot_key="site.theme", label="样式风格", prompt="想要什么风格？"),
+        AgendaItem(action="collect", slot_key="site.deploy_target", label="部署目标", prompt="部署到哪里？"),
+    ]
+    return SirState(task=task, agenda=agenda, slots={"site.name": "天气助手"})
+
+
+def test_off_topic_chat_during_collection_keeps_task():
+    """场景 A：建站收集中插进的离题闲聊（『今天天气真好』）应走 chat，
+    但**保留 task 与未完成 agenda**（不推进、不销毁），闲聊后用户能回来续建站。
+
+    用等价的 CHAT 段构造（与 ``understand()`` 对无触发词片段兜底成 Domain.CHAT 的
+    输出字段一致），避免该测试拉起 ``app.router.intent`` → ``app.llm.client`` → openai
+    的 import 链（测试环境无 openai）。判定前件是「本轮确有 CHAT 段」，此处手搓一个即可。
+    """
+    base = _collecting_site_task()
+    chat = IntentItem(
+        id="i1", domain=Domain.CHAT, speech_act=SpeechAct.ASK, intent_id="chat_ask",
+        confidence=0.6, executable=False, raw_segment="今天天气真好",
+    )
+    # 纯口语、无建站触发词、无 site.* 槽、无建站域答案词 → 判定为离题闲聊。
+    plan = plan_round(
+        base, "今天天气真好", _understanding([chat]), None,
+        turn_id="t_int", merged_slots=base.slots,
+    )
+    assert plan.action == "chat"
+    # task 原样保留（相位仍是 COLLECTING，不被推进到 READY）。
+    assert plan.task is not None
+    assert plan.task.id == base.task.id
+    assert plan.task.phase is TaskPhase.COLLECTING
+    # 未完成的收集项原样带出（用户回来继续建站时 SIR 仍能看到还差什么）。
+    assert {a.slot_key for a in plan.agenda if not a.done} == {"site.theme", "site.deploy_target"}
+
+
+def test_plain_answer_in_collection_still_resumes_not_chat():
+    """防回归：建站收集中回一句无触发词但确是收集答案的『平台托管』必须续答，
+    不能被误判成离题闲聊放走（否则部署目标永远追问不到）。用户痛点原文。
+
+    故意构造一个 CHAT 段（若只简单传空 intents，『平台托管』会因 resuming 直接续答，
+    测不到 off_topic_chat 判定被**正确否决**）；含建站域答案词 → _has_build_vocab 拦住。
+    """
+    base = _collecting_site_task()
+    chat = IntentItem(
+        id="i1", domain=Domain.CHAT, speech_act=SpeechAct.ASK, intent_id="chat_ask",
+        confidence=0.6, executable=False, raw_segment="平台托管",
+    )
+    plan = plan_round(
+        base, "平台托管", _understanding([chat]), None,
+        turn_id="t_resume", merged_slots={"site.name": "天气助手", "site.deploy_target": "平台托管"},
+    )
+    assert plan.action == "collect"  # 续答：仍走收集（补齐 site.theme / site.type），而非 chat
+    assert plan.task is not None and plan.task.id == base.task.id
+    assert "site.deploy_target" not in _collect_keys(plan)  # 答案已吸收，不再追问
+
+
+def test_chat_intent_in_collection_with_site_vocab_resumes():
+    """防回归 2：用户在闲聊里顺嘴提到建站要素（如『蓝色挺好的』），
+    即使话落进 CHAT 段也不该放走——必须续答。靠 _has_build_vocab 兜底识别。
+
+    同样故意构造 CHAT 段激活 off_topic_chat 判定，验证其被 _has_build_vocab 正确否决。
+    """
+    base = _collecting_site_task()
+    chat = IntentItem(
+        id="i1", domain=Domain.CHAT, speech_act=SpeechAct.ASK, intent_id="chat_ask",
+        confidence=0.6, executable=False, raw_segment="蓝色挺好的",
+    )
+    plan = plan_round(
+        base, "蓝色挺好的", _understanding([chat]), None,
+        turn_id="t_blue", merged_slots=base.slots,
+    )
+    assert plan.action == "collect"  # 识别为续答（用户在回答主题/风格），不放走为 chat
+    assert plan.task is not None and plan.task.id == base.task.id
+
+
+def test_continuation_hint_text_renders_reference():
+    from app.core.continuation import continuation_hint_text
+
+    hint = continuation_hint_text(_cont(summary="买雨伞好还是买雨衣好", confidence=0.9))
+    assert hint is not None
+    assert "买雨伞好还是买雨衣好" in hint
+    assert "承接" in hint
+
+
+def test_continuation_hint_text_none_when_independent():
+    from app.core.continuation import continuation_hint_text
+
+    assert continuation_hint_text(None) is None
+    assert continuation_hint_text(Continuation()) is None  # relation=independent 默认
+    assert continuation_hint_text(Continuation(relation="references", summary="")) is None

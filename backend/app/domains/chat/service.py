@@ -4,6 +4,7 @@ import logging
 import time
 
 from app.core.contracts import ResponseFragment, StageId
+from app.core.continuation import continuation_hint_text
 from app.core.turn_context import TurnContext
 from app.config import settings
 from app.llm import LLMError, get_llm_client
@@ -88,6 +89,14 @@ class ChatService:
             )
         if slot_block:
             blocks.append((80, slot_block.strip()))
+        # 跨轮承接硬信号（L-cont）：闲聊也要做记忆上下文判断 —— 把状态机确定性解析出的
+        # 承接边（references 关系）渲染成一句提示注入 system prompt，覆盖「用哪个/刚才那个/
+        # 之前说的」等回指。优先级 82 压在 L4 槽位(80)之上、L2 强事实(85)之下：
+        # 不喧宾夺主盖过用户画像，但确保回指类闲聊不会被 LLM 当全新话题开聊。
+        # 与建站分支不同，此文本**不写任何槽位**，只给 LLM 一个软上下文。
+        _cont_hint = continuation_hint_text(getattr(context, "continuation", None))
+        if _cont_hint:
+            blocks.append((82, _cont_hint))
         # 系统刚性规则（双轨：MySQL 真相 + 向量语义召回 + scope/rule_type 仲裁）。
         # 设计见对话需求 2026-08-04 与 services/system_rules。scope 由当前会话的
         # global/domain:chat/user:<id>/project:<id> 拼出；召回后按权威度排序注入，优先级 95

@@ -145,6 +145,28 @@ def resolve_continuation(
     return Continuation()
 
 
+def continuation_hint_text(cont: Continuation | None) -> str | None:
+    """把承接边渲染成可注入聊天 system prompt 的确定性提示文本（纯函数）。
+
+    返回 ``None`` 表示「无承接」，**调用方据此不注入**——绝不空注一段废话。
+    用途：闲聊分支（及建站中插闲聊分支）在调 chat_service.respond 前，
+    由 S6 经 ``context.continuation`` 拿到本信号，使聊天 LLM 也能拿到
+    「用户正承接前文关于 X 的讨论」的硬上下文，覆盖「用哪个/刚才那个」等回指，
+    而不只是靠 gist 近场窗口碰运气。
+
+    与建站分支的区别：建站分支用承接是「填空 goal/brief」（确定性数据）；
+    这里的文本是「给 LLM 的提示」（软信号），不写任何槽位。
+    """
+    if cont is None or cont.relation != "references" or not cont.summary:
+        return None
+    return (
+        "【跨轮承接提示】用户当前消息承接前文关于"
+        f"「{cont.summary}」的讨论（确定性评分置信度 {cont.confidence:.2f}）。"
+        "若用户用了「哪个 / 这个 / 刚才 / 之前 / 承接」等回指词，优先按承接前文理解，"
+        "不要误当作全新话题重新开聊；若确认确实无关，再正常闲聊即可。"
+    )
+
+
 def already_seeded(cont: Continuation | None, task: "ActiveTask | Any | None") -> bool:
     """该 task 是否**已经吸收过承接**（幂等闸门，供 ``transition.plan_round`` 使用）。
 
@@ -159,4 +181,4 @@ def already_seeded(cont: Continuation | None, task: "ActiveTask | Any | None") -
     return getattr(task, "continuation_source", None) is not None
 
 
-__all__ = ["Continuation", "already_seeded", "resolve_continuation"]
+__all__ = ["Continuation", "already_seeded", "resolve_continuation", "continuation_hint_text"]

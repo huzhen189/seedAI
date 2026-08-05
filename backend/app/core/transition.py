@@ -90,6 +90,46 @@ def _delta_has_site_slots(understanding: UnderstandingResult) -> bool:
     return any(k.startswith("site.") for k in understanding.sir_delta.slots)
 
 
+def _chat_intent(understanding: UnderstandingResult) -> bool:
+    """本轮**任何**段被归为 CHAT 域（含「无触发词兜底桶」「社交寒暄」）。
+
+    这是区分「续答」与「建站收集中插进的离题闲聊」的关键抓手：
+    ``understand()`` 对无法归域的片段必然落进 CHAT 兜底桶
+    （intent.py 的 _classify_segment 返回 None → Domain.CHAT），
+    所以只要有闲聊，``resolved_intents`` 必含 CHAT 标签。
+    """
+    return any(r.domain == Domain.CHAT for r in understanding.resolved_intents)
+
+
+def _mentions_site_topic(understanding: UnderstandingResult) -> bool:
+    """用户本轮是否**主动提到建站话题**（显式建站意图 / 抽到 site.* 槽）。
+
+    与 ``resuming`` 互补：``resuming`` 是「上一轮在收集态、本轮没切走」的粗信号；
+    本函数用于**防回归**——当本轮虽有 CHAT、但用户话里明显在复述/点出站点要素时，
+    不该被当成离题闲聊放走（例如用户虽用了口语，却在回答「网站叫什么」）。
+    """
+    return _site_intent(understanding) or _delta_has_site_slots(understanding)
+
+
+# 建站域「答案词汇」兜底（防回归用）：用户回一句无触发词但确是收集答案时，
+# 话里通常含这些词（部署目标 / 风格 / 类型）。S2 没抽成 site.* 槽时，靠它识别为
+# 「真·答案」而非离题闲聊。刻意向「部署类」倾斜——这类词在 casual 闲聊里几乎不出现，
+# 误判（把真闲聊当答案）成本最低；风格/类型词偏常见，仅作辅助、不作为唯一依据。
+_BUILD_VOCAB: tuple[str, ...] = (
+    "托管", "部署", "服务器", "云部署", "静态托管", "自托管",
+    "vercel", "netlify", "阿里云", "腾讯云", "华为云", "aws",
+    "官网", "电商", "博客", "社区", "落地页", "工具站", "展示站",
+    "简约", "现代", "复古", "科技", "国风", "手绘", "像素",
+    "蓝色", "红色", "绿色", "黑金", "配色", "主色",
+)
+
+
+def _has_build_vocab(message: str) -> bool:
+    """话里是否含建站域答案词汇（确定性字符串匹配，零 LLM）。详见 ``_BUILD_VOCAB``。"""
+    low = (message or "").lower()
+    return any(v in low for v in _BUILD_VOCAB)
+
+
 def _required_defs(understanding: UnderstandingResult) -> list[SlotDef]:
     """取本轮 slot_stack 的建站必填定义；栈缺失时回落 L0_REQUIRED 全集。
 
@@ -215,10 +255,40 @@ def plan_round(
         and prev_task.phase in (TaskPhase.COLLECTING, TaskPhase.CLARIFYING)
         and not _other_executable_intent(understanding)
     )
+
+    # ── 0.5 建站收集中插入的离题闲聊（场景 A 对称处理）────────────────
+    #    ``resuming`` 是「上一轮在收集态、本轮没切走」的**粗**信号，会把任何收集态下的
+    #    消息都硬抬成续答——于是用户插一句「今天天气真好」这类离题闲聊会被当答案吞掉，
+    #    聊天主链路（S6 chat 分支）触达不到，闲聊「接不住」。
+    #    判定「真·离题闲聊」需**四个条件同时成立**，否则安全回落续答（宁吞错也不丢任务）：
+    #      a) 正在 resuming（有活着的收集态建站 task）；
+    #      b) 本轮确有 CHAT 段（说明存在无法归域的闲聊内容）；
+    #      c) 用户**没主动提到建站话题**（无 SITE 意图 / 没抽 site.* 槽）；
+    #      d) 话里**不含任何建站域答案词**（「托管/部署/官网/简约/蓝色…」）—— 这是防回归
+    #         兜底：用户回「平台托管」这类无触发词但确是收集答案的句子，绝不能放走。
+    #    该分支返回 action="chat" 但**保留 prev_task 与未完成 agenda**（不推进不销毁），
+    #    闲聊结束后用户回到建站，task 相位仍 COLLECTING，未完成收集项原样留着。
+    off_topic_chat = bool(
+        resuming
+        and _chat_intent(understanding)
+        and not _mentions_site_topic(understanding)
+        and not _has_build_vocab(message)
+    )
+
     site_signal = _site_intent(understanding) or _delta_has_site_slots(understanding) or resuming
 
     if not site_signal:
         # 与建站无关：任务原样保留（不销毁，用户随时可回来续），本轮走聊天。
+        return RoundPlan(
+            task=prev_task,
+            agenda=[a for a in prev_agenda if not a.done],
+            action="chat",
+        )
+
+    if off_topic_chat:
+        # 建站收集中插进的离题闲聊：保 task、保未完成 agenda，仅本轮走 chat 分支。
+        # 注意返回的是「当前**未完成的** collect 项」（带上 done 过滤），
+        # S3 写入 SirState 时它就是下一轮回看 SIR 时看到的 agenda（task 相位不变）。
         return RoundPlan(
             task=prev_task,
             agenda=[a for a in prev_agenda if not a.done],
