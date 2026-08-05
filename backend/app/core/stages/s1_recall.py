@@ -39,7 +39,7 @@ def _pref_keywords(p) -> list[str]:
     # 去掉单字噪声（"的""a" 之类）
     return [k for k in out if len(k) >= 2]
 
-from sqlalchemy import select
+from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -57,6 +57,9 @@ from app.db.repositories import (
 from app.models import Artifact, Message
 from app.ragstore import retrieve as _rag_retrieve
 from .base import BaseStage
+
+# 结构化前情窗口上限：用户定「最多 5 条」，与 chat 短期记忆窗口一致。
+CONTEXT_GIST_LIMIT = 5
 
 
 class S1RecallStage(BaseStage):
@@ -138,6 +141,13 @@ class S1RecallStage(BaseStage):
             user_refs = await self._load_user_preferences(context)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[S1] 用户偏好召回失败(忽略): %s", exc, exc_info=True)
+
+        # 6) 结构化前情窗口（context_gist）：取最近 N 条对话(排除本轮)，供 T2 承接解析与
+        #    S5 上下文澄清。只存结构化摘要(summary 或 content 截断)，不塞原始 transcript。
+        try:
+            await self._load_context_gist(context)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[S1] 上下文 gist 加载失败(忽略): %s", exc, exc_info=True)
 
         has_content = bool(
             hit or vector_refs or user_refs or context.user_context or context.project_context
@@ -295,6 +305,52 @@ class S1RecallStage(BaseStage):
             query[:80], settings.memory_recall_top_k, len(backfilled),
         )
         return refs
+
+    async def _load_context_gist(self, context: TurnContext) -> None:
+        """结构化前情窗口：取最近 CONTEXT_GIST_LIMIT 条对话(排除本轮)，最近优先。
+
+        每条 = {turn_id, role, summary, content}。summary 优先用异步蒸馏摘要(语义更凝练)，
+        回落 content 截断。这是承接解析的确定性输入——不依赖模型、可回滚（随 TurnContext 重置）。
+        任何异常都不应影响主链路，已在调用方 try 包裹。
+        """
+        assert self.session is not None
+        conv_id = context.session.conversation_id
+        if not conv_id:
+            return
+        cur_turn = context.turn_id
+        rows = (
+            await self.session.execute(
+                select(
+                    Message.id, Message.turn_id, Message.role,
+                    Message.content, Message.summary,
+                ).where(
+                    Message.conversation_id == conv_id,
+                    Message.role.in_(["user", "assistant"]),
+                    # 排除本轮自身（当前句未进 gist，避免自我承接）。
+                    (Message.turn_id.is_(None)) | (Message.turn_id != cur_turn),
+                )
+                .order_by(desc(Message.id))
+                .limit(CONTEXT_GIST_LIMIT)
+            )
+        ).all()
+        # 倒序：index 0 = 最近一条前情（承接解析按近因加成）。
+        gist: list[dict] = []
+        for mid, turn_id, role, content, summary in reversed(rows):
+            text = (summary or content or "").strip()
+            if not text:
+                continue
+            gist.append({
+                "turn_id": turn_id or f"msg:{mid}",
+                "role": role,
+                "summary": text[:200],
+                "content": (content or "")[:400],
+            })
+        context.context_gist = gist
+        if gist:
+            logger.info(
+                "[S1] 上下文 gist %d 条 最近=%s topic≈%.40s",
+                len(gist), gist[0].get("turn_id"), gist[0].get("summary", ""),
+            )
 
     async def _load_user_preferences(self, context: TurnContext) -> list[str]:
         """旧 user_preferences 集合召回（兼容保留；重置后通常为空）。"""

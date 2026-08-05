@@ -101,9 +101,38 @@ class S5ValidateStage(BaseStage):
                     if s.prompt_hint:
                         questions.append(s.prompt_hint)
                 ask = "；".join(questions) if questions else f"请补充以下信息：{labels}"
+                # T4 上下文澄清：若本轮承接了前情讨论，先点明承接，让追问有连贯性
+                # （如「我注意到你前面在讨论买雨伞好还是买雨衣好——这个网站是承接它来做的吗？」）。
+                cont_pref = ""
+                if (
+                    context.continuation
+                    and context.continuation.relation == "references"
+                    and context.continuation.summary
+                ):
+                    cont_pref = (
+                        f"我注意到你前面在讨论「{context.continuation.summary}」"
+                        f"——这个网站是承接它来做的吗？"
+                    )
+                # 半自由类型询问：site.type 尚未收集时主动问「做什么类型的网站」
+                # （用户原诉求：建站前应问类型；推荐值见 layers.L0_OPTIONAL.site.type prompt_hint）。
+                filled_keys = set((context.sir_after_dst.slots or {}).keys())
+                type_hint = ""
+                if "site.type" not in filled_keys:
+                    type_hint = (
+                        "另外，这个网站大致属于哪种类型？"
+                        "（如：展示官网 / 电商 / 工具-决策辅助 / 社区 / 个人 / 落地页，也可自定义描述）"
+                    )
+                parts: list[str] = []
+                if cont_pref:
+                    parts.append(cont_pref)
+                parts.append(f"在动手搭建前，我还需要确认几项关键信息（{labels}）。")
+                if ask:
+                    parts.append(ask + "。")
+                if type_hint:
+                    parts.append(type_hint)
                 frag = ResponseFragment(
                     status="info",
-                    text=f"在动手搭建前，我还需要确认几项关键信息（{labels}）。{ask}。",
+                    text="".join(parts),
                     producer_stage=StageId.S5,
                 )
                 # 绑定首个 site action 作为 pending，待下一轮补齐槽位后由 S6 执行。
@@ -123,6 +152,15 @@ class S5ValidateStage(BaseStage):
                             {"key": s.key, "label": s.label, "prompt_hint": s.prompt_hint}
                         )
                         existing.add(s.key)
+                # 半自由「网站类型」：若尚未收集，也写入 pending，使下一轮 S2 续答抽槽能
+                # 把用户自由描述的类型回填进 site.type（关键词命中的走 _extract_slots 常规路径）。
+                if "site.type" not in existing and "site.type" not in filled_keys:
+                    context.sir_after_dst.pending.append({
+                        "key": "site.type",
+                        "label": "网站类型",
+                        "prompt_hint": "网站大致属于哪种类型（展示官网/电商/工具-决策辅助/社区/个人/落地页，也可自定义）",
+                    })
+                    existing.add("site.type")
                 # 持久化 pending（新建/更新 SIR base 快照），使下一轮 S1 能加载到待收集清单。
                 try:
                     snap = await sir_repo.insert(

@@ -6,6 +6,7 @@ import time
 logger = logging.getLogger(__name__)
 
 from app.core.contracts import Domain, IntentCandidate, StageId, StageStatus
+from app.core.continuation import resolve_continuation
 from app.core.turn_context import TurnContext
 from app.router.intent import (
     understand, escalate_if_needed, inherit_retro_domain, recompute_slots,
@@ -40,6 +41,40 @@ class S2UnderstandStage(BaseStage):
             # understand() 早于此步运行，对"无域触发词"的回溯轮会把 theme/sections 槽位
             # 整批丢弃，导致 S3 合并为零变更（不落快照、不改 spec）。见 recompute_slots。
             result = recompute_slots(context.clean_message, result)
+
+        # 跨轮承接解析（T2，确定性无 LLM）：把前情承接关系解析成一等数据结构，
+        # 写入 context.continuation。fail-soft：异常时置 None，不影响后续。
+        # 必须在 recompute_slots 之后（域继承会重算 sir_delta，提前写入会被覆盖）。
+        try:
+            context.continuation = resolve_continuation(context.clean_message, context.context_gist)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[S2] 承接解析异常(忽略): %s", exc, exc_info=True)
+            context.continuation = None
+        # T3 承接增强：SITE 意图 + references 时，把承接摘要折进 site.brief 槽。
+        # 经 S3 合并进 sir_after_dst.slots → build_spec 消费，生成带上下文承接的站。
+        # 承接只落结构化字段，绝不回灌意图分类（blast radius 小）。
+        if (
+            context.continuation
+            and context.continuation.relation == "references"
+            and context.continuation.summary
+        ):
+            site_intent = next(
+                (r for r in result.resolved_intents if r.domain == Domain.SITE), None
+            )
+            if site_intent is not None:
+                brief = result.sir_delta.slots.get("site.brief") or ""
+                if context.continuation.summary not in brief:
+                    suffix = f"（承接：{context.continuation.summary}）"
+                    new_brief = (brief + suffix) if brief else context.continuation.summary
+                    result = result.model_copy(update={
+                        "sir_delta": result.sir_delta.model_copy(update={
+                            "slots": {**result.sir_delta.slots, "site.brief": new_brief}
+                        })
+                    })
+                    logger.info(
+                        "[S2] 承接增强 site.brief <- %.60s (conf=%.2f)",
+                        context.continuation.summary, context.continuation.confidence,
+                    )
 
         # 续答抽槽：上一轮 S5 挂起收集（SIR pending 非空）时，本轮把待收集槽位当作答案，
         # 用一次 LLM 解析用户自由文本回填 sir_delta——只补确定性抽取仍缺失的槽位。

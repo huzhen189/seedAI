@@ -79,6 +79,12 @@ L0_OPTIONAL: list[SlotDef] = [
             prompt_hint="是否需要多语言版本", example="中英双语"),
     SlotDef(key="seo_keywords", label="SEO 关键词", layer=LayerKind.L0, kind=SlotKind.OPTIONAL,
             prompt_hint="是否有希望被搜索命中关键词", example="烘焙教程"),
+    # 半自由「网站类型」：用户原诉求——建站前应主动询问「做什么类型的网站」。
+    # 给推荐值(展示/电商/工具-决策辅助/社区/个人/落地页…)，但允许自定义任意描述
+    # （_coerce_fill_value 对 site.type 走字符串分支，build_spec→spec.site_type 原样承接）。
+    SlotDef(key="site.type", label="网站类型", layer=LayerKind.L0, kind=SlotKind.OPTIONAL,
+            prompt_hint="网站大致属于哪种类型（如：展示官网 / 电商 / 工具-决策辅助 / 社区 / 个人 / 落地页，也可自定义描述）",
+            example="工具-决策辅助"),
 ]
 L0_IMPLICIT: list[SlotDef] = [
     SlotDef(key="project_root", label="项目根目录", layer=LayerKind.L0, kind=SlotKind.IMPLICIT,
@@ -124,6 +130,10 @@ L2_TYPES: dict[str, dict] = {
                 inherits=["site.name"], prompt_hint="主要卖哪些类目的商品", example="服装 / 数码"),
     ]},
     "landing": {"bucket": "content_showcase", "extra": []},
+    # 半自由类型扩展（用户需求：应能表达「工具 / 决策辅助」类网站，如按天气推荐雨具）。
+    # 既是 canonical 推荐值，也允许用户在填写时自定义任意描述（_coerce_fill_value 走字符串分支）。
+    "tool": {"bucket": "interactive_platform", "extra": []},
+    "decision_aid": {"bucket": "interactive_platform", "extra": []},
 }
 
 # -------------------------------------------------------------------------------- 行业→桶映射（首版热门 50 行业）

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .continuation import Continuation
 from .contracts import (
     SCHEMA_VERSION,
     ArchiveResult,
@@ -82,6 +83,12 @@ class TurnContext:
     social_prefix: str = ""
     # 回溯控制（correct/supplement）的上一轮 turn_id：非空表示本轮是对指定 turn 的回溯重写/补充。
     prior_turn_id: str | None = None
+    # S1 产出的「结构化前情窗口」（最近优先，最多 5 条）：[{turn_id, role, summary, content}]。
+    # 供 T2 承接解析与 S5 上下文澄清消费；只存结构化摘要，不塞原始 transcript，防污染。
+    context_gist: list[dict] = field(default_factory=list)
+    # S2 解析出的跨轮承接边（一等数据结构）：independent | references。fail-soft：解析异常时为 None。
+    # 承接只折进 target_slots（默认 ["site.brief"]），绝不回灌意图分类，blast radius 小。
+    continuation: Continuation | None = None
     # 以下三项由 S1 依据「上一轮的事实产物」回填（不是文本猜测），供 S2/S4 域继承与 S6 产物锁定。
     prior_domain: Domain | None = None
     prior_artifact_id: int | None = None
@@ -164,4 +171,5 @@ class TurnContext:
             "sir_after_dst": self.sir_after_dst,
             "sir_final": self.sir_final,
             "archive_result": self.archive_result,
+            "continuation": self.continuation,
         }

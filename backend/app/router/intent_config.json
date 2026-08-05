@@ -24,7 +24,9 @@
       {"words": ["商城", "电商", "shop"], "value": "commerce"},
       {"words": ["落地页", "landing"], "value": "landing"},
       {"words": ["官网", "企业站", "门户"], "value": "corporate"},
-      {"words": ["个人网站", "个人主页"], "value": "personal"}
+      {"words": ["个人网站", "个人主页"], "value": "personal"},
+      {"words": ["工具", "小工具", "助手", "决策辅助", "决策助手", "计算器", "推荐器", "查询工具"], "value": "tool"},
+      {"words": ["决策辅助", "决策建议", "该选哪个", "帮我决策", "二选一", "对比选择"], "value": "decision_aid"}
     ],
     "section": [
       {"words": ["联系我", "联系方式", "contact"], "value": "contact"},
