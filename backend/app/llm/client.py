@@ -21,6 +21,13 @@ from app.analytics import record_ai_llm, record_model_detail
 
 logger = logging.getLogger("app.llm")
 
+# 可被前端选择器枚举的模型元数据（仅展示用；可用性由 has_provider 决定）。
+_MODEL_META: dict[str, tuple[str, str]] = {
+    "qwen": ("通义千问", "阿里通义千问，综合能力均衡，默认模型"),
+    "deepseek": ("DeepSeek", "深度求索，推理能力强，作为默认兜底"),
+    "hy3": ("混元 Hunyuan", "腾讯混元大模型，代码生成能力强"),
+}
+
 
 def _fmt_messages(messages: Sequence[dict]) -> str:
     """把拼给 LLM 的 messages 逐角色全量展开，便于复盘「到底喂了哪些对象」。"""
@@ -157,6 +164,86 @@ class LLMClient:
             raise CircuitOpenError(self._providers[0].name)
         raise LLMError(f"所有模型供应商均不可用: {last_err}")
 
+    async def _stream_one(
+        self,
+        provider: "_Provider",
+        messages: Sequence[dict],
+        *,
+        temperature: float,
+        max_tokens: Optional[int],
+        timeout: float,
+        enable_thinking: bool,
+        purpose: str | None,
+    ):
+        """对单个供应商做一次流式补全，逐块产出 ``{"kind": "think"|"token", "text": str}``。
+
+        失败（含熔断）抛 ``LLMError``，由调用方决定故障转移或回落默认链。
+        解析 ``delta.reasoning_content`` → think，``delta.content`` → token；
+        流正常结束时按最终 usage 记一次统计（与 chat() 同一落点）。
+        """
+        breaker = get_breaker(provider.name)
+        if not breaker.allow():
+            raise LLMError(f"模型供应商 {provider.name} 已熔断，暂时拒绝调用")
+        t0 = time.time()
+        try:
+            client = self._client_for(provider)
+            logger.info(
+                "[LLM→] provider=%s model=%s temp=%s max_tokens=%s stream=True\n[LLM prompt]\n%s",
+                provider.name, provider.model, temperature, max_tokens, _fmt_messages(messages),
+            )
+            stream = await client.chat.completions.create(
+                model=provider.model,
+                messages=list(messages),  # type: ignore[arg-type]
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                stream=True,
+                extra_body={"enable_thinking": enable_thinking},
+            )
+            usage = None
+            full_think = ""
+            full_token = ""
+            async for chunk in stream:
+                # 某些兼容端点把 usage 放在空 choices 的 chunk 上
+                u = getattr(chunk, "usage", None)
+                if u:
+                    usage = u
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                rc = getattr(delta, "reasoning_content", None)
+                ct = getattr(delta, "content", None)
+                if rc:
+                    full_think += rc
+                    yield {"kind": "think", "text": rc}
+                if ct:
+                    full_token += ct
+                    yield {"kind": "token", "text": ct}
+            elapsed = (time.time() - t0) * 1000
+            tok_in = getattr(usage, "prompt_tokens", 0) if usage else 0
+            tok_out = getattr(usage, "completion_tokens", 0) if usage else 0
+            breaker.record_success()
+            await record_ai_llm(
+                model=provider.name, ok=True, duration_ms=elapsed,
+                tokens_in=int(tok_in or 0), tokens_out=int(tok_out or 0),
+                purpose=purpose,
+            )
+            await record_model_detail(provider.name, success=True)
+            logger.info(
+                "[LLM←] provider=%s model=%s 流式结束(think=%d字符 token=%d字符)\n[LLM response.think]\n%s\n[LLM response.token]\n%s",
+                provider.name, provider.model, len(full_think), len(full_token),
+                full_think or "(无思考过程)", full_token or "(无正文)",
+            )
+            return
+        except Exception as exc:  # 故障转移 / 回落由调用方处理
+            breaker.record_failure()
+            elapsed = (time.time() - t0) * 1000
+            err_type = type(exc).__name__
+            await record_ai_llm(model=provider.name, ok=False, duration_ms=elapsed, error_type=err_type, purpose=purpose)
+            await record_model_detail(provider.name, success=False)
+            logger.warning("LLM 流式调用 %s 失败: %s", provider.name, exc)
+            raise LLMError(f"模型供应商 {provider.name} 调用失败: {exc}")
+
     async def chat_stream(
         self,
         messages: Sequence[dict],
@@ -169,83 +256,71 @@ class LLMClient:
     ):
         """流式对话补全，逐块产出 ``{"kind": "think"|"token", "text": str}``。
 
-        - 解析 ``delta.reasoning_content`` → think（思考过程；不支持的模型该项为空，自然无 think 帧）。
-        - 解析 ``delta.content`` → token（回复正文）。
-        - 流正常结束时按最终 usage 记一次 record_ai_llm / record_model_detail（与 chat() 同一统计落点）。
-        - 沿供应商优先级故障转移：首个可用 provider 起流；流中异常则该 provider 记失败并升级下一个。
+        沿供应商优先级故障转移：首个可用 provider 起流；流中异常则该 provider 记失败并升级下一个。
         """
         if not self._providers:
             raise LLMError("未配置任何模型供应商（QWEN_API_KEY / DEEPSEEK_API_KEY 均缺失）")
 
         last_err: Optional[Exception] = None
         for provider in self._providers:
-            breaker = get_breaker(provider.name)
-            if not breaker.allow():
-                logger.warning("LLM 流式调用 %s 被熔断跳过", provider.name)
-                continue
-            t0 = time.time()
             try:
-                client = self._client_for(provider)
-                logger.info(
-                    "[LLM→] provider=%s model=%s temp=%s max_tokens=%s stream=True\n[LLM prompt]\n%s",
-                    provider.name, provider.model, temperature, max_tokens, _fmt_messages(messages),
-                )
-                stream = await client.chat.completions.create(
-                    model=provider.model,
-                    messages=list(messages),  # type: ignore[arg-type]
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    timeout=timeout,
-                    stream=True,
-                    extra_body={"enable_thinking": enable_thinking},
-                )
-                usage = None
-                full_think = ""
-                full_token = ""
-                async for chunk in stream:
-                    # 某些兼容端点把 usage 放在空 choices 的 chunk 上
-                    u = getattr(chunk, "usage", None)
-                    if u:
-                        usage = u
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-                    rc = getattr(delta, "reasoning_content", None)
-                    ct = getattr(delta, "content", None)
-                    if rc:
-                        full_think += rc
-                        yield {"kind": "think", "text": rc}
-                    if ct:
-                        full_token += ct
-                        yield {"kind": "token", "text": ct}
-                elapsed = (time.time() - t0) * 1000
-                tok_in = getattr(usage, "prompt_tokens", 0) if usage else 0
-                tok_out = getattr(usage, "completion_tokens", 0) if usage else 0
-                breaker.record_success()
-                await record_ai_llm(
-                    model=provider.name, ok=True, duration_ms=elapsed,
-                    tokens_in=int(tok_in or 0), tokens_out=int(tok_out or 0),
-                    purpose=purpose,
-                )
-                await record_model_detail(provider.name, success=True)
-                logger.info(
-                    "[LLM←] provider=%s model=%s 流式结束(think=%d字符 token=%d字符)\n[LLM response.think]\n%s\n[LLM response.token]\n%s",
-                    provider.name, provider.model, len(full_think), len(full_token),
-                    full_think or "(无思考过程)", full_token or "(无正文)",
-                )
+                async for chunk in self._stream_one(
+                    provider, messages,
+                    temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+                    enable_thinking=enable_thinking, purpose=purpose,
+                ):
+                    yield chunk
                 return
-            except Exception as exc:  # 故障转移到下一个供应商
-                breaker.record_failure()
+            except LLMError as exc:
                 last_err = exc
-                elapsed = (time.time() - t0) * 1000
-                err_type = type(exc).__name__
-                await record_ai_llm(model=provider.name, ok=False, duration_ms=elapsed, error_type=err_type, purpose=purpose)
-                await record_model_detail(provider.name, success=False)
-                logger.warning("LLM 流式调用 %s 失败: %s", provider.name, exc)
                 continue
         if all(not get_breaker(p.name).allow() for p in self._providers):
             raise CircuitOpenError(self._providers[0].name)
         raise LLMError(f"所有模型供应商均不可用: {last_err}")
+
+    async def chat_stream_with(
+        self,
+        model_id: str | None,
+        messages: Sequence[dict],
+        *,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = 1024,
+        timeout: float = 30.0,
+        enable_thinking: bool = True,
+        purpose: str | None = None,
+    ):
+        """按前端选择器指定的模型流式补全；未指定或不可用则回落默认故障转移链。
+
+        用于「全跟 selector 走」：聊天回复与建站代码生成统一由用户选择的模型执行。
+        若所选模型已配置但调用失败，会自动回落默认链（fail-soft，绝不中断对话）。
+        """
+        if model_id:
+            cfg = self._config_for(model_id)
+            if cfg is not None:
+                try:
+                    async for chunk in self._stream_one(
+                        cfg, messages,
+                        temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+                        enable_thinking=enable_thinking, purpose=purpose,
+                    ):
+                        yield chunk
+                    return
+                except LLMError as exc:
+                    logger.warning("定向模型 %s 失败，回落默认链: %s", model_id, exc)
+        async for chunk in self.chat_stream(
+            messages,
+            temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+            enable_thinking=enable_thinking, purpose=purpose,
+        ):
+            yield chunk
+
+    def list_providers(self) -> list[dict[str, str]]:
+        """返回已配置可用的模型列表（供前端选择器枚举）。"""
+        result: list[dict[str, str]] = []
+        for pid, (label, desc) in _MODEL_META.items():
+            if self.has_provider(pid):
+                result.append({"id": pid, "label": label, "desc": desc})
+        return result
 
     async def health(self) -> bool:
         """轻量自检：尝试一次极简对话。"""

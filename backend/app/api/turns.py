@@ -75,6 +75,8 @@ class ChatRequest(BaseModel):
     conversation_id: int = Field(ge=1)
     message: str = Field(min_length=1)
     expected_conversation_version: int | None = None
+    # 前端模型选择器透传：用户指定的执行模型(qwen/deepseek/hy3)；None 走后端默认链。
+    model: str | None = None
 
 
 class TurnControlRequest(BaseModel):
@@ -440,6 +442,16 @@ def _spawn(context: TurnContext) -> None:
 
 
 @router.post("/chat")
+@router.get("/models")
+async def list_models_endpoint(
+    user: CurrentUser = Depends(get_current_user),
+) -> list[dict[str, str]]:
+    """返回当前已配置的可用模型列表（供前端模型选择器枚举）。"""
+    from app.llm import list_models
+
+    return list_models()
+
+
 async def create_turn(
     payload: ChatRequest,
     user: CurrentUser = Depends(get_current_user),
@@ -475,6 +487,7 @@ async def create_turn(
             raw_message=payload.message,
             expected_conversation_version=payload.expected_conversation_version,
             prior_turn_id=prior_turn_id,
+            model=payload.model,
         )
 
     context = accepted.context

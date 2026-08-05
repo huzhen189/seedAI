@@ -61,6 +61,7 @@ class TurnService:
         raw_message: str,
         expected_conversation_version: int | None,
         prior_turn_id: str | None = None,
+        model: str | None = None,
     ) -> AcceptedTurn:
         """受理一个新 Turn(幂等)。
 
@@ -143,6 +144,7 @@ class TurnService:
                 clean_message=clean,
                 trust=trust,
                 prior_turn_id=prior_turn_id,
+                model=model,
                 budget=ExecutionBudget(max_model_calls=1, reserved_model_calls=1),
             ),
             existing=False,

@@ -7,6 +7,7 @@ import RightPanel from '../components/RightPanel.vue'
 import ThinkingTrail from '../components/ThinkingTrail.vue'
 import {
   controlTurn,
+  getModels,
   getPendingApprovals,
   getTurn,
   replayStream,
@@ -44,7 +45,7 @@ const projectStore = useProjectStore()
 const convStore = useConversationStore()
 const stream = reactive(createStreamUiState()) as StreamUiState
 const input = ref('')
-const model = ref('deepseek')
+const model = ref('qwen')
 const models = ref<ModelInfo[]>([])
 const generating = ref(false)
 const stopping = ref(false)
@@ -157,7 +158,7 @@ async function ensureConversation(message: string): Promise<number> {
   return convStore.currentConvId!
 }
 
-async function performSend(message: string, clientMsgId: string): Promise<void> {
+async function performSend(message: string, clientMsgId: string, modelOverride?: string): Promise<void> {
   errorMessage.value = ''
   offlineNote.value = ''
   try {
@@ -173,8 +174,9 @@ async function performSend(message: string, clientMsgId: string): Promise<void> 
     generating.value = true
 
     subscription.value?.abort()
+    const usedModel = modelOverride ?? model.value
     const sub = startChat(
-      { client_msg_id: clientMsgId, conversation_id: conversationId, message },
+      { client_msg_id: clientMsgId, conversation_id: conversationId, message, model: usedModel },
       streamHandlers,
     )
     subscription.value = sub
@@ -197,7 +199,7 @@ async function send(clientMsgId?: string): Promise<void> {
   // 离线: 先持久化, 联网后由 offlineQueue 串行幂等补发(后端按 client_msg_id 去重)。
   if (!isOnline()) {
     const id = clientMsgId || createClientMessageId()
-    await offlineQueue.enqueue({ client_msg_id: id, message, conversation_id: projectStore.currentProjectId })
+    await offlineQueue.enqueue({ client_msg_id: id, message, conversation_id: projectStore.currentProjectId, model: model.value })
     offlineNote.value = '离线：消息已存入本地队列，联网后自动发送'
     input.value = ''
     return
@@ -220,7 +222,7 @@ async function flushOfflineQueue(): Promise<void> {
   try {
     offlineNote.value = '正在补发离线消息…'
     const sent = await offlineQueue.flush(async (item: QueuedMessage) => {
-      await performSend(item.message, item.client_msg_id)
+      await performSend(item.message, item.client_msg_id, item.model)
     })
     offlineNote.value = sent > 0 ? `已补发 ${sent} 条离线消息` : ''
   } catch {
@@ -481,6 +483,16 @@ function readText(source: Record<string, unknown> | null, keys: string[]): strin
   return ''
 }
 
+async function fetchModels(): Promise<void> {
+  try {
+    const list = await getModels()
+    if (list.length) models.value = list
+  } catch (err) {
+    // 枚举失败不阻断聊天：选择器回落默认模型即可（fail-soft）。
+    console.warn('拉取模型列表失败，使用默认模型', err)
+  }
+}
+
 onMounted(async () => {
   await auth.init()
   if (!auth.user.value) return
@@ -489,6 +501,7 @@ onMounted(async () => {
   await loadArtifacts()
   await restorePendingApproval()
   await replaySavedStream()
+  await fetchModels()
   scrollToBottom()
   // M9c: 联网恢复时按 client_msg_id 串行、幂等补发离线队列。
   unregisterOnline = onOnline(() => void flushOfflineQueue())

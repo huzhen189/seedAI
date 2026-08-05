@@ -45,6 +45,10 @@ class TurnContext:
     user: UserIdentity
     session: SessionInfo
     clean_message: str
+    # 用户在前端模型选择器中指定的模型（经 /api/chat 透传）；None 表示用后端默认链
+    # （qwen→deepseek）。聊天回复与建站代码生成均遵循此值（"全跟 selector 走"），
+    # 无效 / 未配置时回落默认链。
+    model: str | None = None
     # 当前轮使用的数据库会话（由 services/turns.py 构造 context 时注入）。
     # 供 S6 在执行期复用同一事务会话做只读查询（如取最近对话拼短期记忆），
     # 避免额外开连接；为 None 时下游改用只读事务兜底（fail-soft）。

@@ -18,6 +18,8 @@ export interface QueuedMessage {
   client_msg_id: string
   message: string
   conversation_id?: number | null
+  /** 入队时用户选定的模型（补发时沿用，避免联网后回落当前选择器）。 */
+  model?: string
   status: OfflineStatus
   created_at: number
   updated_at: number
@@ -76,11 +78,13 @@ export const offlineQueue = {
     client_msg_id: string
     message: string
     conversation_id?: number | null
+    model?: string
   }): Promise<QueuedMessage> {
     const item: QueuedMessage = {
       client_msg_id: msg.client_msg_id,
       message: msg.message,
       conversation_id: msg.conversation_id ?? null,
+      model: msg.model,
       status: 'pending',
       created_at: now(),
       updated_at: now(),

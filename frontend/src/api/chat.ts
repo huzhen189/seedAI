@@ -1,4 +1,5 @@
 import { notifyAuthRequired } from '../stores/auth'
+import type { ModelInfo } from '../types'
 import type { StreamEvent } from '../types/contracts.generated'
 
 export interface ChatRequest {
@@ -6,6 +7,13 @@ export interface ChatRequest {
   conversation_id: number
   message: string
   expected_conversation_version?: number
+  /** 前端模型选择器透传：用户指定的执行模型(qwen/deepseek/hy3)；省略则后端走默认链。 */
+  model?: string
+}
+
+/** 拉取后端已配置的可用模型列表（供前端模型选择器枚举）。 */
+export async function getModels(): Promise<ModelInfo[]> {
+  return requestJson('/api/models', { method: 'GET' }) as Promise<ModelInfo[]>
 }
 
 export type TurnControlAction = 'stop' | 'pause' | 'resume' | 'correct' | 'supplement' | 'discard'

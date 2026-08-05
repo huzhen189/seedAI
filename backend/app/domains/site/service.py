@@ -68,7 +68,7 @@ class SiteService:
         max_code = settings.site_react_max_rounds_code
         max_chat = settings.site_react_max_rounds_chat
 
-        html = await site_workflow.produce(spec)
+        html = await site_workflow.produce(spec, model=context.model)
         ok, reason = site_workflow.verify(html)
         round_no = 0
         chat_rounds = 0
@@ -77,7 +77,7 @@ class SiteService:
             round_no += 1
             logger.warning("[site] 第%d轮代码执行(produce/verify)未过 reason=%s,定向修复", round_no, last_reason)
             repair_spec = {**spec, "_repair_round": round_no, "_repair_reason": last_reason}
-            html = await site_workflow.produce(repair_spec)
+            html = await site_workflow.produce(repair_spec, model=context.model)
             ok, reason = site_workflow.verify(html)
             if ok:
                 break

@@ -6,7 +6,7 @@ import time
 from app.core.contracts import ResponseFragment, StageId
 from app.core.turn_context import TurnContext
 from app.config import settings
-from app.llm import LLMError, chat_completion_stream
+from app.llm import LLMError, get_llm_client
 
 logger = logging.getLogger("app.domains.chat")
 
@@ -120,8 +120,8 @@ class ChatService:
             think_buf = ""
             last_tok = 0.0
             last_think = 0.0
-            async for ev in chat_completion_stream(
-                messages, temperature=CHAT_TEMPERATURE, max_tokens=768, timeout=30.0, purpose="reply"
+            async for ev in get_llm_client().chat_stream_with(
+                context.model, messages, temperature=CHAT_TEMPERATURE, max_tokens=768, timeout=30.0, purpose="reply"
             ):
                 now = time.time()
                 if ev["kind"] == "think":

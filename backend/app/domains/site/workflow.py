@@ -336,7 +336,7 @@ class SiteWorkflow:
         return spec
 
     # ---------------------------------------------------------- Produce
-    async def produce(self, spec: dict) -> str:
+    async def produce(self, spec: dict, model: str | None = None) -> str:
         """按 SiteSpec 确定性生成一份 premium 质感的完整静态站点 HTML（§8.2 Produce）。
 
         纯函数(无副作用)，从 ``title/prompt/theme`` 推导 hero/feature/about 区块，
@@ -375,9 +375,11 @@ class SiteWorkflow:
 
         features = self._derive_features(sentences, sections, styles)
 
-        # ---- 优先用 LLM(hy3) 真实生成站点；失败/未启用则回落下方确定性模板 ----
-        if (not repair_round) and self._llm_codegen_enabled():
-            llm_html = await self._generate_with_llm(spec, title, features, safe_theme)
+        # ---- 优先用 LLM 真实生成站点；失败/未启用则回落下方确定性模板 ----
+        # 模型遵循前端选择器(model)；未指定或不可用则回落 settings.site_llm_codegen_provider（默认 hy3）。
+        codegen_model = model if (model and get_llm_client().has_provider(model)) else settings.site_llm_codegen_provider
+        if (not repair_round) and self._llm_codegen_enabled(codegen_model):
+            llm_html = await self._generate_with_llm(spec, title, features, safe_theme, provider=codegen_model)
             if llm_html:
                 ok, reason = self.verify(llm_html)
                 if ok:
@@ -584,29 +586,32 @@ footer.foot {{ border-top:1px solid var(--line); margin-top:40px; }}
         return html
 
     # ---------------------------------------------------------- LLM 代码生成(hy3)
-    def _llm_codegen_enabled(self) -> bool:
+    def _llm_codegen_enabled(self, model: str | None = None) -> bool:
         """是否走 LLM 真实生成：开关开启且目标 provider 已配置。
 
-        fail-soft：任何判断异常都视为不可用，回落模板。
+        ``model`` 为用户在前端选择的模型（已校验可用才采用），否则回落
+        ``settings.site_llm_codegen_provider``。fail-soft：任何判断异常都视为不可用，回落模板。
         """
         if not settings.site_llm_codegen:
             return False
+        provider = model if (model and get_llm_client().has_provider(model)) else settings.site_llm_codegen_provider
         try:
-            return get_llm_client().has_provider(settings.site_llm_codegen_provider)
+            return get_llm_client().has_provider(provider)
         except Exception:
             return False
 
     async def _generate_with_llm(
-        self, spec: dict, title: str, features: list[dict[str, str]], safe_theme: str
+        self, spec: dict, title: str, features: list[dict[str, str]], safe_theme: str, provider: str | None = None
     ) -> str | None:
-        """用 hy3 真实生成站点 HTML；任何失败返回 None（由调用方回落模板）。
+        """用指定模型真实生成站点 HTML；任何失败返回 None（由调用方回落模板）。
 
         不在此处抛异常——建站流水线绝不能因代码生成失败而中断。
         """
         try:
+            provider = provider or settings.site_llm_codegen_provider
             prompt = _build_codegen_prompt(spec, title, features, safe_theme)
             text = await get_llm_client().complete_with(
-                settings.site_llm_codegen_provider,
+                provider,
                 [
                     {"role": "system", "content": _CODEGEN_SYSTEM},
                     {"role": "user", "content": prompt},
