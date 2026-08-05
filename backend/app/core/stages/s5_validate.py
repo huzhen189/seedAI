@@ -9,6 +9,7 @@ from app.core.turn_context import TurnContext
 from app.domains.project import project_service
 from app.analytics import record_intent_decision
 from app.slots import SlotStack
+from app.db.repositories import sir_snapshots as sir_repo
 from .base import BaseStage
 
 # 建站类动作的「执行前硬闸门」：必填 ``site.*`` 槽位未收集齐，则挂起执行、先反问收集。
@@ -110,6 +111,31 @@ class S5ValidateStage(BaseStage):
                     (a.id for a in context.plan.action_items if a.domain.value == "site"),
                     None,
                 ) if context.plan else None
+                # 把待收集槽位写入 SIR pending，供下一轮 S2 识别「正在回答收集问题」并走 LLM 抽槽。
+                # 去重：若基态已带同名待收集项不重复追加（避免多轮 needs_info 累积重复）。
+                existing = {
+                    p.get("key") for p in context.sir_after_dst.pending
+                    if isinstance(p, dict)
+                }
+                for s in missing:
+                    if s.key not in existing:
+                        context.sir_after_dst.pending.append(
+                            {"key": s.key, "label": s.label, "prompt_hint": s.prompt_hint}
+                        )
+                        existing.add(s.key)
+                # 持久化 pending（新建/更新 SIR base 快照），使下一轮 S1 能加载到待收集清单。
+                try:
+                    snap = await sir_repo.insert(
+                        self.session,
+                        conversation_id=context.session.conversation_id,
+                        turn_id=context.turn_id,
+                        kind="base",
+                        snapshot=context.sir_after_dst.model_dump(),
+                        prev_snapshot_id=context.sir_after_dst_snapshot_id,
+                    )
+                    context.sir_after_dst_snapshot_id = snap.id
+                except Exception as exc:  # noqa: BLE001 — 持久化失败不得中断收集
+                    logger.warning("[S5] 持久化 pending 快照失败(非致命): %s", exc)
                 context.validation = ValidationResult(
                     status="needs_info",
                     reason_codes=["missing_required_slots"],

@@ -5,9 +5,12 @@ import time
 
 logger = logging.getLogger(__name__)
 
-from app.core.contracts import IntentCandidate, StageId, StageStatus
+from app.core.contracts import Domain, IntentCandidate, StageId, StageStatus
 from app.core.turn_context import TurnContext
-from app.router.intent import understand, escalate_if_needed, inherit_retro_domain, recompute_slots, record_intent_example
+from app.router.intent import (
+    understand, escalate_if_needed, inherit_retro_domain, recompute_slots,
+    record_intent_example, fill_await_slots,
+)
 from app.analytics import record_ai_intent, record_intent_result
 from .base import BaseStage
 
@@ -37,6 +40,34 @@ class S2UnderstandStage(BaseStage):
             # understand() 早于此步运行，对"无域触发词"的回溯轮会把 theme/sections 槽位
             # 整批丢弃，导致 S3 合并为零变更（不落快照、不改 spec）。见 recompute_slots。
             result = recompute_slots(context.clean_message, result)
+
+        # 续答抽槽：上一轮 S5 挂起收集（SIR pending 非空）时，本轮把待收集槽位当作答案，
+        # 用一次 LLM 解析用户自由文本回填 sir_delta——只补确定性抽取仍缺失的槽位。
+        # 这样「手绘的卡通像素风格，平台托管」类自由描述能真正补齐必填槽，避免反复追问死循环。
+        if context.sir_base.pending:
+            pending_defs = [
+                p for p in context.sir_base.pending
+                if isinstance(p, dict) and str(p.get("key", "")).startswith("site.")
+            ]
+            filled = set(result.sir_delta.slots.keys()) | set(context.sir_base.slots.keys())
+            remaining = [p for p in pending_defs if p.get("key") not in filled]
+            if remaining and any(r.domain == Domain.SITE for r in result.resolved_intents):
+                try:
+                    extra = await fill_await_slots(
+                        context.clean_message, remaining, context.sir_base.slots
+                    )
+                except Exception as exc:  # noqa: BLE001 — 抽槽失败不得中断主链路
+                    extra = {}
+                    logger.warning("[S2] 续答抽槽异常(忽略): %s", exc)
+                if extra:
+                    merged_slots = dict(result.sir_delta.slots)
+                    for k, v in extra.items():
+                        if k not in merged_slots:
+                            merged_slots[k] = v
+                    result = result.model_copy(update={
+                        "sir_delta": result.sir_delta.model_copy(update={"slots": merged_slots})
+                    })
+                    logger.info("[S2] 续答 LLM 抽槽补齐 slots=%s", extra)
 
         # context.understanding 持有完整多意图集合（resolved_intents 是真相）。
         context.understanding = result

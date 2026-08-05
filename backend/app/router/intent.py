@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 from .intent_config import (  # noqa: E402
     SITE_WORDS, RESEARCH_WORDS, PUBLISH_WORDS, PURGE_WORDS, RESTORE_WORDS,
     TRASH_WORDS, EDIT_WORDS, CREATE_WORDS, SOCIAL_WORDS,
-    _THEME_MAP, _SITE_TYPE_MAP, _SECTION_MAP, _STYLE_WORDS,
+    _THEME_MAP, _SITE_TYPE_MAP, _SECTION_MAP, _DEPLOY_MAP, _STYLE_WORDS,
 )
 from app.prompts import INTENT_ESCALATION_PROMPT as _ESCALATION_PROMPT  # 提示词集中于 app/prompts
 from app.config import settings
@@ -208,6 +208,12 @@ def _extract_slots(message: str, resolved: list[IntentItem]) -> SirDelta:
         if any(w in text for w in words):
             slots["site.type"] = canonical
             break
+    # 部署目标：此前完全没有抽取逻辑，导致「平台托管」这类回答永远填不上 deploy_target，
+    # 与 theme 一起成为 needs_info 死槽。补确定性映射（platform/custom/local），零 LLM 成本。
+    for words, canonical in _DEPLOY_MAP:
+        if any(w in text for w in words):
+            slots["site.deploy_target"] = canonical
+            break
     sections = [key for words, key in _SECTION_MAP if any(w in text for w in words)]
     if sections:
         slots["site.sections"] = sections
@@ -268,6 +274,96 @@ def recompute_slots(message: str, understanding: UnderstandingResult) -> Underst
         "sir_delta": _extract_slots(message, understanding.resolved_intents),
         "slot_stack": stack,
     })
+
+
+# ----------------------------------------------------------------- 续答 LLM 抽槽（待收集清单回填）
+# 触发条件：上一轮 S5 挂起收集（SIR pending 非空），且本轮确定性抽取仍缺失部分待收集槽位。
+# 把「用户本轮自由文本回答 + 待收集槽定义 + 已填信息」交给一次 LLM，产出结构化槽位值回填
+# sir_delta，使「手绘的卡通像素风格，平台托管」这类自由描述能真正补齐必填槽，避免反复追问。
+_FILL_SYSTEM = (
+    "你是建站需求收集助手。用户正在回答上一轮系统提出的问题（待收集槽位）。"
+    "请根据用户原话，把对应的待收集槽位填充为结构化值，只输出一个 JSON 对象。\n"
+    "规则：\n"
+    "1. 键为待收集槽位 key，值为填充结果；用户原话未提及的槽位不要输出。\n"
+    "2. site.deploy_target 必须是以下之一：platform（平台托管/线上托管）、"
+    "custom（自有域名/自定义域名）、local（本地预览/本地部署）。\n"
+    "3. site.theme（整体视觉风格，如简约/科技感/手绘卡通等）值为字符串，例如 \"手绘卡通像素风格\"。\n"
+    "4. site.name 为网站名称（简短，如 \"花间集\"）。\n"
+    "5. site.brief 为网站内容主题/主要目的（简短一句话）。\n"
+    "6. 不要编造未提及的信息，不要输出 JSON 以外的文本。"
+)
+
+
+def _coerce_fill_value(key: str, value: object) -> object | None:
+    """把 LLM 回填值归一化为合法 SIR 槽值；无法归一化返回 None（下一轮重新 ask）。"""
+    if value is None:
+        return None
+    if key == "site.deploy_target":
+        if value in ("platform", "custom", "local"):
+            return value
+        text = str(value).lower()
+        for words, canonical in _DEPLOY_MAP:
+            if any(w in text for w in words):
+                return canonical
+        return None
+    if key == "site.style":
+        if isinstance(value, list):
+            out = [str(x) for x in value if str(x).strip()]
+            return out or None
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return None
+    # site.theme / site.name / site.brief：接受非空字符串
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+async def fill_await_slots(
+    message: str, pending_defs: list[dict], base_slots: dict
+) -> dict:
+    """续答抽槽：把待收集槽位的自由文本回答解析为结构化 slot 值。
+
+    Args:
+        message: 用户本轮原话（回答）。
+        pending_defs: 上一轮 S5 写入 SIR 的待收集清单（每项含 key/label/prompt_hint）。
+        base_slots: 当前 SIR 基态已填槽位（供 LLM 参考、避免重复填充）。
+    Returns:
+        仅含「成功归一化」的 slot→value 字典（只含待收集 key，不发明无关槽）。
+    """
+    if not pending_defs:
+        return {}
+    pend_lines = "\n".join(
+        f"- {p.get('key')}：{p.get('label')}（{p.get('prompt_hint') or ''}）"
+        for p in pending_defs if isinstance(p, dict) and p.get("key")
+    )
+    if not pend_lines:
+        return {}
+    user_prompt = (
+        f"待收集槽位：\n{pend_lines}\n\n"
+        f"当前已填信息：{json.dumps(base_slots, ensure_ascii=False)}\n\n"
+        f"用户原话：{message}\n\n请填充上述待收集槽位，只输出 JSON。"
+    )
+    try:
+        text = await chat_completion(
+            [{"role": "system", "content": _FILL_SYSTEM},
+             {"role": "user", "content": user_prompt}],
+            temperature=0.1, max_tokens=512, timeout=30.0, purpose="fill",
+        )
+        data = _extract_json(text)
+        if not isinstance(data, dict):
+            return {}
+        out: dict[str, object] = {}
+        for k, v in data.items():
+            if not isinstance(k, str) or not k.startswith("site."):
+                continue
+            norm = _coerce_fill_value(k, v)
+            if norm is not None:
+                out[k] = norm
+        return out
+    except Exception as exc:  # LLMError / 解析失败 → 安全降级为空（不阻断主链路）
+        logger.warning("[intent] 续答抽槽 LLM 失败(降级为空): %s", exc)
+        return {}
 
 
 def understand(message: str) -> UnderstandingResult:

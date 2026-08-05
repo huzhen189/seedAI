@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "description": "S2 意图识别触发词表与槽位映射。改这里无需动 intent.py 代码（reload_intent_config() 热更新）。",
+  "trigger_words": {
+    "site": ["网站", "网页", "页面", "首页", "落地页", "官网", "组件", "导航", "平台", "系统", "站点", "商城", "门户", "小程序", "app", "门户站点", "门户网", "官网首页", "官网页面", "作品集", "博客", "landing", "web"],
+    "research": ["搜索", "研究", "调研", "查一下", "资料", "趋势", "查查", "搜一下"],
+    "publish": ["发布", "上线", "部署", "公开", "publish"],
+    "purge": ["彻底删除", "清空项目", "purge", "永久删除项目"],
+    "restore": ["恢复", "还原", "撤销删除", "restore", "找回"],
+    "trash": ["删除", "回收", "移除", "删掉", "删了"],
+    "edit": ["修改", "改成", "调整", "优化", "替换", "改", "加", "添加", "增加", "新增", "加上", "换个", "换掉", "更新", "升级", "去掉", "删除板块", "移动", "改成"],
+    "create": ["创建", "生成", "做一个", "搭建", "帮我做", "建一个", "造一个", "做一个", "帮我建", "给我做一个", "弄一个", "规划一个", "设计", "设计个", "搞一个"],
+    "social": ["你好", "您好", "hi", "hello", "在吗", "在么", "哈喽", "嗨", "早上好", "下午好", "晚上好", "辛苦了"]
+  },
+  "slot_maps": {
+    "theme": [
+      {"words": ["深色", "暗色", "黑色调", "dark", "暗黑"], "value": "dark"},
+      {"words": ["浅色", "亮色", "白色调", "light", "明亮"], "value": "light"},
+      {"words": ["跟随系统", "自动主题", "system"], "value": "system"}
+    ],
+    "site_type": [
+      {"words": ["作品集", "portfolio"], "value": "portfolio"},
+      {"words": ["博客", "blog"], "value": "blog"},
+      {"words": ["商城", "电商", "shop"], "value": "commerce"},
+      {"words": ["落地页", "landing"], "value": "landing"},
+      {"words": ["官网", "企业站", "门户"], "value": "corporate"},
+      {"words": ["个人网站", "个人主页"], "value": "personal"}
+    ],
+    "section": [
+      {"words": ["联系我", "联系方式", "contact"], "value": "contact"},
+      {"words": ["客户评价", "用户评价", "口碑", "testimonial"], "value": "testimonials"},
+      {"words": ["关于我", "关于我们", "about"], "value": "about"},
+      {"words": ["作品", "案例", "项目展示", "gallery"], "value": "gallery"},
+      {"words": ["价格", "定价", "套餐", "pricing"], "value": "pricing"},
+      {"words": ["博客", "文章", "资讯"], "value": "blog"},
+      {"words": ["团队", "成员"], "value": "team"},
+      {"words": ["常见问题", "faq"], "value": "faq"}
+    ],
+    "deploy_target": [
+      {"words": ["平台托管", "托管", "平台", "线上托管", "托管到平台", "平台部署"], "value": "platform"},
+      {"words": ["自有域名", "自定义域名", "自己的域名", "绑定域名", "独立域名"], "value": "custom"},
+      {"words": ["本地预览", "本地部署", "本地", "本地运行", "本地访问"], "value": "local"}
+    ]
+  },
+  "style_words": ["极简", "简约", "高级感", "科技感", "复古", "现代", "扁平", "拟物", "玻璃拟态", "渐变", "大气", "清新", "商务", "可爱", "杂志风"]
+}

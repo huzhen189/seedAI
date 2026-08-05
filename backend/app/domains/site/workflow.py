@@ -232,6 +232,9 @@ class SiteWorkflow:
         if isinstance(theme, str) and theme:
             spec["theme"] = theme
         spec.setdefault("theme", "system")
+        # 主题属性安全归一：data-theme 只认 system/light/dark（决定明暗与主题切换按钮）。
+        # 用户自由描述的风格（如「手绘卡通像素风格」）虽写进 spec.theme 供后续语义使用，
+        # 但无法直接映射为受控主题属性，回落 system 避免生成非法 data-theme 值（归一逻辑在 produce 内执行）。
 
         site_type = slots.get("site.type")
         if isinstance(site_type, str) and site_type:
@@ -280,6 +283,10 @@ class SiteWorkflow:
         # 修复轮：读取上轮校验原因，进入确定性修复模式（去 RAG 增强 + 末尾 sanitize）。
         repair_round = spec.get("_repair_round")
         theme = spec.get("theme", "system")
+        # 主题属性安全归一：data-theme 只认 system/light/dark，用户自由风格回落 system。
+        if not isinstance(theme, str):
+            theme = "system"
+        safe_theme = theme if theme in ("system", "light", "dark") else "system"
         # 内容源优先取 brief（DST 沉淀的站点主体），其次退回本轮 prompt。
         brief = str(spec.get("brief") or "") or prompt
         sentences = _sentences(brief)
@@ -324,7 +331,7 @@ class SiteWorkflow:
         accent_override = _accent_override(kb_hits)
 
         html = f"""<!doctype html>
-<html lang="zh-CN" data-theme="{_esc(theme)}">
+<html lang="zh-CN" data-theme="{_esc(safe_theme)}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">

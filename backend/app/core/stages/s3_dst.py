@@ -69,6 +69,16 @@ class S3DstStage(BaseStage):
             pending=[*base.pending, *delta.pending][-20:],
             memory_hints=[*base.memory_hints, *delta.memory_hints][-20:],
         )
+        # 待收集清单自清：被本轮填充的 slot 对应的 pending 项移除，
+        # 避免「已填槽仍挂起」导致下一轮 S5 又追问同一个已回答的槽。
+        if merged.pending and merged.slots:
+            filled_keys = set(merged.slots.keys())
+            kept = [
+                p for p in merged.pending
+                if not (isinstance(p, dict) and p.get("key") in filled_keys)
+            ]
+            if len(kept) != len(merged.pending):
+                merged = merged.model_copy(update={"pending": kept[-20:]})
         context.sir_after_dst = merged
 
         # A 方案 L3 动态槽持久化：把本轮识别出的 L3 动态业务槽沉淀为该用户/项目的持久偏好。
