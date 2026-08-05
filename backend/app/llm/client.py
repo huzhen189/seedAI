@@ -256,6 +256,80 @@ class LLMClient:
             return False
 
 
+    # ---------------------------------------------------------- 定向供应商(建站代码生成用 hy3)
+    def _config_for(self, name: str) -> "_Provider | None":
+        """解析指定供应商的配置；未配置返回 None。
+
+        与 ``_resolve_providers``（默认 qwen→deepseek 故障转移链）分离，
+        用于「明确指定某个 provider」的场景（如建站代码生成必须用 hy3）。
+        """
+        if name == "qwen" and settings.qwen_api_key:
+            return _Provider("qwen", settings.qwen_api_key, str(settings.qwen_base_url), settings.qwen_model)
+        if name == "deepseek" and settings.deepseek_api_key:
+            return _Provider("deepseek", settings.deepseek_api_key, str(settings.deepseek_base_url), settings.deepseek_model)
+        if name == "hy3" and (settings.hy3_api_key or settings.hy3_api_key_demo):
+            return _Provider("hy3", settings.hy3_api_key or settings.hy3_api_key_demo,
+                             str(settings.hy3_base_url), settings.hy3_model)
+        return None
+
+    def has_provider(self, name: str) -> bool:
+        """指定供应商是否已配置（供调用方在不发请求的前提下判断可用性）。"""
+        return self._config_for(name) is not None
+
+    async def complete_with(
+        self,
+        provider_name: str,
+        messages: Sequence[dict],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        timeout: float = 30.0,
+        purpose: str | None = None,
+    ) -> str:
+        """定向调用指定供应商（不经过 qwen→deepseek 故障转移链）。
+
+        用于「必须用某个 provider」的场景（例如建站代码生成固定走 hy3）。
+        仍受该 provider 的熔断器约束；失败抛 ``LLMError`` 由上层降级。
+        """
+        prov = self._config_for(provider_name)
+        if prov is None:
+            raise LLMError(f"未配置模型供应商 {provider_name}")
+        breaker = get_breaker(prov.name)
+        if not breaker.allow():
+            raise LLMError(f"模型供应商 {provider_name} 已熔断，暂时拒绝调用")
+        t0 = time.time()
+        try:
+            client = self._client_for(prov)
+            logger.info(
+                "[LLM→](定向) provider=%s model=%s temp=%s max_tokens=%s\n[LLM prompt]\n%s",
+                prov.name, prov.model, temperature, max_tokens, _fmt_messages(messages),
+            )
+            resp = await client.chat.completions.create(
+                model=prov.model,
+                messages=list(messages),
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+            content = resp.choices[0].message.content if resp.choices else None
+            if not content:
+                raise LLMError(f"{prov.name} 返回空内容")
+            breaker.record_success()
+            elapsed = (time.time() - t0) * 1000
+            tok_in = getattr(getattr(resp, "usage", None), "prompt_tokens", 0) or 0
+            tok_out = getattr(getattr(resp, "usage", None), "completion_tokens", 0) or 0
+            await record_ai_llm(model=prov.name, ok=True, duration_ms=elapsed,
+                                tokens_in=int(tok_in or 0), tokens_out=int(tok_out or 0), purpose=purpose)
+            await record_model_detail(prov.name, success=True)
+            return content.strip()
+        except Exception as exc:
+            breaker.record_failure()
+            elapsed = (time.time() - t0) * 1000
+            await record_ai_llm(model=prov.name, ok=False, duration_ms=elapsed, error_type=type(exc).__name__, purpose=purpose)
+            await record_model_detail(prov.name, success=False)
+            logger.warning("LLM(定向) 调用 %s 失败: %s", prov.name, exc)
+            raise LLMError(f"模型供应商 {provider_name} 调用失败: {exc}")
+
 _client: Optional[LLMClient] = None
 
 

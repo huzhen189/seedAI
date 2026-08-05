@@ -282,6 +282,12 @@ class Settings(BaseSettings):
     hy3_api_key_demo: str = ""
     hy3_base_url: str = "https://tokenhub.tencentmaas.com/v1"
     hy3_model: str = "hy3"
+    # 建站代码生成：是否用 LLM（默认 hy3）真实生成站点，而非确定性 premium 模板。
+    # 关闭、或目标 provider 不可用时自动回落确定性模板，绝不阻断建站流水线。
+    site_llm_codegen: bool = True
+    site_llm_codegen_provider: str = "hy3"
+    site_llm_codegen_max_tokens: int = Field(default=6000, ge=256, le=16000)
+    site_llm_codegen_timeout: float = Field(default=90.0, ge=10.0)
     default_model: Literal["standard", "pro", "ultra"] = "standard"
 
     chat_recent_redis_ttl: int = Field(default=1800, ge=60)

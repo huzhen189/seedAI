@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.turn_context import TurnContext
+from app.llm.client import get_llm_client
 from app.models import Artifact, Project
 from app.ragstore import retrieve as _rag_retrieve, safe_upsert_bg as _rag_upsert_bg
 
@@ -134,6 +135,77 @@ def _sanitize_html(html: str) -> str:
     if "</html>" not in out.lower():
         out = out.rstrip() + "\n</html>"
     return out
+
+
+# ----------------------------------------------------------------- hy3 代码生成（真实站点生成路径）
+_CODEGEN_SYSTEM = (
+    "你是资深前端工程师，擅长用纯 HTML + 内联 CSS + 内联 JS 产出自包含、premium 质感的响应式网站。"
+    "你只输出完整 HTML 文档，绝不输出任何解释文字或 Markdown 代码围栏之外的字符。"
+)
+
+
+def _build_codegen_prompt(spec: dict, title: str, features: list[dict[str, str]], safe_theme: str) -> str:
+    """把 SiteSpec 编译成给 hy3 的代码生成 prompt。
+
+    关键点：用户自由描述的视觉风格（如「手绘卡通像素风格」）要**真实落实**到视觉，
+    而不是套通用模板；并强制自包含（无外部 CDN）、三态主题切换、玻璃拟态、响应式。
+    """
+    theme_raw = spec.get("theme") or "系统默认"
+    site_type = spec.get("site_type") or "通用网站"
+    brief = str(spec.get("brief") or spec.get("prompt") or "")
+    sections = spec.get("sections") or []
+    styles = spec.get("styles") or []
+    feat_lines = "\n".join(f"- {f['title']}：{f['desc']}" for f in features) or "（无）"
+    section_lines = "、".join(sections) if sections else "（由你自行决定合适的板块）"
+    style_lines = "、".join(styles) if styles else "（自由发挥，保持 premium 质感）"
+    return f"""请为一个名为《{title}》的网站生成**单一、自包含**的 HTML 文件。
+
+# 需求
+- 站点类型：{site_type}
+- 用户描述的视觉风格：{theme_raw}（请**真实落实**这一风格——例如「手绘卡通像素风格」就要做出像素化/手绘插画感，而不是套用通用模板）
+- 站点简介：{brief}
+- 必须包含的板块：{section_lines}
+- 风格补充：{style_lines}
+- 默认主题模式：{safe_theme}
+
+# 核心能力卡片（请体现在页面中）
+{feat_lines}
+
+# 硬性约束（务必遵守）
+1. 只输出一个完整的 HTML 文档，以 `<!doctype html>` 开头、以 `</html>` 结尾；不要任何解释文字、不要 Markdown 代码围栏。
+2. **完全自包含**：所有 CSS 写进 `<style>`，所有 JS 写进 `<script>`；禁止任何外部 CDN、外链字体、外链图片、`<link>` 标签、`<script src=...>`。
+3. 必须支持**暗/亮/跟随系统**三态主题切换（用 `data-theme` 属性 + 一个切换按钮，localStorage 记忆）。
+4. 玻璃拟态（glassmorphism）质感、响应式布局、滚动渐显动画；中文文案。
+5. 结构建议：导航栏 + Hero + 核心能力卡片 + 关于 + 页脚。
+6. 不依赖任何构建工具，浏览器直接打开即可运行。
+"""
+
+
+def _extract_html(text: str) -> str:
+    """从模型输出中抽取纯 HTML 文档：去掉 ``` 围栏，截取 <!doctype>..</html> 区间。"""
+    if not text:
+        return ""
+    cleaned = re.sub(r"^```(?:html)?\s*", "", text.strip(), flags=re.I)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    m = re.search(r"<!doctype\s+html.*?</html>", cleaned, re.I | re.S)
+    if m:
+        return m.group(0).strip()
+    m2 = re.search(r"<html.*?</html>", cleaned, re.I | re.S)
+    if m2:
+        return m2.group(0).strip()
+    return cleaned.strip()
+
+
+def _sanitize_llm_html(html: str) -> str:
+    """LLM 产物的自包含净化：移除外部样式/脚本引用，再复用确定性危险 token 净化。
+
+    保证产物不向外部发起请求（§11.3 隔离），并兜底 doctype/html 结构完整。
+    """
+    # 外部样式表 / 外链脚本一律移除（我们的确定性路径全内联，这里防御模型引入外链）。
+    html = re.sub(r"<link\b[^>]*>", "", html, flags=re.I)
+    html = re.sub(r"<script\b[^>]*\bsrc=[\"'][^\"']*[\"'][^>]*>\s*</script>", "", html, flags=re.I)
+    # 复用确定性净化（危险 token + 结构兜底）。
+    return _sanitize_html(html)
 
 
 # ----------------------------------------------------------------- RAG 增强辅助
@@ -302,6 +374,19 @@ class SiteWorkflow:
         about_text = _esc(about_source) if about_source else _esc("这是一个由 SeedAI 通过对话生成的站点。")
 
         features = self._derive_features(sentences, sections, styles)
+
+        # ---- 优先用 LLM(hy3) 真实生成站点；失败/未启用则回落下方确定性模板 ----
+        if (not repair_round) and self._llm_codegen_enabled():
+            llm_html = await self._generate_with_llm(spec, title, features, safe_theme)
+            if llm_html:
+                ok, reason = self.verify(llm_html)
+                if ok:
+                    logger.info("[produce] hy3 代码生成成功 %d bytes", len(llm_html.encode("utf-8")))
+                    return llm_html
+                logger.warning("[produce] hy3 产物校验未过 reason=%s, 回落模板", reason)
+            else:
+                logger.warning("[produce] hy3 代码生成为空/异常, 回落模板")
+
         feature_cards = "\n".join(
             f"""        <article class="card glass reveal">
           <div class="card-dot"></div>
@@ -497,6 +582,47 @@ footer.foot {{ border-top:1px solid var(--line); margin-top:40px; }}
         logger.info("[produce] 已生成站点 HTML: %d bytes, features=%d, rag_components=%d",
                     len(html.encode("utf-8")), len(features), len(comp_hits))
         return html
+
+    # ---------------------------------------------------------- LLM 代码生成(hy3)
+    def _llm_codegen_enabled(self) -> bool:
+        """是否走 LLM 真实生成：开关开启且目标 provider 已配置。
+
+        fail-soft：任何判断异常都视为不可用，回落模板。
+        """
+        if not settings.site_llm_codegen:
+            return False
+        try:
+            return get_llm_client().has_provider(settings.site_llm_codegen_provider)
+        except Exception:
+            return False
+
+    async def _generate_with_llm(
+        self, spec: dict, title: str, features: list[dict[str, str]], safe_theme: str
+    ) -> str | None:
+        """用 hy3 真实生成站点 HTML；任何失败返回 None（由调用方回落模板）。
+
+        不在此处抛异常——建站流水线绝不能因代码生成失败而中断。
+        """
+        try:
+            prompt = _build_codegen_prompt(spec, title, features, safe_theme)
+            text = await get_llm_client().complete_with(
+                settings.site_llm_codegen_provider,
+                [
+                    {"role": "system", "content": _CODEGEN_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.85,
+                max_tokens=settings.site_llm_codegen_max_tokens,
+                timeout=settings.site_llm_codegen_timeout,
+                purpose="site_codegen",
+            )
+            html = _extract_html(text)
+            if not html:
+                return None
+            return _sanitize_llm_html(html)
+        except Exception as exc:  # 任何失败都回落模板，绝不阻断流水线
+            logger.warning("[produce] hy3 代码生成异常: %s", exc)
+            return None
 
     @staticmethod
     def _derive_features(

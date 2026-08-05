@@ -259,6 +259,8 @@ const streamHandlers = {
       stopping.value = false
       clearResumeRef()
       void reconcileTerminal()
+      // 建站/改站完成后自动刷新产物列表，让右侧预览立即显示新生成的网站（无需手动刷新页面）。
+      void loadArtifacts()
     } else if (event.type === 'suspended') {
       generating.value = false
       stopping.value = false
