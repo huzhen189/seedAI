@@ -129,9 +129,13 @@ class ChatService:
             think_buf = ""
             last_tok = 0.0
             last_think = 0.0
-            # 防重写：当模型进入 think→token→think→token 模式（先给一版草稿，
-            # 再思考优化后重写），用 retract 事件通知前端清空草稿文本，
-            # 然后仅展示最终版。think 事件仍实时推流（用户可见推理过程）。
+            # 防重写（最终结论替换前面结论，前后端一致）：模型某些流式端点会「先给一版草稿正文，
+            # 再进入 think 思考、随后吐出重写后的正文」(think→token→think→token)。
+            # 规则：一旦在**已经产出过 token** 之后又出现 think，就判定为「正在进行重写」——
+            #   ① 前端：发 retract 事件清空已展示的草稿气泡（保留 think 推理流，用户可见完整过程）；
+            #   ② 后端：把 text_parts 整个丢弃（前面那版结论不再进入落库正文）。
+            # 这样无论前端实时渲染、还是 S8→finalize 落库 assistant Message，都只保留**最终版**
+            # 结论，杜绝「两段相近文案」既出现在界面、又落进数据库的历史问题 (§用户反馈 2026-08-06)。
             in_rethink = False
             async for ev in get_llm_client().chat_stream_with(
                 context.model, messages, temperature=CHAT_TEMPERATURE, max_tokens=768, timeout=30.0, purpose="reply"
@@ -140,12 +144,13 @@ class ChatService:
                 if ev["kind"] == "think":
                     think_buf += ev["text"]
                     think_parts.append(ev["text"])
-                    # 已在产出 token 后又进入 think → 模型正在重写回复
-                    if tok_buf or text_parts:
+                    # 已在产出 token 后又进入 think → 模型正在重写回复：丢弃前面那版正文。
+                    if text_parts or tok_buf:
                         if not in_rethink:
                             in_rethink = True
-                            # 通知前端清空已展示的草稿文本
+                            # 通知前端清空已展示的草稿文本（think 推理流不受影响）。
                             await context.emit("retract", {})
+                        # 丢弃前面那版结论（草稿），后续 token 作为最终版从头累积。
                         text_parts = []
                         tok_buf = ""
                         last_tok = 0.0
@@ -166,7 +171,16 @@ class ChatService:
             if think_buf:
                 await context.emit("think", {"text": think_buf})
 
+            # 安全网：若流结束在「重写中间态」（in_rethink 但整轮没再给最终 token），
+            # 落库正文必须丢弃空壳——前面那版结论已被我们显式抛弃，此时不应回退成半截草稿，
+            # 而是回落到降级文案，保证用户永远拿到一个完整、权威的最终回复 (前后端一致)。
             full = "".join(text_parts).strip()
+            if not full:
+                if in_rethink:
+                    logger.warning("[chat] 模型重写后未给出最终正文, 落库降级为兜底文案 turn=%s", context.turn_id)
+                    full = _graceful_fallback(user_text)
+                elif not text_parts and not tok_buf:
+                    full = ""  # 模型本就空输出：等 S8/LLMError 各自兜底，不强行塞文案
             if full:
                 context.response_fragments.append(
                     ResponseFragment(status="success", text=full, producer_stage=StageId.S6)

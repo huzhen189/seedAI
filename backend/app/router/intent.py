@@ -688,6 +688,13 @@ def classify(message: str, understanding: UnderstandingResult, prior_turn_id: st
     使 S6 锁定原 project 做受控 edit（而非另起新站）。
     """
     items = understanding.resolved_intents[:_MAX_ACTION_ITEMS]
+    # 前置折叠：纯闲聊轮（全 CHAT 兜底，无任何非 CHAT 域）若被标点/连词切成多段，
+    # 会在下游每段各触发一次 chat_service.respond → 多个 ResponseFragment →
+    # S8 拼出「两段相近结论」脏正文落库——这正是用户反馈「两段文案」的根因之一。
+    # 这里在生成 action 之前就把多段 CHAT 收束为单个 item（携带合并整句），
+    # 保证每轮闲聊只产出一个权威结论，DB 与前端一致。
+    # 含任一非 CHAT 域（建站/研究/项目）时原样返回，不折叠，避免吞掉真实动作。
+    items = _collapse_chat_only(items)
     bundle_items: list[IntentItem] = []
     actions: list[ActionItem] = []
     max_risk = RiskLevel.LOW
@@ -729,3 +736,25 @@ def classify(message: str, understanding: UnderstandingResult, prior_turn_id: st
         has_gated=has_gated,
     )
     return bundle, plan
+
+
+def _collapse_chat_only(items: list[IntentItem]) -> list[IntentItem]:
+    """把纯闲聊轮的多段 CHAT 意图收束为单个 item（携带合并整句）。
+
+    仅当「全部为 CHAT 兜底且不可执行」时折叠；存在任一非 CHAT 域（建站/研究/项目）
+    时原样返回，不折叠（避免吞掉复合句里的真实动作）。
+
+    返回收束后的 items：折叠成功时只有 1 个 item（arguments.message = 多段 raw_segment
+    用「。」拼回整句语义），供上层 classify 主循环据此只生成**单个** action。
+    """
+    if not items:
+        return items
+    if any(it.domain != Domain.CHAT for it in items):
+        return items
+    # 多段 CHAT 合并为单个 item，保留首段身份（id/intent_id/域/可执行属性），
+    # 但把 arguments.message 重写为多段合并，让 chat_service 看到完整用户意图，
+    # 而不是只处理第一截 → 每轮闲聊只产出一个权威结论（DB 与前端一致）。
+    first = items[0]
+    merged_message = "。".join(it.raw_segment for it in items if it.raw_segment) or first.raw_segment or ""
+    kept = first.model_copy(update={"arguments": {"message": merged_message}})
+    return [kept]
