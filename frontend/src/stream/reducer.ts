@@ -176,6 +176,11 @@ function applyEvent(state: StreamUiState, event: StreamEvent): void {
     case 'token':
       state.response += textFrom(event.data)
       break
+    case 'retract':
+      // 模型重写：think→token→think→token 模式中，后端发 retract 通知清空草稿，
+      // 后续 token 从头累积（最终版）。think 事件不受影响，照常展示推理过程。
+      state.response = ''
+      break
     case 'think':
       state.thinking += textFrom(event.data)
       break

@@ -62,7 +62,7 @@ from app.core.governance import action_requires_approval  # noqa: E402
 
 
 # 分段标点（直接切断）。
-_SEG_PUNCT_RE = re.compile(r"[？?！!。．\.\n;；]+")
+_SEG_PUNCT_RE = re.compile(r"[！!。．\\.\n;；]+")
 # 分句连词：在其「之前」切断（连词本身作为前段残片被丢弃，后段成为独立子句）。
 # 注意：把「再 / 然后 / 之后」等时序连词放在这里，才能正确地把
 # 「删掉旧站，再新建博客」拆成「删掉旧站」+「新建博客」两段，避免后段被吞。

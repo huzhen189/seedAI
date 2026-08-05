@@ -129,6 +129,10 @@ class ChatService:
             think_buf = ""
             last_tok = 0.0
             last_think = 0.0
+            # 防重写：当模型进入 think→token→think→token 模式（先给一版草稿，
+            # 再思考优化后重写），用 retract 事件通知前端清空草稿文本，
+            # 然后仅展示最终版。think 事件仍实时推流（用户可见推理过程）。
+            in_rethink = False
             async for ev in get_llm_client().chat_stream_with(
                 context.model, messages, temperature=CHAT_TEMPERATURE, max_tokens=768, timeout=30.0, purpose="reply"
             ):
@@ -136,6 +140,15 @@ class ChatService:
                 if ev["kind"] == "think":
                     think_buf += ev["text"]
                     think_parts.append(ev["text"])
+                    # 已在产出 token 后又进入 think → 模型正在重写回复
+                    if tok_buf or text_parts:
+                        if not in_rethink:
+                            in_rethink = True
+                            # 通知前端清空已展示的草稿文本
+                            await context.emit("retract", {})
+                        text_parts = []
+                        tok_buf = ""
+                        last_tok = 0.0
                     if now - last_think >= _EMIT_INTERVAL_S and think_buf:
                         await context.emit("think", {"text": think_buf})
                         think_buf = ""
