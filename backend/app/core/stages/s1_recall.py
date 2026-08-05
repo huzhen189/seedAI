@@ -121,12 +121,16 @@ class S1RecallStage(BaseStage):
             logger.warning("[S1] L2 强事实加载失败(忽略): %s", exc, exc_info=True)
 
         # 4) L5 向量语义召回 + 软偏好 rerank
+        #    **每次都执行，不再受 ``hit`` 门控**：``hit`` 仅表示「存在 SIR 快照/回溯
+        #    上下文」，与「是否应基于 clean_message 召回历史记忆」无关。旧逻辑在会话首条
+        #    消息（尚无 SIR 快照）时 ``hit=False`` 直接跳过向量召回，导致记忆召回形同虚设
+        #    （如重置后首条「Air Jordan」整轮未执行召回）。现改为无条件执行；空消息/空库
+        #    自然无命中，由召回函数自身 early-return。
         vector_refs: list[str] = []
-        if hit:
-            try:
-                vector_refs = await self._load_memory_recall(context)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[S1] 向量语义召回失败(忽略): %s", exc, exc_info=True)
+        try:
+            vector_refs = await self._load_memory_recall(context)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[S1] 向量语义召回失败(忽略): %s", exc, exc_info=True)
 
         # 5) 用户偏好（旧 user_preferences 集合，保留兼容；重置后通常为空）
         user_refs: list[str] = []
@@ -189,7 +193,10 @@ class S1RecallStage(BaseStage):
             context.user_context.append(
                 "【强事实·用户偏好(零容错，不可被语义召回覆盖)】\n" + "\n".join(lines)
             )
-            logger.info("[S1] L2 用户强事实 %d 条", len(facts))
+            logger.info(
+                "[S1] L2 用户强事实 %d 条 标题=%s",
+                len(facts), [f"{f.category}/{f.key_name}" for f in facts],
+            )
         project_id = int(context.session.project_id) if context.session.project_id else None
         if project_id is not None:
             pf = await project_fact_repo.list_for_project(self.session, project_id)
@@ -198,7 +205,10 @@ class S1RecallStage(BaseStage):
                 context.user_context.append(
                     "【强事实·项目事实(零容错，不可被语义召回覆盖)】\n" + "\n".join(lines)
                 )
-                logger.info("[S1] L2 项目强事实 %d 条", len(pf))
+                logger.info(
+                    "[S1] L2 项目强事实 %d 条 标题=%s",
+                    len(pf), [f"{f.category}/{f.key_name}" for f in pf],
+                )
 
     # ── L5 向量语义召回 + 软偏好 rerank（命中回 MySQL 取正文） ──────────────────
     async def _load_memory_recall(self, context: TurnContext) -> list[str]:
@@ -280,7 +290,10 @@ class S1RecallStage(BaseStage):
         for text, _kind in backfilled:
             context.project_context.append(f"[记忆召回] {text}")
 
-        logger.info("[S1] 向量语义召回 %d 条（已回MySQL+rerank）", len(backfilled))
+        logger.info(
+            "[S1] 向量语义召回执行 query=%r top_k=%d -> %d 条（已回MySQL+rerank）",
+            query[:80], settings.memory_recall_top_k, len(backfilled),
+        )
         return refs
 
     async def _load_user_preferences(self, context: TurnContext) -> list[str]:

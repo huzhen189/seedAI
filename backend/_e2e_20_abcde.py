@@ -287,7 +287,7 @@ def main():
         log("  登录失败, 尝试注册")
         r = s.post(f"{BASE}/auth/register", json={
             "account": USERNAME, "password": TMP_PW,
-            "nickname": "e2e20", "email": f"{USERNAME}@test.com",
+            "display_name": "e2e20", "email": f"{USERNAME}@test.com",
         })
         if r.status_code not in (200, 201):
             log("!! 注册失败", r.status_code, r.text[:300])

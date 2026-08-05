@@ -1,4 +1,7 @@
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.core.contracts import StageId, StageStatus
 from app.core.turn_context import TurnContext

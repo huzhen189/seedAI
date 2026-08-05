@@ -121,7 +121,7 @@ class ChatService:
             last_tok = 0.0
             last_think = 0.0
             async for ev in chat_completion_stream(
-                messages, temperature=CHAT_TEMPERATURE, max_tokens=768, timeout=30.0
+                messages, temperature=CHAT_TEMPERATURE, max_tokens=768, timeout=30.0, purpose="reply"
             ):
                 now = time.time()
                 if ev["kind"] == "think":

@@ -36,7 +36,9 @@ def test_no_invariants_violated():
 
 def test_l0_required_exactly_four():
     keys = {d.key for d in L0_REQUIRED}
-    assert keys == {"site_name", "style", "primary_goal", "deploy_target"}, keys
+    # 必填 key 已对齐到 site.* SIR 命名空间（与 build_spec 消费的 SIR 键一致），
+    # 否则"信息收集"硬闸门永远失效（旧裸 key 与 site.* 对不上）。
+    assert keys == {"site.name", "site.theme", "site.brief", "site.deploy_target"}, keys
 
 
 def test_l0_excludes_contact_as_universal():
@@ -67,12 +69,12 @@ def test_compose_restaurant_official_site_union_buckets():
     stack = compose("餐饮", ["corporate"])
     keys = {s.key for s in stack.slots}
     # L0 必填齐全
-    assert {"site_name", "style", "primary_goal", "deploy_target"} <= keys
+    assert {"site.name", "site.theme", "site.brief", "site.deploy_target"} <= keys
     # 行业桶(ecommerce_service) 与 类型桶(content_showcase) 的可选槽都应出现（并集）
     assert "payment_methods" in keys          # 来自 ecommerce_service
     assert "showcase_sections" in keys        # 来自 content_showcase
     # 必填仍只有 L0
-    assert {s.key for s in stack.required} == {"site_name", "style", "primary_goal", "deploy_target"}
+    assert {s.key for s in stack.required} == {"site.name", "site.theme", "site.brief", "site.deploy_target"}
 
 
 def test_compose_multi_type_union():
@@ -99,8 +101,8 @@ def test_guidance_reports_missing_required():
     stack = compose("餐饮", ["corporate"])
     g = stack.guidance(filled=set())  # 啥都没填
     assert set(g["missing_required"]) == {"网站名称", "样式风格", "内容主题 / 主要目的", "部署目标"}
-    # 已填 site_name 后不再提示
-    g2 = stack.guidance(filled={"site_name"})
+    # 已填 site.name 后不再提示
+    g2 = stack.guidance(filled={"site.name"})
     assert "网站名称" not in g2["missing_required"]
 
 
@@ -137,7 +139,7 @@ def test_compose_includes_dynamic_slots():
     keys = {s.key for s in stack.slots}
     assert "dyn_membership_tiers" in keys
     # 动态槽进入栈后，仍需保留 L0 必填（不被覆盖）
-    assert {"site_name", "style", "primary_goal", "deploy_target"} <= keys
+    assert {"site.name", "site.theme", "site.brief", "site.deploy_target"} <= keys
 
 
 def test_dynamic_triggers_mapped():

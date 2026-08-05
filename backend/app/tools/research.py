@@ -12,6 +12,8 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.contracts import Domain, ErrorEnvelope, RiskLevel
+from app.config import settings
+from app.ragstore import retrieve as _rag_retrieve, format_hits_for_prompt as _fmt_hits
 from app.tools._registry import ToolMeta
 from app.tools.base import BaseTool, ToolContext, ToolResult
 
@@ -82,14 +84,18 @@ class RagQueryTool(BaseTool):
                   session: AsyncSession | None = None) -> ToolResult:
         """Chroma 作用域隔离检索(§8.3 rag_query, low)。
 
-        本环境 memory 层未初始化、无可达向量集合,返回 failed(不静默)。
-        投产时按 collection 做 scope 隔离检索,防止跨租户召回。
+        按 collection 做语义检索；无匹配不静默成功，返回明确 failed。
         """
-        logger.debug("[rag_query] collection=%s query=%s (memory 未初始化)", collection, query[:80])
-        return ToolResult.fail(ErrorEnvelope(
-            code=_UNAVAILABLE, category="memory",
-            what="rag_query 暂无可检索的向量集合", why="memory 层未初始化",
-            next="待知识库就绪后可用", retryable=False, retry_scope="none"))
+        hits = await _rag_retrieve(collection, query, top_k=settings.rag_top_k)
+        if not hits:
+            logger.debug("[rag_query] collection=%s query=%s 无匹配", collection, query[:80])
+            return ToolResult.fail(ErrorEnvelope(
+                code="no_match", category="memory",
+                what=f"rag_query 在集合 {collection} 无相关结果", why="向量库无匹配",
+                next="尝试调整查询或补充知识库", retryable=False, retry_scope="none"))
+        text = _fmt_hits(hits, label=collection)
+        logger.info("[rag_query] collection=%s 命中 %d 条", collection, len(hits))
+        return ToolResult.ok(data={"text": text, "hits": len(hits)})
 
 
 class BrowserCaptureTool(BaseTool):

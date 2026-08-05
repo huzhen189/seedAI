@@ -1,4 +1,7 @@
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.core.contracts import ArchiveResult, StageId, StageStatus
 from app.core.turn_context import TurnContext
@@ -18,7 +21,8 @@ class S9ArchiveStage(BaseStage):
 
     async def run(self, context: TurnContext):
         if self.session is None:
-            raise RuntimeError("S9 requires a database session")
+            logger.error("[S9] 缺少数据库会话,无法终态收口 turn=%s", context.turn_id)
+            return self.result(StageStatus.FAILED, "no_session")
         logger.debug("[S9] 终态收口 turn=%s", context.turn_id)
         status = await finalize_service.finalize(self.session, context)
         context.archive_result = ArchiveResult(status="finalized" if status in {"completed", "blocked"} else "attempt_archived")

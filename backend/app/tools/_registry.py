@@ -21,9 +21,16 @@ import logging
 logger = logging.getLogger("app.tools.registry")
 
 
-@dataclass
+@dataclass(frozen=True)
 class ToolMeta:
-    """单个原子工具的静态契约（启动后不可变）。
+    """单个原子工具的静态契约（**冻结 dataclass，运行期真不可变**）。
+
+    ⚠️ 为什么必须 ``frozen=True``：``meta`` 是各 Tool 类的**类属性**，
+    ``registry.build()`` 每次 new 出来的实例共享同一个 ToolMeta 对象。
+    只要有一处写了 ``tool.meta.timeout_seconds = 5``，就会全局污染所有调用方
+    （包括 ``call_tool`` 的超时/重试/审批判定）。此前只在 docstring 里写了
+    「启动后不可变」但无任何约束，现由 dataclass 在赋值时直接抛
+    ``FrozenInstanceError``，把约定升级成硬保证。
 
     §9.2 末段要求 ToolRegistry 必须声明全部 profile,这里用 dataclass 字段承载：
       - 基础身份: tool_id / risk / domain / description；

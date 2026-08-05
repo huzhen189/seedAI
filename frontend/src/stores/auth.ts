@@ -8,9 +8,18 @@ export const useAuthStore = defineStore('auth', () => {
   // 全局登录弹窗开关:任意请求遇到 401 / "Missing authentication" 时置 true,
   // 主动弹出登录框(文档 §2.1 / 前端鉴权约定)。
   const loginOpen = ref(false)
+  // init 幂等锁:首屏与路由守卫都会触发, 仅真正跑一次 fetchMe, 避免重复请求。
+  let initialized = false
 
   async function init() {
-    user.value = await authApi.fetchMe()
+    // 已在 App.vue 提前 init 过则直接复用, 不重复发请求。
+    if (initialized) return
+    initialized = true
+    try {
+      user.value = await authApi.fetchMe()
+    } catch {
+      user.value = null
+    }
   }
   async function login(account: string, password: string): Promise<AuthUser> {
     const u = await authApi.login(account, password)
@@ -22,23 +31,32 @@ export const useAuthStore = defineStore('auth', () => {
     account: string,
     password: string,
     email?: string,
-    nickname?: string,
+    displayName?: string,
   ): Promise<AuthUser> {
-    const u = await authApi.register(account, password, email, nickname)
+    const u = await authApi.register(account, password, email, displayName)
     user.value = u
     loginOpen.value = false
     return u
   }
   async function logout() {
-    // 软登出: 不再整页刷新(2026-07-29)。
-    // 整页刷新会触发「导航抢在清 Cookie 的 Set-Cookie 落盘前」的竞态,
-    // 部分浏览器下清 Cookie 被丢弃,刷新后 /auth/me 仍带旧 Cookie → 退出无效(又自动登录)。
-    // 改为直接清空客户端鉴权态并弹登录遮罩: 无论后端 Cookie 是否真正清掉,
-    // 页面都不可能自动登录; 全屏 .auth-mask 遮罩覆盖旧账号页面,达到同样效果。
-    // SSE 关闭与业务 store 重置由 ChatView 监听 auth.user=null 处理。
-    authApi.logout().catch(() => {}) // 尽力让后端清 Cookie,不阻塞前端清理
+    // 退出即整页刷新: 先等后端清 Cookie 的 Set-Cookie 真正落盘(await 响应体),
+    // 再 reload —— 避免早期「reload 抢在清 Cookie 前」导致退出无效的竞态。
+    // 刷新后 App 重新 init → fetchMe 返回 null → 登录态彻底清空,
+    // 旧账号的项目/会话/对话缓存一并被 Vue 重新挂载清除,切换账号不会串数据。
+    try {
+      await authApi.logout() // 内部已 await 响应体, 确保浏览器处理完清 Cookie
+    } catch {
+      /* 网络失败也继续刷新, 让登录遮罩接管 */
+    }
     user.value = null
+    // 清理前端本地缓存(SSE 断流、会话 resume 等), 避免旧账号数据泄露到新登录态。
+    try {
+      sessionStorage.removeItem('seedai:stream-resume')
+      sessionStorage.removeItem('seedai:preview-ratio')
+    } catch { /* ignore */ }
     loginOpen.value = true
+    // 关键: 等上面的清理落定后再整页刷新, 用户看到的是干干净净的登录页。
+    window.location.reload()
   }
 
   function openLogin() {

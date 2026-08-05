@@ -29,6 +29,13 @@ class S8OutputGuardStage(BaseStage):
                 (f.text for f in (context.validation.response_fragments or []) if f.text),
                 "我不太确定您的意图，能否再补充说明一下您想做什么？",
             )
+        elif context.validation is not None and context.validation.status == "needs_info":
+            # 信息收集挂起：直接用 S5 产出的收集引导文本（含待补的必填项与提问），
+            # 下一轮用户补齐槽位后才会放行 S6 执行建站。
+            context.reply_draft = next(
+                (f.text for f in (context.validation.response_fragments or []) if f.text),
+                "在动手前，我还需要确认几项关键信息。",
+            )
         else:
             # 防御：若上游某环节对纯 chat 重复 append 了相同 fragment（如兜底分支与
             # _run_chat 同轮各写一次），会在拼装时出现「相同文本重复两遍」的脏正文。

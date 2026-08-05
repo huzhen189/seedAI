@@ -334,6 +334,78 @@ async def serve_preview_root(
     return await serve_preview(token=token, path="index.html", session=session)
 
 
+@router.get("/api/projects/{project_id}/artifacts/{artifact_id}/files")
+async def list_artifact_files(
+    project_id: int,
+    artifact_id: int,
+    with_content: bool = False,
+    user: CurrentUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """列出(可选含内容)已生成站点的源码文件, 供前端「代码」视图展示。
+
+    安全: 严格校验 owner 与 previewable, 文件遍历限定在产物目录内(同 _resolve_within 的
+    越界防护), 不暴露产物目录外的任何路径。
+    """
+    project = await session.get(Project, project_id)
+    if project is None or project.user_id != user.id:
+        raise HTTPException(status_code=404, detail={"code": "PROJECT_NOT_FOUND"})
+    artifact = await session.get(Artifact, artifact_id)
+    if artifact is None or artifact.project_id != project_id:
+        raise HTTPException(status_code=404, detail={"code": "ARTIFACT_NOT_FOUND"})
+    if artifact.status not in _PREVIEWABLE or not artifact.preview_path:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ARTIFACT_NOT_PREVIEWABLE", "status": artifact.status},
+        )
+
+    base = _base_dir_of(artifact)
+    files: list[dict[str, Any]] = []
+    for path in sorted(base.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(base).as_posix()
+        if rel.lower().endswith((".html", ".htm", ".css", ".js", ".json", ".svg", ".txt", ".md")):
+            entry: dict[str, Any] = {"name": rel, "size": path.stat().st_size}
+            if with_content:
+                try:
+                    entry["content"] = path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    entry["content"] = ""
+            files.append(entry)
+    return {"files": files}
+
+
+@router.get("/api/projects/{project_id}/artifacts/{artifact_id}/files/{path:path}")
+async def get_artifact_file(
+    project_id: int,
+    artifact_id: int,
+    path: str,
+    user: CurrentUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """按相对路径返回单个源码文件内容(供「代码」视图按需加载大文件)。"""
+    project = await session.get(Project, project_id)
+    if project is None or project.user_id != user.id:
+        raise HTTPException(status_code=404, detail={"code": "PROJECT_NOT_FOUND"})
+    artifact = await session.get(Artifact, artifact_id)
+    if artifact is None or artifact.project_id != project_id:
+        raise HTTPException(status_code=404, detail={"code": "ARTIFACT_NOT_FOUND"})
+    if artifact.status not in _PREVIEWABLE or not artifact.preview_path:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ARTIFACT_NOT_PREVIEWABLE", "status": artifact.status},
+        )
+    target = _resolve_within(_base_dir_of(artifact), path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail={"code": "PREVIEW_FILE_NOT_FOUND"})
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        content = ""
+    return {"name": path, "content": content, "size": target.stat().st_size}
+
+
 @router.get("/api/preview/health", include_in_schema=False)
 async def preview_health() -> dict[str, Any]:
     """暴露预览隔离配置, 供 SEC-PREVIEW-001 冒烟与运维巡检读取(不含密钥)。"""

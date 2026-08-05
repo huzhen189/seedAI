@@ -49,3 +49,33 @@ export const searchMessages = (q: string): Promise<MessageSearchResult[]> =>
 
 export const listArtifacts = (projectId: number): Promise<Artifact[]> =>
   get(`/api/projects/${projectId}/artifacts`)
+
+/** 拉取已生成站点的源码文件列表(可选含内容), 供「代码」视图展示。 */
+export interface ArtifactFile {
+  name: string
+  size: number
+  content?: string
+}
+export const listArtifactFiles = (
+  projectId: number,
+  artifactId: number,
+  withContent = false,
+): Promise<{ files: ArtifactFile[] }> =>
+  get(
+    `/api/projects/${projectId}/artifacts/${artifactId}/files${withContent ? '?with_content=1' : ''}`,
+  )
+
+/**
+ * 拉取「当前(HEAD)版本」的生成物文件清单, 供发布弹窗勾选。
+ * 通过后端 list_artifacts 取 head artifact, 再 list_artifact_files 列文件。
+ */
+export async function fetchPublishFileList(
+  projectId: number,
+  artifacts: { id: number; is_head?: boolean }[],
+): Promise<ArtifactFile[]> {
+  const head = artifacts.find((a) => a.is_head) ?? artifacts[artifacts.length - 1]
+  if (!head) return []
+  const res = await listArtifactFiles(projectId, head.id, false)
+  // 发布清单自动排除文档(.md/.txt), 其余(HTML/CSS/JS/图片等)都可选。
+  return res.files.filter((f) => !/\.(md|txt)$/i.test(f.name))
+}

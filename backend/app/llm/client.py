@@ -97,6 +97,7 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: Optional[int] = 1024,
         timeout: float = 30.0,
+        purpose: str | None = None,
     ) -> str:
         if not self._providers:
             raise LLMError("未配置任何模型供应商（QWEN_API_KEY / DEEPSEEK_API_KEY 均缺失）")
@@ -135,7 +136,8 @@ class LLMClient:
                 tok_in = getattr(tok_in, "prompt_tokens", 0) if tok_in else 0
                 tok_out = getattr(getattr(resp, "usage", None), "completion_tokens", 0) if getattr(resp, "usage", None) else 0
                 await record_ai_llm(model=provider.name, ok=True, duration_ms=elapsed,
-                                    tokens_in=int(tok_in or 0), tokens_out=int(tok_out or 0))
+                                    tokens_in=int(tok_in or 0), tokens_out=int(tok_out or 0),
+                                    purpose=purpose)
                 await record_model_detail(provider.name, success=True)
                 return content.strip()
             except Exception as exc:  # 故障转移到下一个供应商
@@ -144,7 +146,7 @@ class LLMClient:
                 elapsed = (time.time() - t0) * 1000
                 err_type = type(exc).__name__
                 # 统计: LLM 调用失败(per-model) → ai:llm + an:model
-                await record_ai_llm(model=provider.name, ok=False, duration_ms=elapsed, error_type=err_type)
+                await record_ai_llm(model=provider.name, ok=False, duration_ms=elapsed, error_type=err_type, purpose=purpose)
                 await record_model_detail(provider.name, success=False)
                 logger.warning("LLM 调用 %s 失败: %s", provider.name, exc)
                 continue
@@ -163,6 +165,7 @@ class LLMClient:
         max_tokens: Optional[int] = 1024,
         timeout: float = 30.0,
         enable_thinking: bool = True,
+        purpose: str | None = None,
     ):
         """流式对话补全，逐块产出 ``{"kind": "think"|"token", "text": str}``。
 
@@ -222,6 +225,7 @@ class LLMClient:
                 await record_ai_llm(
                     model=provider.name, ok=True, duration_ms=elapsed,
                     tokens_in=int(tok_in or 0), tokens_out=int(tok_out or 0),
+                    purpose=purpose,
                 )
                 await record_model_detail(provider.name, success=True)
                 logger.info(
@@ -235,7 +239,7 @@ class LLMClient:
                 last_err = exc
                 elapsed = (time.time() - t0) * 1000
                 err_type = type(exc).__name__
-                await record_ai_llm(model=provider.name, ok=False, duration_ms=elapsed, error_type=err_type)
+                await record_ai_llm(model=provider.name, ok=False, duration_ms=elapsed, error_type=err_type, purpose=purpose)
                 await record_model_detail(provider.name, success=False)
                 logger.warning("LLM 流式调用 %s 失败: %s", provider.name, exc)
                 continue
@@ -246,7 +250,7 @@ class LLMClient:
     async def health(self) -> bool:
         """轻量自检：尝试一次极简对话。"""
         try:
-            await self.chat([{"role": "user", "content": "ping"}], max_tokens=8, timeout=10.0)
+            await self.chat([{"role": "user", "content": "ping"}], max_tokens=8, timeout=10.0, purpose="health")
             return True
         except Exception:
             return False
@@ -268,10 +272,14 @@ async def chat_completion(
     temperature: float = 0.7,
     max_tokens: Optional[int] = 1024,
     timeout: float = 30.0,
+    purpose: str | None = None,
 ) -> str:
-    """便捷函数：经默认客户端发起一次对话补全。"""
+    """便捷函数：经默认客户端发起一次对话补全。
+
+    purpose: 调用语义分类(intent/reply/extract/health), 透传给 record_ai_llm 做类型聚合。
+    """
     return await get_llm_client().chat(
-        messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout
+        messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout, purpose=purpose
     )
 
 
@@ -282,6 +290,7 @@ async def chat_completion_stream(
     max_tokens: Optional[int] = 1024,
     timeout: float = 30.0,
     enable_thinking: bool = True,
+    purpose: str | None = None,
 ):
     """便捷函数：经默认客户端发起流式对话补全，逐块产出。
 
@@ -296,5 +305,6 @@ async def chat_completion_stream(
         max_tokens=max_tokens,
         timeout=timeout,
         enable_thinking=enable_thinking,
+        purpose=purpose,
     ):
         yield chunk

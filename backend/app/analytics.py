@@ -231,7 +231,8 @@ async def _zset_percentiles(r, zkey: str) -> dict:
     p99 = r99[0][1] if r99 else 0
     all_scores = await r.zrange(zkey, 0, -1, withscores=True)
     avg = round(sum(s[1] for s in all_scores) / count, 1) if all_scores else 0
-    return {"p50": round(p50, 1), "p90": round(p90, 1), "p99": round(p99, 1), "avg": avg, "samples": count}
+    total = round(sum(s[1] for s in all_scores), 1) if all_scores else 0
+    return {"p50": round(p50, 1), "p90": round(p90, 1), "p99": round(p99, 1), "avg": avg, "total": total, "samples": count}
 
 
 # AI 核心 v1.2.3 新增统计命名空间(ai:*), 与业务端 an:* 互不冲突, 此处只读聚合供「系统分析」展示。
@@ -356,6 +357,7 @@ async def _read_ai_core(r) -> dict:
                                                      "err_dist": {}, "duration_ms": {}, "tokens_in": 0, "tokens_out": 0})
                     if m.endswith(":duration"):
                         entry["duration_ms"] = await _zset_percentiles(r, key)
+                        entry["duration_ms_total"] = entry["duration_ms"].get("total", 0)
                     elif m.endswith(":tok_in"):
                         entry["tokens_in"] = int((await r.hget(key, "total")) or 0)
                     elif m.endswith(":tok_out"):
@@ -370,34 +372,111 @@ async def _read_ai_core(r) -> dict:
                 entry["ok"] = h.get("ok", 0)
                 entry["fail"] = h.get("fail", 0)
                 entry["success_rate"] = round(h.get("ok", 0) / max(h.get("total", 1), 1), 3)
-            out["llm"] = {"total": llm_total, "models": models}
+            # 按调用类型聚合(语义分析 / 结果总结 / 实际任务 等)
+            purposes: dict = {}
+            for pk in await r.keys("ai:llm:purpose:*"):
+                name = pk.decode() if isinstance(k, bytes) else pk
+                name = name.replace("ai:llm:purpose:", "")
+                ph = {kk: int(vv) for kk, vv in (await r.hgetall(pk) or {}).items()}
+                pt = ph.get("count", 0)
+                if pt > 0:
+                    po = ph.get("ok", 0)
+                    pf = ph.get("fail", 0)
+                    purposes[name] = {
+                        "total": pt,
+                        "ok": po,
+                        "fail": pf,
+                        "success_rate": round(po / max(pt, 1), 3),
+                        "tokens_in": int((await r.hget(f"{pk}:tok_in", "total")) or 0),
+                        "tokens_out": int((await r.hget(f"{pk}:tok_out", "total")) or 0),
+                    }
+            out["llm"] = {"total": llm_total, "models": models, "purposes": purposes}
     except Exception as e:  # noqa: BLE001
         logger.warning("analytics _read_ai_core llm failed: %s", e)
 
-    # 9) 多意图 A+B 路由路径(v1.2.5)
+    # 9) 多意图 A+B 路由路径(v1.2.5) —— 改版后无独立多意图 LLM 路由子系统, 标记不可用。
+    out["multi_intent"] = {"status": "not_available",
+                            "reason": "v2.0.0 合并单进程后多意图 LLM 路由子系统已移除, 意图走确定性 understand()"}
+
+    # 10) 编排(s0-s9 整体一次 Turn 执行) + 子任务(s6 动作) —— 真实落点见 record_ai_orch / record_ai_subtask
     try:
-        mi_total = int((await r.hget("ai:mi:total", "count")) or 0)
-        if mi_total:
-            mi_path = {k: int(v) for k, v in (await r.hgetall("ai:mi:path") or {}).items()}
-            mi_escalated = int((await r.hget("ai:mi:escalated", "count")) or 0)
-            hy = mi_path.get("hybrid", 0)
-            ll = mi_path.get("llm", 0)
-            ab = hy + ll
-            ab_ratio = (
-                {"hybrid": round(hy / ab, 3), "llm": round(ll / ab, 3)}
-                if ab else {"hybrid": 0, "llm": 0}
-            )
-            out["multi_intent"] = {
-                "total": mi_total,
-                "path_dist": mi_path,
-                "ab_ratio": ab_ratio,
-                "escalated": mi_escalated,
-                "escalate_rate": round(mi_escalated / mi_total, 3),
-                "sub_task_count": await _zset_percentiles(r, "ai:mi:subtasks"),
-                "duration_ms": await _zset_percentiles(r, "ai:mi:duration"),
+        orch_total = int((await r.hget("ai:orch:total", "count")) or 0)
+        if orch_total:
+            strategy_raw = await r.hgetall("ai:orch:strategy")
+            out["orchestration"] = {
+                "total": orch_total,
+                "strategy_dist": {k: int(v) for k, v in strategy_raw.items()},
+                "split_count": await _zset_percentiles(r, "ai:orch:split_count"),
+                "success_rate": await _zset_percentiles(r, "ai:orch:success_rate"),
+                "duration_ms": await _zset_percentiles(r, "ai:orch:duration"),
+            }
+        sub_total = int((await r.hget("ai:sub:total", "count")) or 0)
+        if sub_total:
+            sub_status = {k: int(v) for k, v in (await r.hgetall("ai:sub:status") or {}).items()}
+            sub_risk = {k: int(v) for k, v in (await r.hgetall("ai:sub:risk") or {}).items()}
+            sub_skill: dict = {}
+            skill_keys = await _safe_keys(r, "ai:sub:skill:*")
+            for sk in skill_keys:
+                sk_name = sk.decode() if isinstance(sk, bytes) else sk
+                sk_name = sk_name.replace("ai:sub:skill:", "")
+                sh = {kk: int(vv) for kk, vv in (await _safe_hgetall(r, sk)).items()}
+                st = sum(sh.values())
+                if st > 0:
+                    sub_skill[sk_name] = {
+                        "total": st, "done": sh.get("done", 0), "failed": sh.get("failed", 0),
+                        "blocked": sh.get("blocked", 0), "skipped": sh.get("skipped", 0),
+                        "success_rate": round(sh.get("done", 0) / max(st, 1), 3),
+                    }
+            out["subtasks"] = {
+                "total": sub_total,
+                "status_dist": sub_status,
+                "risk_dist": sub_risk,
+                "per_skill": sub_skill,
+                "duration_ms": await _zset_percentiles(r, "ai:sub:duration"),
             }
     except Exception as e:  # noqa: BLE001
-        logger.warning("analytics _read_ai_core multi_intent failed: %s", e)
+        logger.warning("analytics _read_ai_core orchestration failed: %s", e)
+
+    # 11) 原子工具执行(ai:tool:*) —— 真实落点见 record_ai_tool_call(call_tool 收口处调用)。
+    # 与 ai:sub 互补: 这里按「工具粒度」聚合, 能看到 site_publish/site_deploy/
+    # research_retrieve/project_purge 各自的成功率与耗时分布。
+    try:
+        tool_total = int((await r.hget("ai:tool:total", "count")) or 0)
+        if tool_total:
+            status_dist = {k: int(v) for k, v in (await r.hgetall("ai:tool:status") or {}).items()}
+            risk_dist = {k: int(v) for k, v in (await r.hgetall("ai:tool:risk") or {}).items()}
+            per_tool: dict = {}
+            for sk in await _safe_keys(r, "ai:tool:name:*"):
+                name = sk.decode() if isinstance(sk, bytes) else sk
+                name = name.replace("ai:tool:name:", "")
+                sh = {kk: int(vv) for kk, vv in (await _safe_hgetall(r, sk)).items()}
+                t = sum(sh.values())
+                if t > 0:
+                    per_tool[name] = {
+                        "total": t,
+                        "succeeded": sh.get("succeeded", 0),
+                        "failed": sh.get("failed", 0),
+                        "unknown": sh.get("unknown", 0),
+                        "blocked": sh.get("blocked", 0),
+                        "success_rate": round(sh.get("succeeded", 0) / max(t, 1), 3),
+                    }
+            out["tools"] = {
+                "total": tool_total,
+                "status_dist": status_dist,
+                "risk_dist": risk_dist,
+                "per_tool": per_tool,
+                "duration_ms": await _zset_percentiles(r, "ai:tool:duration"),
+                "attempts": await _zset_percentiles(r, "ai:tool:attempts"),
+            }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics _read_ai_core tools failed: %s", e)
+
+    # 12) 后置 QC(单裁判) / Reviewer 自审 / 安全网关 LLM 打分 —— v2.0.0 已移除对应子系统
+    # (确定性 S8 护栏仅做 <script> 转义, 无 LLM 安全打分; qc_scores 表当前无写入方)。
+    # 直接标记 not_available, 避免造空字典(虚指标)。
+    out["qc"] = {"status": "not_available", "reason": "v2.0.0 移除 QC 裁判子系统, 校验改走确定性 verify()"}
+    out["reviewer"] = {"status": "not_available", "reason": "v2.0.0 移除生成内 Reviewer 自审子系统"}
+    out["safety"] = {"status": "not_available", "reason": "v2.0.0 移除 LLM 安全网关, S8 仅确定性转义"}
 
     return out
 
@@ -431,6 +510,20 @@ async def _safe_get(r, key, default=0):
         return default
 
 
+async def _safe_hget(r, key, field, default=0):
+    """安全读取 hash 字段: 类型不符(WRONGTYPE, 如误当 scalar 读)或异常时返回 default。
+
+    专为 an:intent:total:* 这类 hash 键设计——之前 analytics_snapshot 误用 _safe_get
+    (标量 GET) 读取它们, 导致 intent_stats 恒为空、雷达「意图识别」维度永远 0。
+    """
+    try:
+        v = await r.hget(key, field)
+        return int(v) if v is not None else default
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics: 读取 hash 键 %s 字段 %s 失败, 跳过: %s", key, field, e)
+        return default
+
+
 async def _safe_zset_pct(r, key) -> dict:
     """安全读取 zset 分位数: 非 zset(WRONGTYPE)或异常时返回零值, 不中断快照。"""
     try:
@@ -444,14 +537,15 @@ async def analytics_snapshot() -> dict:
     try:
         r = await get_redis()
         # 两级意图统计
+        # 注意: an:intent:total:* 是 hash 键(count 字段), 必须用 hget 读, 不能当 scalar 读!
         intent_keys = await _safe_keys(r, f"{P_INTENT_TOTAL}:*")
         intent_stats: dict = {}
         for k in sorted(intent_keys):
             key = k.decode() if isinstance(k, bytes) else k
             prefix = key.replace(P_INTENT_TOTAL + ":", "")
-            tot = await _safe_get(r, key)
+            tot = await _safe_hget(r, key, "count")
             hit_key = key.replace(P_INTENT_TOTAL, P_INTENT_HIT)
-            hit = await _safe_get(r, hit_key)
+            hit = await _safe_hget(r, hit_key, "count")
             if tot > 0:
                 intent_stats[prefix] = {"ok": hit, "total": tot, "rate": round(hit / tot, 3)}
 
@@ -483,10 +577,15 @@ async def analytics_snapshot() -> dict:
             if t > 0:
                 model_stats[m_id] = {"total": t, "ok": o, "fail": f, "rate": round(o / t, 3)}
 
-        # 生成阶段耗时
+        # 生成阶段耗时(改版后 = s0-s9 各流水线阶段, 由 record_gen_stage 经 observer 写入)。
+        # 动态扫描, 不再硬编码旧阶段名(enter_planner 等已不存在)。
         gen_stages: dict = {}
-        for stage in ("enter_planner", "enter_coder", "enter_reviewer", "previewing"):
-            gen_stages[stage] = await _safe_zset_pct(r, f"{P_LATENCY}:gen:{stage}")
+        gen_keys = await _safe_keys(r, f"{P_LATENCY}:gen:*")
+        for k in sorted(gen_keys):
+            stage = k.decode() if isinstance(k, bytes) else k
+            stage = stage.replace(f"{P_LATENCY}:gen:", "")
+            if stage:
+                gen_stages[stage] = await _safe_zset_pct(r, k)
 
         # API 延迟
         api_keys = await _safe_keys(r, f"{P_LATENCY}:api:*")
@@ -524,44 +623,22 @@ async def analytics_snapshot() -> dict:
                 "latency": api_latency.get(p, {"p50": 0, "p90": 0, "p99": 0, "avg": 0, "samples": 0}),
             }
 
-        # AI 核心编排统计(STAT-1, 由 ai_service 写入同 Redis, 此处只读聚合)
-        orch_total = int((await r.hget(f"{P_ORCH}:total", "count")) or 0)
-        # 后端核心总生成请求数(独立于编排统计, 反映 AI 核心真实负载)
+        # AI 核心原生统计(ai:* 命名空间, 含意图/LLM/编排/子任务 + 已移除能力降级标记)。
+        # 提前在此计算, 供下方 orchestration/subtasks 直接引用真实落点(ai:orch/ai:sub)。
+        ai_core_snapshot = await _read_ai_core(r)
+        # 编排统计(v2.0.0: 直接取 ai_core.orchestration / ai_core.subtasks 真实值,
+        # 旧 an:orch/an:subtask 死键已弃用)。
+        orch_total = int((await r.hget("ai:orch:total", "count")) or 0)
         gen_total = int((await r.hget(f"{P_GEN}:total", "count")) or 0)
-        orchestration: dict = {
-            "total": orch_total,
-            "available": orch_total > 0,
-            "ai_core_requests": gen_total,
+        orchestration: dict = dict(ai_core_snapshot.get("orchestration") or {})
+        orchestration.setdefault("ai_core_requests", gen_total)
+        orchestration.setdefault("available", orch_total > 0)
+        if not orchestration:
+            orchestration = {"available": False, "status": "not_available",
+                             "reason": "ai:orch 无数据: 改版后由 record_ai_orch 在流水线终态写入"}
+        orchestration["sub_tasks"] = ai_core_snapshot.get("subtasks") or {
+            "status": "not_available", "reason": "ai:sub 无数据: 改版后由 record_ai_subtask 在 s6 写入"
         }
-        if orch_total > 0:
-            strategy_raw = await r.hgetall(f"{P_ORCH}:strategy")
-            orchestration["strategy_dist"] = {k: int(v) for k, v in strategy_raw.items()}
-            orchestration["split_count"] = await _safe_zset_pct(r, f"{P_ORCH}:split_count")
-            orchestration["success_rate"] = await _safe_zset_pct(r, f"{P_ORCH}:success_rate")
-            orchestration["duration_ms"] = await _safe_zset_pct(r, f"{P_ORCH}:duration")
-            sub_total = int((await r.hget(f"{P_SUB}:total", "count")) or 0)
-            sub_status = {k: int(v) for k, v in (await r.hgetall(f"{P_SUB}:status") or {}).items()}
-            sub_risk = {k: int(v) for k, v in (await r.hgetall(f"{P_SUB}:risk") or {}).items()}
-            sub_skill: dict = {}
-            skill_keys = await _safe_keys(r, f"{P_SUB}:skill:*")
-            for sk in skill_keys:
-                sk_name = sk.decode() if isinstance(sk, bytes) else sk
-                sk_name = sk_name.replace(f"{P_SUB}:skill:", "")
-                sh = {kk: int(vv) for kk, vv in (await _safe_hgetall(r, sk)).items()}
-                st = sum(sh.values())
-                if st > 0:
-                    sub_skill[sk_name] = {
-                        "total": st, "done": sh.get("done", 0), "failed": sh.get("failed", 0),
-                        "blocked": sh.get("blocked", 0), "skipped": sh.get("skipped", 0),
-                        "success_rate": round(sh.get("done", 0) / max(st, 1), 3),
-                    }
-            orchestration["sub_tasks"] = {
-                "total": sub_total,
-                "status_dist": sub_status,
-                "risk_dist": sub_risk,
-                "per_skill": sub_skill,
-                "duration_ms": await _zset_percentiles(r, f"{P_SUB}:duration"),
-            }
 
         # 前端性能
         fe_perf = {m: await _zset_percentiles(r, f"{P_FRONTEND}:{m}") for m in ("page_load", "ttfb", "dom_ready")}
@@ -591,14 +668,14 @@ async def analytics_snapshot() -> dict:
         total_gens = sum(int(v) for v in gen_counts.values())
         avg_gens = round(total_gens / max(active_users, 1), 1)
 
-        # 生成成功率(Trace 表)
+        # 生成成功率(v3: turns 表, completed/total)
         from sqlalchemy import select
         from .db import SessionLocal
-        from .models import Trace
+        from .models import Turn
         async with SessionLocal() as s:
-            traces = (await s.execute(select(Trace))).scalars().all()
-            total = len(traces)
-            done = sum(1 for t in traces if t.status == "done")
+            turns = (await s.execute(select(Turn))).scalars().all()
+            total = len(turns)
+            done = sum(1 for t in turns if t.status == "completed")
             gen_rate = round(done / max(total, 1), 3)
 
         # ---- v0.7.0 新增统计 ----
@@ -679,12 +756,95 @@ async def analytics_snapshot() -> dict:
                 for k, v in ((await r.hgetall("an:v090:feature")) or {}).items()
             },
             "v090_summary_fallback": int((await r.hget("an:v090:summary_fallback", "count")) or 0),
-            # v1.2.3 新增: AI 核心原生统计(意图/QC/Reviewer/安全/LLM), 独立 ai:* 命名空间
-            "ai_core": await _read_ai_core(r),
+            # v1.2.3 新增: AI 核心原生统计(意图/LLM/编排/子任务 + 已移除能力降级标记), 独立 ai:* 命名空间
+            "ai_core": ai_core_snapshot,
+            # v2.0.0 新增: AI 质量健康度雷达维度(0-100)。前端 RadarChart 直接消费。
+            # 由现有 Redis 聚合派生,不落新表、不重复采集。
+            "radar": _build_quality_radar(
+                intent_stats=intent_stats,
+                skills=skills,
+                api_calls=api_calls,
+                gen_rate=gen_rate,
+                feedback_avg=fb_avg,
+                fe_perf=fe_perf,
+                ai_core=ai_core_snapshot,
+                orchestration=orchestration,
+            ),
         }
     except Exception as e:
         logger.warning("analytics_snapshot failed: %s", e)
         return {"error": str(e)}
+
+
+def _build_quality_radar(
+    *,
+    intent_stats: dict,
+    skills: dict,
+    api_calls: dict,
+    gen_rate: float,
+    feedback_avg: float | None,
+    fe_perf: dict,
+    ai_core: dict,
+    orchestration: dict,
+) -> dict:
+    """聚合 AI 质量健康度雷达的多维得分(统一 0-100, 便于 RadarChart)。
+
+    维度覆盖: 意图识别 / LLM 调用 / Skill 成效 / 生成成功率 / 业务 API / 用户反馈 /
+    前端性能 / 编排成功率。全部由 analytics_snapshot 已算好的数据派生。
+    """
+
+    # 意图命中率均值
+    irates = [v["rate"] for v in intent_stats.values() if v.get("total")]
+    intent_rate = round(100 * sum(irates) / len(irates)) if irates else 0
+
+    # Skill 成功率
+    srates = [v["success_rate"] for v in skills.values() if v.get("total")]
+    skill_rate = round(100 * sum(srates) / len(srates)) if srates else 0
+
+    # 业务 API 平均成功率(访问量加权)
+    atot = sum(v["total"] for v in api_calls.values())
+    aok = sum(v["ok"] for v in api_calls.values())
+    api_rate = round(100 * aok / atot) if atot else 0
+
+    # 生成成功率(Trace 完成率)
+    gen_score = round(100 * gen_rate)
+
+    # 用户反馈均分(反馈为 0-10, 归一化到 0-100)
+    feedback_score = round((feedback_avg or 0) * 10)
+
+    # 前端性能达标率: page_load/ttfb/dom_ready 平均 < 3000ms 视为达标, 达标指标占比
+    fe_targets = {"page_load": 3000, "ttfb": 1500, "dom_ready": 2000}
+    fe_hits = 0
+    fe_total = 0
+    for m, t in fe_targets.items():
+        avg = (fe_perf.get(m) or {}).get("avg")
+        if avg is None:
+            continue
+        fe_total += 1
+        if avg <= t:
+            fe_hits += 1
+    fe_perf_rate = round(100 * fe_hits / fe_total) if fe_total else 0
+
+    # LLM 调用成功率(各模型按 total 加权)
+    llm_models = (ai_core.get("llm") or {}).get("models") or {}
+    ltot = sum(v.get("total", 0) for v in llm_models.values())
+    lok = sum(v.get("ok", 0) for v in llm_models.values())
+    llm_rate = round(100 * lok / ltot) if ltot else 0
+
+    # 编排成功率(ai:orch success_rate 均值)
+    orch_avg = (orchestration.get("success_rate") or {}).get("avg")
+    orch_rate = round(100 * orch_avg) if orch_avg is not None else 0
+
+    return {
+        "intent": intent_rate,
+        "llm": llm_rate,
+        "skill": skill_rate,
+        "generation": gen_score,
+        "api": api_rate,
+        "feedback": feedback_score,
+        "frontend": fe_perf_rate,
+        "orchestration": orch_rate,
+    }
 
 
 # ---- v0.7.0 新增统计维度 ----
@@ -748,3 +908,195 @@ async def record_summary_fallback(conversation_id: int) -> None:
         logger.info("[统计] summary_fallback conv=%s", conversation_id)
     except Exception as e:
         logger.debug("[统计] summary_fallback 失败: %s", e)
+
+
+# ============================================================================
+# v2.0.0 统计整改(STAT-REBUILD): 把 ai:* 命名空间接到「改版后 s0-s9 流水线」真实落点。
+#
+# 旧版 ai:* 依赖一个已被剥离的"AI 核心子系统"(QC 裁判 / Reviewer 自审 / LLM 安全网关 / 多意图 LLM 路由 / 编排 split),
+# 这些能力在新架构里不存在(见 _read_ai_core 注释)。本次只把**真实存在**的能力接到统计:
+#   - ai:intent  ← S2 确定性意图识别(understand)              —— decision/source/success/confidence/duration
+#   - ai:llm     ← chat_service.respond 的 LLM 调用            —— per-model total/ok/fail/tokens/duration/err
+#   - ai:orch    ← s0-s9 编排本身                              —— total/strategy/split/success/duration
+#   - ai:sub     ← s6 具体动作(执行域: chat/site/project)      —— total/status/risk/skill/duration
+# QC / Reviewer / 安全网关 / 多意图 4 块属于"已移除能力", 在 _read_ai_core 里降级为
+# "not_available" 标记, 不再造空字典(避免虚指标)。
+# ============================================================================
+
+
+async def record_ai_intent(
+    *, decision: str, source: str = "rule", success: bool = True, confidence: float = 0.0, duration_ms: float = 0.0
+) -> None:
+    """S2 意图识别统计(真实落点=router.intent.understand, 确定性)。
+
+    decision: 言语行为(chat/site_create/site_edit/project_publish/...) 映射旧 intent:decision;
+    source: 识别来源(改版后只有 "rule" 确定性规则, 旧 "chroma/llm" 不再适用);
+    success: 是否被判为可执行(executable);
+    confidence/duration_ms: 置信度与 S2 阶段耗时。
+    """
+    try:
+        r = await get_redis()
+        await r.hincrby("ai:intent:total", "count", 1)
+        await r.hincrby("ai:intent:decision", decision, 1)
+        await r.hincrby("ai:intent:source", source, 1)
+        if success:
+            await r.hincrby("ai:intent:success", "count", 1)
+        zk = "ai:intent:confidence"
+        await r.zadd(zk, {uuid.uuid4().hex: confidence})
+        await r.zremrangebyrank(zk, 0, -(LATENCY_MAX_SAMPLES + 1))
+        zk2 = "ai:intent:duration"
+        await r.zadd(zk2, {uuid.uuid4().hex: duration_ms})
+        await r.zremrangebyrank(zk2, 0, -(LATENCY_MAX_SAMPLES + 1))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics record_ai_intent failed: %s", e)
+
+
+async def record_ai_llm(
+    *,
+    model: str,
+    ok: bool,
+    duration_ms: float = 0.0,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    error_type: str | None = None,
+    purpose: str | None = None,
+) -> None:
+    """LLM 调用统计(真实落点=chat_service.respond → llm.client.chat)。
+
+    与旧 ai:llm 读取逻辑对齐: ai:llm:total + ai:llm:model:{m}:{total,ok,fail,duration,zset,tok_in,tok_out,err}。
+    注意: 改版后 model 取供应商名(qwen/deepseek), 经 provider 故障转移; tokens 由调用方透传(无则记 0)。
+    purpose: 调用语义分类(intent=语义分析 / reply=实际任务回复 / extract=记忆·QC提取 / health=探活),
+    写入 ai:llm:purpose:{p} 供「LLM 调用类型分布」聚合展示。
+    """
+    try:
+        r = await get_redis()
+        await r.hincrby("ai:llm:total", "count", 1)
+        base = f"ai:llm:model:{model}"
+        await r.hincrby(base, "total", 1)
+        if ok:
+            await r.hincrby(base, "ok", 1)
+        else:
+            await r.hincrby(base, "fail", 1)
+        if tokens_in:
+            await r.hincrby(f"{base}:tok_in", "total", tokens_in)
+        if tokens_out:
+            await r.hincrby(f"{base}:tok_out", "total", tokens_out)
+        zk = f"{base}:duration"
+        await r.zadd(zk, {uuid.uuid4().hex: duration_ms})
+        await r.zremrangebyrank(zk, 0, -(LATENCY_MAX_SAMPLES + 1))
+        if error_type:
+            await r.hincrby(f"{base}:err", error_type, 1)
+        # 按调用类型聚合(语义分析 / 结果总结 / 实际任务 等)
+        if purpose:
+            pk = f"ai:llm:purpose:{purpose}"
+            await r.hincrby(pk, "count", 1)
+            await r.hincrby(pk, "ok" if ok else "fail", 1)
+            if tokens_in:
+                await r.hincrby(f"{pk}:tok_in", "total", tokens_in)
+            if tokens_out:
+                await r.hincrby(f"{pk}:tok_out", "total", tokens_out)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics record_ai_llm failed: %s", e)
+
+
+async def record_ai_orch(
+    *,
+    strategy: str = "single",
+    split_count: int = 1,
+    success: bool = True,
+    duration_ms: float = 0.0,
+) -> None:
+    """s0-s9 编排统计(真实落点=core.pipeline.run 整体一次 Turn 执行)。
+
+    写入键与 _read_ai_core 的编排块对齐(ai:orch:*)。
+
+    strategy: 改版后为 "single"(确定性单链路); 旧 "hybrid/llm" 多策略拆分已移除。
+    split_count: 子任务数(改版后恒为 1, 保留字段以备后续多子任务)。
+    success: 整轮 Turn 是否成功终态。
+    duration_ms: 整轮 s0-s9 总耗时。
+    """
+    try:
+        r = await get_redis()
+        await r.hincrby("ai:orch:total", "count", 1)
+        await r.hincrby("ai:orch:strategy", strategy, 1)
+        zk = "ai:orch:split_count"
+        await r.zadd(zk, {uuid.uuid4().hex: split_count})
+        await r.zremrangebyrank(zk, 0, -(LATENCY_MAX_SAMPLES + 1))
+        zk2 = "ai:orch:success_rate"
+        await r.zadd(zk2, {uuid.uuid4().hex: 1.0 if success else 0.0})
+        await r.zremrangebyrank(zk2, 0, -(LATENCY_MAX_SAMPLES + 1))
+        zk3 = "ai:orch:duration"
+        await r.zadd(zk3, {uuid.uuid4().hex: duration_ms})
+        await r.zremrangebyrank(zk3, 0, -(LATENCY_MAX_SAMPLES + 1))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics record_ai_orch failed: %s", e)
+
+
+async def record_ai_subtask(
+    *,
+    skill: str,
+    status: str,
+    risk: str = "low",
+    duration_ms: float = 0.0,
+) -> None:
+    """s6 具体动作统计(真实落点=core.stages.s6_execute 执行的域动作)。
+
+    写入键与 _read_ai_core 的子任务块对齐(ai:sub:*)。
+
+    skill: 执行域/chat|site|project:{action};  status: succeeded/failed/blocked;
+    risk: 动作风险等级;  duration_ms: 该动作耗时。
+    """
+    try:
+        r = await get_redis()
+        await r.hincrby("ai:sub:total", "count", 1)
+        await r.hincrby("ai:sub:status", status, 1)
+        await r.hincrby("ai:sub:risk", risk, 1)
+        await r.hincrby(f"ai:sub:skill:{skill}", status, 1)
+        zk = "ai:sub:duration"
+        await r.zadd(zk, {uuid.uuid4().hex: duration_ms})
+        await r.zremrangebyrank(zk, 0, -(LATENCY_MAX_SAMPLES + 1))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics record_ai_subtask failed: %s", e)
+
+
+async def record_ai_tool_call(
+    *,
+    tool_name: str,
+    status: str,
+    risk: str = "low",
+    duration_ms: float = 0.0,
+    attempts: int = 1,
+) -> None:
+    """原子工具执行统计(真实落点=core.tool_runner.call_tool 每次工具调用收口处)。
+
+    与 ai:sub(子任务)互补: ai:sub 记「s6 派发的域动作(site/research/project/chat)」,
+    本块记「动作内部经 call_tool 执行的原子工具」(如 site_publish / site_deploy /
+    research_retrieve / project_purge / rag_query ...)。一次 site 域动作可能内部触发
+    多次 call_tool(预览写入 + 发布), 因此 ai:tool 的 total ≥ ai:sub 的 site 计数。
+
+    写入键与 _read_ai_core 的工具块对齐(ai:tool:*)。
+
+    tool_name: 注册在 ToolRegistry 的工具 id;  status: succeeded/failed/unknown/blocked
+    (blocked=被审批闸门拦截, 未真正执行);  risk: 来自 ToolMeta.risk(low/mid/high/critical);
+    duration_ms: 本次 call_tool 端到端耗时;  attempts: 含重试的实际尝试次数。
+    """
+    try:
+        r = await get_redis()
+        await r.hincrby("ai:tool:total", "count", 1)
+        await r.hincrby("ai:tool:status", status, 1)
+        await r.hincrby("ai:tool:risk", risk, 1)
+        await r.hincrby(f"ai:tool:name:{tool_name}", status, 1)
+        zk = "ai:tool:duration"
+        await r.zadd(zk, {uuid.uuid4().hex: duration_ms})
+        await r.zremrangebyrank(zk, 0, -(LATENCY_MAX_SAMPLES + 1))
+        zk2 = "ai:tool:attempts"
+        await r.zadd(zk2, {uuid.uuid4().hex: attempts})
+        await r.zremrangebyrank(zk2, 0, -(LATENCY_MAX_SAMPLES + 1))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics record_ai_tool_call failed: %s", e)
+
+
+# ---- 注: 旧版 ai_service 的编排/子任务死键(an:orch/an:subtask/an:generate)已弃用 ----
+# 改版后编排与子任务真实写入 ai:orch:* / ai:sub:* (见 record_ai_orch / record_ai_subtask),
+# 由 _read_ai_core 的 orchestration / subtasks 块读取。上述三个 an: 前缀常量仅保留以兼容
+# 旧快照读取路径, 其对应键在当前运行实例中恒定无写入(无 ai_service)。

@@ -5,7 +5,9 @@ import time
 logger = logging.getLogger(__name__)
 
 from app.core.contracts import ExecutionResult, ResponseFragment, StageId, StageStatus, TaskResult
+from app.core.governance import action_requires_approval, action_risk_label, governance_basis
 from app.core.intent_labels import intent_label
+from app.core.tool_runner import collect_operation_keys
 from app.core.turn_context import TurnContext
 from app.domains.chat import chat_service
 from app.domains.project import project_ops
@@ -16,7 +18,9 @@ from .base import BaseStage
 
 # 高危项目操作由 S5 审批闸门承载，决策端点负责真实执行；
 # S6 只直接执行低危动作，避免同一副作用出现两条执行路径。
-_GATED_PROJECT_ACTIONS = frozenset({"publish", "trash", "purge"})
+# 判定统一走 app.core.governance.action_requires_approval（ToolMeta ∪ 历史规则），
+# 与 S5 共用同一真相源——此前 S5/S6 各写一份 {"publish","trash","purge"} 集合，
+# 任一处漏改就会出现「S5 放行、S6 拒执行」或反过来的错盘。
 
 
 async def _emit_task(
@@ -95,15 +99,22 @@ class S6ExecuteStage(BaseStage):
         has_error = False
         artifact_refs: list[str] = []
         task_results: list[TaskResult] = []
-        for action in actions:
-            ok, refs, tr = await self._run_one(context, action)
-            artifact_refs.extend(refs)
-            if tr is not None:
-                task_results.append(tr)
-            if ok:
-                succeeded += 1
-            else:
-                has_error = True
+        # 开启 operation_key 收集域：域内任意深度的 call_tool(ledger=True) 都会自动登记，
+        # 用于回填 ExecutionResult.operation_keys（此前该字段恒空，本轮副作用在契约层不可见）。
+        with collect_operation_keys() as op_keys:
+            for action in actions:
+                ok, refs, tr = await self._run_one(context, action)
+                artifact_refs.extend(refs)
+                if tr is not None:
+                    task_results.append(tr)
+                if ok:
+                    succeeded += 1
+                else:
+                    has_error = True
+            operation_keys = list(op_keys)
+        if operation_keys:
+            logger.info("[S6] 本轮副作用操作键 count=%d keys=%s turn=%s",
+                        len(operation_keys), operation_keys[:5], context.turn_id)
 
         context.response_fragments.append(ResponseFragment(
             status="info",
@@ -114,13 +125,15 @@ class S6ExecuteStage(BaseStage):
         elapsed = (time.time() - t_total) * 1000
         if has_error and succeeded == 0:
             context.execution = ExecutionResult(status="failed", committed=False,
-                                                artifact_refs=artifact_refs, task_results=task_results)
+                                                artifact_refs=artifact_refs, task_results=task_results,
+                                                operation_keys=operation_keys)
             return self.result(StageStatus.BLOCKED, "all_actions_failed")
         context.execution = ExecutionResult(
             status="succeeded" if not has_error else "partial",
             committed=True,
             artifact_refs=artifact_refs,
             task_results=task_results,
+            operation_keys=operation_keys,
         )
         return self.result(
             StageStatus.COMPLETED,
@@ -198,7 +211,13 @@ class S6ExecuteStage(BaseStage):
         text = await research_service.research(context)
         elapsed = (time.time() - t0) * 1000
         logger.info("[S6] research 动作产物 文本首200=%r", text[:200])
-        context.response_fragments.append(ResponseFragment(status="success", text=text, producer_stage=StageId.S6))
+        # research 走 fail-soft 委派时会返回空串（正文与流式帧已由 chat_service.respond
+        # 自行 emit + append）。此处必须判空，否则会多塞一个空 ResponseFragment，
+        # S8 汇总时拼出多余空行/重复分隔符。
+        if text.strip():
+            context.response_fragments.append(ResponseFragment(status="success", text=text, producer_stage=StageId.S6))
+        else:
+            logger.debug("[S6] research 返回空文本(已委派 chat)，跳过 fragment 追加 turn=%s", context.turn_id)
         await record_skill_outcome("research", "ok", elapsed)
         await record_ai_subtask(skill="research", status="succeeded", risk="low", duration_ms=elapsed)
         return True, [], TaskResult(task_id=action.id, status="succeeded")
@@ -220,10 +239,15 @@ class S6ExecuteStage(BaseStage):
         if session is None:
             raise RuntimeError("S6 project action requires a database session")
         act = action.speech_act.value
-        risk = "critical" if act in {"publish", "purge"} else "high" if act == "trash" else "low"
+        risk = action_risk_label(act)
         t0 = time.time()
-        if act in _GATED_PROJECT_ACTIONS:
+        if action_requires_approval(act):
             # 正常不会到这里(S5 已 PAUSED)；到了说明闸门被绕过，必须拒绝而不是执行。
+            # 这里额外打 basis，便于事后定位「谁把高危动作放进了 S6」。
+            logger.error(
+                "[S6] 高危动作绕过 S5 闸门被拦截 act=%s risk=%s basis=%s turn=%s",
+                act, risk, governance_basis(act), context.turn_id,
+            )
             context.response_fragments.append(ResponseFragment(
                 status="error", text="该操作需要先通过审批确认。", producer_stage=StageId.S6))
             elapsed = (time.time() - t0) * 1000

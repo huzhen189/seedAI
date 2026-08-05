@@ -169,6 +169,12 @@ export interface Project {
   name: string
   created_at: string
   updated_at: string
+  /** 当前 active 部署的线上地址(已发布才非空; 否则 null)。 */
+  published_url?: string | null
+  head_artifact_id?: number | null
+  published_artifact_id?: number | null
+  active_deployment_id?: number | null
+  has_unpublished_changes?: boolean
   requirement_doc?: string | null  // 需求文档(JSON 字符串), 重启后还原右侧"📋 需求文档"
 }
 
@@ -179,6 +185,8 @@ export interface Message {
   content: string
   model_id: string | null
   trace_id?: string | null
+  /** 本轮 turn_id，用于「修改上一条」回溯控制(correct/supplement)定位 prior turn */
+  turn_id?: string | null
   created_at: string
 }
 
@@ -414,10 +422,10 @@ export interface Artifact {
 export interface AdminUser {
   id: number
   account: string
-  nickname: string
+  display_name: string
   email: string | null
   role: string
-  plan: string
+  tier: string
 }
 
 // ---------- 后置 QC(单裁判 v2.3.0) ----------

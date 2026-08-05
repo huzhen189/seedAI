@@ -3,7 +3,7 @@ BASE = "http://127.0.0.1:7101"
 try:
     s = requests.Session(); s.timeout = 600
     u = f"smokeR_{uuid.uuid4().hex[:6]}"
-    s.post(f"{BASE}/auth/register", json={"account": u, "password": "testpass123", "nickname": "smokeR", "email": f"{u}@t.com"})
+    s.post(f"{BASE}/auth/register", json={"account": u, "password": "testpass123", "display_name": "smokeR", "email": f"{u}@t.com"})
     r = s.post(f"{BASE}/api/projects", json={"name": "smokeR_p"}); pid = r.json()["id"]
     r = s.post(f"{BASE}/api/conversations", json={"project_id": pid, "name": "smokeR_c"}); cid = r.json()["id"]
     q = "帮我做一个个人博客网站"

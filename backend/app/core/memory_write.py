@@ -32,6 +32,7 @@ from app.db.repositories import (
     user_facts as user_fact_repo,
     user_soft_preferences as soft_pref_repo,
 )
+from app.db.repositories.qc_scores import qc_score_repo
 from app.llm.extract import llm_extract
 from app.models import Message
 from app.ragstore import safe_upsert_bg
@@ -52,10 +53,13 @@ async def persist_and_extract(
     conversation_id: int | None,
     user_text: str,
     assistant_text: str,
+    trace_id: str | None = None,
 ) -> None:
-    """把本轮对话压缩提炼并落库（MySQL 主 + 向量辅）。fail-soft：任何异常仅记日志。
+    """把本轮对话压缩提炼并落库（MySQL 主 + 向量辅），并落一条聊天级 QC 评分。
 
-    设计为「不反噬主链路」——s7 以 ``asyncio.create_task`` 异步调用，本函数内部再吞掉异常。
+    fail-soft：任何异常仅记日志，绝不反噬主链路。
+    S7 对**所有 turn**统一派发本任务（不论意图类型/数量）；记忆落库仍受「执行态已提交」
+    约束（由调用方决定 text 是否非空），但 QC 评分始终落库（审计/展示，与执行态无关）。
     """
     try:
         await _do_persist(
@@ -64,6 +68,7 @@ async def persist_and_extract(
             conversation_id=conversation_id,
             user_text=user_text,
             assistant_text=assistant_text,
+            trace_id=trace_id,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[memory_write] 记忆提炼落库失败(已忽略): %s", exc, exc_info=True)
@@ -76,6 +81,7 @@ async def _do_persist(
     conversation_id: int | None,
     user_text: str,
     assistant_text: str,
+    trace_id: str | None = None,
 ) -> None:
     extraction = await llm_extract(
         user_text=user_text,
@@ -84,19 +90,46 @@ async def _do_persist(
         conversation_id=conversation_id,
     )
 
-    # 回查本轮 user 消息 id（用于 source_message_id 双向关联）。拿不到则留空。
+    # 回查本轮 user 消息 id（用于 source_message_id 双向关联）。
+    # 改：按本 turn 的 turn_id 精确定位（trace_id==turn_id），不再取「会话内最新用户消息」——
+    # 否则异步写入延迟时（上一轮记忆写入慢于本轮插入）会把本 turn 记忆错挂到后一条消息上。
+    # trace_id 为空时留 None（不再回退 conversation 最新，避免错挂）。
     source_message_id: int | None = None
     async with transaction() as session:
-        if conversation_id is not None:
+        if trace_id is not None:
             row = (
                 await session.execute(
                     select(Message.id)
-                    .where(Message.conversation_id == conversation_id, Message.role == "user")
-                    .order_by(Message.id.desc())
+                    .where(Message.turn_id == trace_id, Message.role == "user")
+                    .order_by(Message.id.asc())
                     .limit(1)
                 )
             ).scalar_one_or_none()
             source_message_id = row
+
+        # ── 聊天级 QC 评分落库（审计/展示，与执行态无关） ──
+        # 复用 llm_extract 的 qc 字段，不额外调 LLM；trace_id==turn_id，缺则跳过。
+        qc = extraction.get("qc") or {}
+        qc_overall = float(qc.get("overall") or 0.0)
+        if trace_id and qc_overall > 0:
+            try:
+                await qc_score_repo.upsert(
+                    session,
+                    trace_id=trace_id,
+                    model_id=None,
+                    conversation_id=conversation_id,
+                    result={
+                        "scores": qc.get("scores") or {},
+                        "overall": qc_overall,
+                        "needs_review": bool(qc.get("needs_review", False)),
+                        "safety_risk": str(qc.get("safety_risk") or "low"),
+                        "rationale": str(qc.get("rationale") or ""),
+                    },
+                )
+                logger.info("[memory_write] 聊天级 QC 已落库 trace=%s overall=%.1f safety=%s",
+                            trace_id, qc_overall, str(qc.get("safety_risk") or "low"))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[memory_write] QC 落库失败(已忽略): %s", exc)
 
         # L2 强事实（幂等 UPSERT，零容错）。
         if extraction["user_facts"]:
@@ -128,19 +161,25 @@ async def _do_persist(
             )
 
         # 软偏好（仅 rerank，不进 prompt，不写向量库——rerank 时由 s1 直接读 MySQL）。
+        # 容错：LLM 返回的某项可能缺 ``content``（键名漂移/漏字段），用 .get 兜底并跳过空项，
+        # 避免单条坏数据触发 KeyError 让整批记忆写失败（之前 mem_write 静默全崩）。
         if extraction["user_prefs"]:
-            await soft_pref_repo.upsert_many(
-                session,
-                [
+            prefs = []
+            for p in extraction["user_prefs"]:
+                content = p.get("content")
+                if not content:
+                    logger.warning("[memory_write] 跳过缺 content 的 user_pref: tag=%s", p.get("tag"))
+                    continue
+                prefs.append(
                     {
                         "user_id": user_id,
                         "tag": p["tag"],
-                        "content": str(p["content"]),
+                        "content": str(content),
                         "weight": int(p.get("weight", 50)),
                     }
-                    for p in extraction["user_prefs"]
-                ],
-            )
+                )
+            if prefs:
+                await soft_pref_repo.upsert_many(session, prefs)
 
         # 项目过程事件（审计，不进 prompt）。仅在项目上下文存在时记录。
         if project_id is not None:

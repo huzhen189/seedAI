@@ -449,10 +449,24 @@ async def create_turn(
     幂等：同一 client_msg_id 重复提交不会重复执行，只重新挂接已有流。
     """
     logger.info(
-        "[chat] 受理 Turn: user=%s conv=%s msg_len=%d client_msg_id=%s",
-        user.id, payload.conversation_id, len(payload.message), payload.client_msg_id,
+        "[chat] 受理 Turn: user=%s conv=%s msg_len=%d client_msg_id=%s meg=%s",
+        user.id, payload.conversation_id, len(payload.message), payload.client_msg_id, payload.message,
     )
     async with transaction() as session:
+        # 同会话续聊：取上一条 turn 作为 prior_turn_id，供 S1 加载其 SIR 快照 /
+        # 回溯上下文。此前普通 /chat 不线程化 prior_turn_id（仅 /control 回溯才传），
+        # 导致续聊的结构化记忆（SIR 状态继承、站点产物锁定）整条断链——第二条消息
+        # 既无法继承上一条 SIR 基态，S2 也无法锁定上一条产物做受控 edit。
+        # 新 turn 尚未插入，故 limit(1) 取到的就是真正的前一条。
+        prior = (
+            await session.execute(
+                select(turns_repo.model)
+                .where(turns_repo.model.conversation_id == payload.conversation_id)
+                .order_by(turns_repo.model.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        prior_turn_id = prior.turn_id if prior is not None else None
         accepted = await turn_service.accept(
             session,
             user=user,
@@ -460,6 +474,7 @@ async def create_turn(
             client_msg_id=payload.client_msg_id,
             raw_message=payload.message,
             expected_conversation_version=payload.expected_conversation_version,
+            prior_turn_id=prior_turn_id,
         )
 
     context = accepted.context

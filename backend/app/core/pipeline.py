@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Protocol, cast
@@ -93,18 +94,35 @@ class Pipeline:
                 await observer(StageResult(stage=stage.stage_id, status=StageStatus.RUNNING, reason_code="enter"))
             # 节点进入前快照（run 前取，确保不被 stage 原地修改污染）。
             in_io = cast(dict[str, Any], _log_safe(context.snapshot_state()))
+            # 真实阶段耗时: base.py 的 result() 因未收到 entered_at 会把 duration_ms 算成 ~0,
+            # 这里在 run 前后用单调时钟实测并回填, 供 SSE stage 事件 / 统计(record_gen_stage) 取真实耗时。
+            t0 = time.perf_counter()
             result = await stage.run(context)
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            result = result.model_copy(update={"duration_ms": elapsed_ms})
             # 节点完成后快照 + 变更字段 diff。
             out_io = cast(dict[str, Any], _log_safe(context.snapshot_state()))
             changed = sorted(
                 k for k in (set(in_io) | set(out_io)) if in_io.get(k) != out_io.get(k)
             )
-            logger.info(
-                "[pipeline.io] %s turn=%s | changed=%s | IN=%s | OUT=%s",
-                result.stage.value, context.turn_id, changed,
-                json.dumps(in_io, ensure_ascii=False),
-                json.dumps(out_io, ensure_ascii=False),
-            )
+            # 日志体量与可读性：S1 / S3 是 SIR 状态的两个关键拐点（加载基态 / 合并结果），
+            # 完整打印 IN/OUT 便于回放；其余阶段只打印「本次新增/修改了哪些字段 + 新值」，
+            # 避免每个阶段都刷一遍完整 SIR 结构体（调试期日志噪音极大）。
+            if result.stage in (StageId.S1, StageId.S3):
+                logger.info(
+                    "[pipeline.io] %s turn=%s | changed=%s | IN=%s | OUT=%s",
+                    result.stage.value, context.turn_id, changed,
+                    json.dumps(in_io, ensure_ascii=False),
+                    json.dumps(out_io, ensure_ascii=False),
+                )
+            else:
+                # 精简：只打出发生变化的字段名与其新值（changed 已含字段名，这里附新值）。
+                changed_kv = {k: out_io.get(k) for k in changed}
+                logger.info(
+                    "[pipeline.io] %s turn=%s | 变更字段=%s | %s",
+                    result.stage.value, context.turn_id, changed,
+                    json.dumps(changed_kv, ensure_ascii=False),
+                )
             logger.info(
                 "[pipeline] ◀ %s -> status=%s reason=%s duration=%dms turn=%s",
                 result.stage.value, result.status.value, result.reason_code,

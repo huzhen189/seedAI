@@ -384,7 +384,7 @@ def main():
     log("注册用户", uname)
     _, rr = http_post(cj, "/auth/register",
                       {"account": uname, "password": TMP_PW,
-                       "nickname": "e2e15", "email": f"{uname}@test.com"})
+                       "display_name": "e2e15", "email": f"{uname}@test.com"})
     if not isinstance(rr, dict) or rr.get("id") is None:
         log("!! 注册失败", rr)
         return

@@ -24,7 +24,7 @@ from .metrics import snapshot
 #   - 模型用量   → ModelCall(model_calls 表, 含 model/tokens/cost)
 # 2026-08-02 补回: TraceEvent(阶段链路) / Feedback(用户评价) 在 v3 模型包中重建,
 # 回放详情因此能还原 S0-S9 完整链路与用户评分, 不再降级为空。
-from .models import Feedback, Message, QcScore, TraceEvent, Turn, User, ModelCall
+from .models import Conversation, Feedback, Message, QcScore, TraceEvent, Turn, User, ModelCall
 
 # 6 维度(与 backend/ai_service/app/qc.py 保持一致, 供雷达图轴序)
 QC_DIMENSIONS = ["correctness", "completeness", "compliance", "efficiency", "readability", "safety"]
@@ -262,17 +262,41 @@ async def list_traces(
     _=Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(100, ge=1, le=500),
+    user_id: int | None = Query(None, description="按 user_id 过滤"),
+    project_id: int | None = Query(None, description="按 project_id 过滤"),
+    conversation_id: int | None = Query(None, description="按 conversation_id 过滤"),
+    trace_id: str | None = Query(None, description="按 trace_id(或 turn_id)精确/前缀过滤"),
 ):
     """生成/回放会话列表(倒序),供管理后台回放入口。
 
     v3 remap: 旧 Trace 模型 → Turn(turns 表), 保留 trace_id 关联 QC 与用户消息。
     Turn 无 model_id/total_tokens/started/finished 字段, 相关列降级为 None。
+    补全回放字段: project_id(经 conversation 反查) / conversation_id / turn_id(== trace_id) / 时间列。
     """
-    rows = (
-        (await db.execute(select(Turn).order_by(Turn.id.desc()).limit(limit)))
-        .scalars()
-        .all()
-    )
+    stmt = select(Turn)
+    if user_id is not None:
+        stmt = stmt.where(Turn.user_id == user_id)
+    if conversation_id is not None:
+        stmt = stmt.where(Turn.conversation_id == conversation_id)
+    if trace_id:
+        # trace_id 与 turn_id 同源(= 26 位), 支持精确或前缀匹配。
+        stmt = stmt.where(Turn.trace_id.like(f"{trace_id}%"))
+    stmt = stmt.order_by(Turn.id.desc()).limit(limit)
+    rows = (await db.execute(stmt)).scalars().all()
+
+    # project_id 反查: Turn.conversation_id → Conversation.project_id(批量查, 避免 N 查询)。
+    proj_by_conv: dict[int, int] = {}
+    conv_ids = list({t.conversation_id for t in rows if t.conversation_id is not None})
+    if conv_ids:
+        crows = (
+            (await db.execute(select(Conversation.id, Conversation.project_id).where(Conversation.id.in_(conv_ids))))
+            .tuples()
+            .all()
+        )
+        proj_by_conv = {c.id: c.project_id for c in crows}
+    if project_id is not None:
+        rows = [t for t in rows if proj_by_conv.get(t.conversation_id) == project_id]
+
     # 关联 QC 整体分(供列表快速预览)
     qc_rows = (await db.execute(select(QcScore))).scalars().all()
     qc_by_trace: dict[str, float] = {q.trace_id: q.overall for q in qc_rows}
@@ -306,7 +330,10 @@ async def list_traces(
         {
             "id": t.id,
             "trace_id": t.trace_id,
+            "turn_id": t.trace_id,
             "user_id": t.user_id,
+            "conversation_id": t.conversation_id,
+            "project_id": proj_by_conv.get(t.conversation_id),
             "user_input": user_inputs.get(t.trace_id, "") if t.trace_id else "",
             "model_id": None,
             "status": t.status,
@@ -397,16 +424,28 @@ async def get_trace(
     fb = (
         await db.execute(select(Feedback).where(Feedback.trace_id == trace_id))
     ).scalar_one_or_none()
+    # 回放补全字段: project_id(经 conversation 反查) + 结束时间(取消息/事件最新 created_at)。
+    project_id = None
+    if t.conversation_id is not None:
+        conv = await db.get(Conversation, t.conversation_id)
+        project_id = conv.project_id if conv else None
+    cands = [m["created_at"] for m in msgs if m.get("created_at")] + [
+        e["created_at"] for e in events if e.get("created_at")
+    ]
+    finished_at = max(cands) if cands else (t.created_at.isoformat() if t.created_at else None)
     return {
         "trace": {
             "id": t.id,
             "trace_id": t.trace_id,
+            "turn_id": t.trace_id,
             "user_id": t.user_id,
+            "conversation_id": t.conversation_id,
+            "project_id": project_id,
             "model_id": None,
             "status": t.status,
             "total_tokens": None,
             "started_at": t.created_at.isoformat() if t.created_at else None,
-            "finished_at": None,
+            "finished_at": finished_at,
         },
         "qc": (
             {
@@ -488,39 +527,25 @@ async def quality(_=Depends(require_admin), db: AsyncSession = Depends(get_db)):
         samples = []
 
     # ── QC 单裁判聚合(v2.3.0) ──
+    # 新 schema: QcScore.result = {"scores": {dim: int(0-100)}, "overall": float(0-10), ...}
+    # 维度键与 backend/app/llm/extract.py 的 qc.scores 严格对齐(correctness/completeness/...)。
+    # 旧 schema(result.dimensions[d].mean / result.judges) 已废弃, 不再读取。
     qc_rows = (await db.execute(select(QcScore))).scalars().all()
     qc_count = len(qc_rows)
-    # 单裁判下: 每条 QC 记录的 scores 长度=1(仅本次生成模型)。
-    # 雷达图按「实际出现的模型」各画一条序列(而不是固定 3 条), 另保留整体每维均值。
-    qc_model_dims: dict[str, dict] = {}      # {model: {dim: [scores...]}}
     qc_overall_dim: dict[str, list] = {d: [] for d in QC_DIMENSIONS}
     qc_overall_list: list[float] = []
-    seen_models: list[str] = []
     for q in qc_rows:
         res = q.result or {}
         if not isinstance(res, dict):
             continue
         if res.get("overall") is not None:
             qc_overall_list.append(float(res.get("overall", 0)))
-        # 该次 QC 的模型标签: 取 judges[0].model(单裁判)
-        judges = res.get("judges") or []
-        model_label = (judges[0].get("model") if judges else "unknown") or "unknown"
-        if model_label not in qc_model_dims:
-            qc_model_dims[model_label] = {d: [] for d in QC_DIMENSIONS}
-            seen_models.append(model_label)
-        dims = res.get("dimensions", {}) or {}
-        for d in QC_DIMENSIONS:
-            dd = dims.get(d, {}) or {}
-            mean = dd.get("mean")
-            if mean is not None and mean > 0:
-                qc_overall_dim[d].append(float(mean))
-            scores = dd.get("scores", []) or []
-            if scores and scores[0] and scores[0] > 0:
-                qc_model_dims[model_label][d].append(float(scores[0]))
-    qc_model_avg = {
-        m: {d: round(sum(v) / len(v), 2) if v else 0.0 for d, v in dm.items()}
-        for m, dm in qc_model_dims.items()
-    }
+        scores = res.get("scores") or {}
+        if isinstance(scores, dict):
+            for d in QC_DIMENSIONS:
+                v = scores.get(d)
+                if isinstance(v, (int, float)) and v > 0:
+                    qc_overall_dim[d].append(float(v))
     qc_overall_dim_avg = {
         d: round(sum(v) / len(v), 2) if v else 0.0 for d, v in qc_overall_dim.items()
     }
@@ -545,11 +570,11 @@ async def quality(_=Depends(require_admin), db: AsyncSession = Depends(get_db)):
         "qc_count": qc_count,
         "qc_overall_avg": qc_overall_avg,
         "qc_overall_dim_avg": qc_overall_dim_avg,   # 整体每维均值(雷达图基线序列)
-        "qc_model_avg": qc_model_avg,               # 实际出现的模型每维均值(每条=一个模型序列)
+        "qc_model_avg": {},                          # 预留: 单裁判下无多模型序列
         "qc_review_rate": qc_review_rate,           # 需人工复核占比
         "qc_dimensions": QC_DIMENSIONS,
         "qc_dim_labels": QC_DIM_LABELS,
-        "qc_judges": seen_models,                   # 实际出现的 QC 模型(前端雷达图序列名)
+        "qc_judges": [],                             # 预留: 实际出现的 QC 模型(前端雷达图序列名)
     }
 
 

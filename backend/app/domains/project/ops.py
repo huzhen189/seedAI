@@ -174,11 +174,15 @@ class ProjectOpsService:
         project_id: int,
         user_id: int,
         trace_id: str,
+        publish_files: list[str] | None = None,
     ) -> OpsOutcome:
         """按 speech_act 分发到具体执行器(publish/trash/restore/purge)。
 
         先以 ``for_update`` 锁住项目行(防并发状态竞争),再校验存在性与状态机合法性
         (purging 中禁止任何操作);未知动作返回 failed 而非抛异常,便于 S6/Gate 统一收口。
+
+        ``publish_files``：增量发布的文件清单(相对 artifact 路径)。非 None 时只把
+        这些文件从预览目录叠加进线上版本目录(不删除线上已有其他文件);None 为整版发布。
 
         Returns:
             ``OpsOutcome``(status/text/output_refs/error_code)。
@@ -205,17 +209,40 @@ class ProjectOpsService:
         if handler is None:
             logger.warning("[ops] 不支持的动作 action=%s", action)
             return OpsOutcome(status="failed", text=f"不支持的项目操作：{action}。", error_code="unsupported_action")
-        return await handler(session, project, trace_id=trace_id)
+        return await handler(session, project, trace_id=trace_id, publish_files=publish_files)
 
     # ------------------------------------------------------------------ publish
 
-    async def publish(self, session: AsyncSession, project: Project, *, trace_id: str) -> OpsOutcome:
-        """Deployment Saga：pending→uploading→health_checking→succeeded|failed。"""
+    async def publish(
+        self,
+        session: AsyncSession,
+        project: Project,
+        *,
+        trace_id: str,
+        publish_files: list[str] | None = None,
+    ) -> OpsOutcome:
+        """Deployment Saga：pending→uploading→health_checking→succeeded|failed。
+
+        ``publish_files`` 非 None 时为增量发布：仅把清单内文件从预览目录叠加进线上
+        版本目录(未选中的线上已有文件保留不动),并以整个 artifact manifest 做健康检查基准
+        (确保站点完整性,且被选中的文件确实可见)。
+        """
         if project.head_artifact_id is None:
             return OpsOutcome(status="failed", text="项目还没有可发布的网站版本，请先生成一版。", error_code="no_artifact")
         artifact = await session.get(Artifact, project.head_artifact_id)
         if artifact is None or artifact.status not in {"verified", "preview_ready"}:
             return OpsOutcome(status="failed", text="待发布的产物不可用，请重新生成网站。", error_code="artifact_not_publishable")
+
+        # 增量发布: 校验文件清单全部存在于 artifact 的 manifest 中, 否则拒绝, 避免发布幽灵文件。
+        if publish_files is not None:
+            unknown = [f for f in publish_files if f not in artifact.manifest]
+            if unknown:
+                return OpsOutcome(
+                    status="failed",
+                    text=f"发布清单含未知文件: {', '.join(unknown)}。",
+                    error_code="publish_file_unknown",
+                    details={"unknown": unknown},
+                )
 
         deployment = Deployment(
             project_id=project.id,
@@ -233,13 +260,15 @@ class ProjectOpsService:
 
         source = preview_dir(project.user_id, project.id, artifact.version)
         target = published_dir(project.user_id, project.id, artifact.version)
+        mode_label = "增量" if publish_files is not None else "整版"
         try:
             deployment.status = "uploading"
             await session.flush()
-            self._copy_release(source, target, artifact.manifest)
+            self._copy_release(source, target, artifact.manifest, publish_files)
 
             deployment.status = "health_checking"
             await session.flush()
+            # 健康检查始终以完整 manifest 为基准, 保证线上站点整体可用。
             report = self._health_check(target, artifact.manifest)
         except (OSError, ValueError) as exc:
             logger.warning("发布失败 project=%s artifact=%s: %s", project.id, artifact.id, exc)
@@ -302,31 +331,73 @@ class ProjectOpsService:
             },
         )
         await session.flush()
+        suffix = f"（增量发布 {len(publish_files)} 个文件）" if publish_files is not None else ""
         return OpsOutcome(
             status="succeeded",
-            text=f"已发布网站 v{artifact.version}，线上版本已切换。",
+            text=f"已发布网站 v{artifact.version}{suffix}，线上版本已切换。",
             output_refs=[str(artifact.id), str(deployment.id)],
-            details={"deployment_id": deployment.id, "version": artifact.version},
+            details={"deployment_id": deployment.id, "version": artifact.version, "incremental": publish_files is not None},
         )
 
     @staticmethod
-    def _copy_release(source: Path, target: Path, manifest: dict[str, Any]) -> None:
-        """把预览产物复制进版本化的发布目录；先写 .staging 再整体 replace，避免半成品。"""
+    def _copy_release(
+        source: Path,
+        target: Path,
+        manifest: dict[str, Any],
+        publish_files: list[str] | None = None,
+    ) -> None:
+        """把预览产物复制进版本化的发布目录；先写 .staging 再整体 replace，避免半成品。
+
+        ``publish_files`` 非 None 时为增量模式: 仅把清单文件叠加进已有(或新建)的
+        目标目录, 保留线上目录里未被选中的其他文件(叠加语义); 若存在上一代同版本目录,
+        以它为基底再覆盖指定文件, 保证未选中文件不丢。整版模式(publish_files=None)
+        则整目录重建(先清空旧目录再 replace)。
+        """
         if not source.is_dir():
             raise OSError(f"预览产物目录不存在: {source}")
-        staging = target.with_name(target.name + ".staging")
-        _delete_project_tree(staging)
-        staging.parent.mkdir(parents=True, exist_ok=True)
-        for relative in manifest:
+
+        if publish_files is None:
+            # 整版发布: 一次性整目录重建(幂等)。
+            staging = target.with_name(target.name + ".staging")
+            _delete_project_tree(staging)
+            staging.parent.mkdir(parents=True, exist_ok=True)
+            for relative in manifest:
+                src_file = source / relative
+                if not src_file.is_file():
+                    raise OSError(f"产物缺少清单文件: {relative}")
+                dst_file = staging / relative
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_file, dst_file)
+            _delete_project_tree(target)
+            staging.replace(target)
+            return
+
+        # 增量发布: 以线上已有同版本目录为基底(若存在), 仅覆盖选中的文件。
+        if target.is_dir():
+            base = target
+        else:
+            # 首次发布: 从 preview 完整复制, 再叠加(等价于整版, 但走同一代码路径)。
+            staging = target.with_name(target.name + ".staging")
+            _delete_project_tree(staging)
+            staging.parent.mkdir(parents=True, exist_ok=True)
+            for relative in manifest:
+                src_file = source / relative
+                if src_file.is_file():
+                    dst_file = staging / relative
+                    dst_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_file, dst_file)
+            _delete_project_tree(target)
+            staging.replace(target)
+            base = target
+        for relative in publish_files:
+            if relative not in manifest:
+                raise OSError(f"发布清单含未知文件: {relative}")
             src_file = source / relative
             if not src_file.is_file():
-                raise OSError(f"产物缺少清单文件: {relative}")
-            dst_file = staging / relative
+                raise OSError(f"预览目录缺少文件: {relative}")
+            dst_file = base / relative
             dst_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src_file, dst_file)
-        # 同版本重复发布是幂等的：内容一致，直接替换旧的同版本目录。
-        _delete_project_tree(target)
-        staging.replace(target)
 
     @staticmethod
     def _health_check(target: Path, manifest: dict[str, Any]) -> dict[str, Any]:

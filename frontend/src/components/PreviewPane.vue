@@ -24,6 +24,7 @@ const props = defineProps<{
 
 const grant = ref<PreviewGrant | null>(null)
 const error = ref<string | null>(null)
+const loading = ref(false)
 let timer: ReturnType<typeof setTimeout> | null = null
 
 function clearTimer() {
@@ -43,11 +44,15 @@ function scheduleResign(g: PreviewGrant) {
 }
 
 async function refresh() {
+  // 没有选中产物(进入页面/未生成) → 不展示 loading,直接空态。
+  // 这是修复「一进来就 loading、永远转圈」的关键:loading 只在真正发请求时才置位。
   if (props.projectId == null || props.artifactId == null) {
     grant.value = null
     error.value = null
+    loading.value = false
     return
   }
+  loading.value = true
   try {
     const g = await requestPreviewGrant(props.projectId, {
       artifactId: props.artifactId,
@@ -59,6 +64,8 @@ async function refresh() {
   } catch (e) {
     grant.value = null
     error.value = e instanceof Error ? e.message : '预览授权失败'
+  } finally {
+    loading.value = false
   }
 }
 
@@ -92,9 +99,13 @@ onUnmounted(() => clearTimer())
       <span class="state-text">无法预览：{{ error }}</span>
       <button class="retry-btn" @click="refresh()">重试</button>
     </div>
-    <div v-else-if="!grant" class="state">
+    <div v-else-if="loading" class="state">
       <div class="spinner"></div>
       <span class="state-text">正在获取预览授权…</span>
+    </div>
+    <div v-else-if="!grant" class="state">
+      <span class="state-icon">🌐</span>
+      <span class="state-text">暂无可预览的产物</span>
     </div>
     <template v-else>
       <div class="pane-toolbar">

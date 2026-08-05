@@ -152,8 +152,12 @@ class BaseRepo[ModelT: Base]:
                     raise LookupError(f"记录 id={record_id} 不存在")
                 raise RepositoryError("update", model.__name__, "乐观锁冲突或记录不存在")
             await session.flush()
-            session.expire_all()
+            # 移除 session.expire_all()：它会把同会话内所有对象（含无关的 project）一并置失效，
+            # 导致后续在同步上下文访问其惰性属性时触发 MissingGreenlet（site 发布 / 研究检索同受其害）。
+            # 改用 session.refresh 只刷新刚更新的这一条记录，既保证返回值是 DB 最新值，又不误伤其它对象。
             updated = await self.get(session, record_id)
+            if updated is not None:
+                await session.refresh(updated)
             if updated is None:
                 raise RepositoryError("update", model.__name__, "更新后记录不可见")
             return updated

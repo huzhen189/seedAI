@@ -27,10 +27,10 @@ class UserResp(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     account: str
-    nickname: str = ""
+    display_name: str = ""
     email: str | None = None
     role: str
-    plan: str
+    tier: str
 
 
 class UpdateMeReq(BaseModel):
@@ -119,10 +119,10 @@ class AdminUserResp(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     account: str
-    nickname: str = ""
+    display_name: str = ""
     email: str | None = None
     role: str
-    plan: str
+    tier: str
 
 
 class SetRoleReq(BaseModel):
@@ -131,10 +131,10 @@ class SetRoleReq(BaseModel):
     role: str = Field(pattern="^(user|admin|super_admin)$")
 
 
-class SetPlanReq(BaseModel):
-    """变更用户套餐(预留收费接入)。"""
+class SetTierReq(BaseModel):
+    """变更用户套餐等级(v3: tier 枚举 free/pro/max; 原 plan 字段已并入 tier)。"""
 
-    plan: str = Field(min_length=1, max_length=16)
+    tier: str = Field(min_length=1, max_length=16)
 
 
 # ---------- 对话反馈(③-a:1-10 评分 + 评论) ----------

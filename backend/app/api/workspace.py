@@ -20,7 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.expression import ColumnElement
 
 from app.db import get_db, transaction
-from app.models import Conversation, Message, Project
+from app.db.repositories.runtime import deployments_repo
+from app.config import settings
+from app.models import Conversation, Deployment, Message, Project
 from app.security import CurrentUser, get_current_user
 
 router = APIRouter(prefix="/api", tags=["workspace"])
@@ -35,8 +37,17 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
 
-def _project_view(p: Project) -> dict[str, Any]:
+async def _project_view(p: Project, session: AsyncSession) -> dict[str, Any]:
+    """项目视图序列化。线上地址(published_url)需惰性读取当前 active_deployment 的
+    object_prefix 拼接 COS 公开域名得到; 未部署则为 null。"""
     spec: dict[str, Any] = p.site_spec if isinstance(p.site_spec, dict) else {}
+    published_url: str | None = None
+    if p.active_deployment_id and settings.cos_preview_domain:
+        deployment = await session.get(Deployment, p.active_deployment_id)
+        if deployment and deployment.object_prefix:
+            published_url = (
+                f"{settings.cos_preview_domain.rstrip('/')}/{deployment.object_prefix.strip('/')}/index.html"
+            )
     return {
         "id": p.id,
         "user_id": p.user_id,
@@ -52,6 +63,7 @@ def _project_view(p: Project) -> dict[str, Any]:
         "has_unpublished_changes": bool(
             p.head_artifact_id is not None and p.head_artifact_id != p.published_artifact_id
         ),
+        "published_url": published_url,
         # 旧前端字段: 需求文档存于 site_spec.requirement_doc(JSON 字符串)。
         "requirement_doc": spec.get("requirement_doc"),
     }
@@ -117,7 +129,7 @@ async def list_projects(
             .order_by(Project.updated_at.desc())
         )
     ).scalars().all()
-    return [_project_view(p) for p in rows]
+    return [await _project_view(p, session) for p in rows]
 
 
 @router.post("/projects")
@@ -130,7 +142,7 @@ async def create_project(
         session.add(project)
         await session.flush()
         await session.refresh(project)
-        view = _project_view(project)
+        view = await _project_view(project, session)
     return view
 
 
@@ -148,7 +160,7 @@ async def rename_project(
             raise HTTPException(status_code=409, detail={"code": "PROJECT_NOT_EDITABLE", "status": project.status})
         project.name = payload.name
         project.lock_version += 1
-        view = _project_view(project)
+        view = await _project_view(project, session)
     return view
 
 
@@ -300,7 +312,7 @@ async def auto_start(
         session.add(conversation)
         await session.flush()
         await session.refresh(conversation)
-        project_view = _project_view(project)
+        project_view = await _project_view(project, session)
         conversation_view = _conversation_view(conversation)
     return {"project": project_view, "conversation": conversation_view}
 

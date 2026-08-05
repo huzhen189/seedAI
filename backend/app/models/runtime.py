@@ -135,6 +135,9 @@ class Approval(Base, TimestampMixin):
     artifact_id: Mapped[int | None] = mapped_column(UnsignedBigInt)
     manifest_digest: Mapped[str | None] = mapped_column(String(64))
     args_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 审批动作携带的结构化参数(如增量发布的 publish_files 清单)。S5 解析消息后写入,
+    # 审批决策执行时取出透传给领域执行层; 避免把参数塞进消息文本或 args_hash。
+    args: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     risk_level: Mapped[str] = mapped_column(enum_type("approval_risk", "high", "critical"), nullable=False)
     status: Mapped[str] = mapped_column(enum_type("approval_status", "pending_first", "first_confirmed", "pending_second", "approved", "rejected", "expired", "consumed", "invalidated"), default="pending_first", nullable=False)
     step: Mapped[int] = mapped_column(Integer, default=1, nullable=False)

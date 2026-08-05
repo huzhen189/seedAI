@@ -102,8 +102,11 @@ class ConversationsRepo(BaseRepo[Conversation]):
             if result.rowcount != 1:
                 raise ConversationStateError("会话不存在或状态已被并发修改")
             await session.flush()
-            session.expire_all()
+            # 移除 session.expire_all()：会误伤同会话的其它对象（如 site 路径的 project），
+            # 在同步上下文访问其惰性属性时触发 MissingGreenlet。改用 session.refresh 只刷新本会话记录。
             conversation = await self.get(session, conversation_id)
+            if conversation is not None:
+                await session.refresh(conversation)
             if conversation is None:
                 raise RepositoryError("transition", "Conversation", "迁移后会话不可见")
             return conversation

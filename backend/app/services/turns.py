@@ -88,8 +88,8 @@ class TurnService:
             raise HTTPException(status_code=409, detail={"code": "CONVERSATION_VERSION_CONFLICT"})
 
         logger.info(
-            "[turn] 新受理 turn user=%s conv=%s msg_len=%d pii=%s truncated=%s",
-            user.id, conversation_id, len(clean), trust.pii_redacted, trust.truncated,
+            "[turn] 新受理 turn user=%s conv=%s msg_len=%d pii=%s truncated=%s meg=%s",
+            user.id, conversation_id, len(clean), trust.pii_redacted, trust.truncated, clean,
         )
         turn_id = new_ulid()
         stream_id = new_ulid()

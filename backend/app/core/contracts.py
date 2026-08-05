@@ -238,6 +238,10 @@ class UnderstandingResult(ContractModel):
     model_call_id: str | None = Field(default=None, max_length=128)
     degradation_reason: str | None = Field(default=None, max_length=256)
     escalated: bool = False
+    # 方案③ LLM 升级时回填的**原文响应**（与 [S2] 日志整合，便于回放升级依据）。
+    # 仅升级路径写入；规则路径恒为 None（零 LLM 成本）。exclude 默认 False 以便审计落库，
+    # 但若不需入库可后续再加 exclude=True。
+    escalation_llm_response: str | None = Field(default=None, max_length=4096)
 
 
 class IntentItem(ContractModel):
@@ -369,7 +373,7 @@ class ResponseFragment(ContractModel):
 
 
 class ValidationResult(ContractModel):
-    status: Literal["pass", "clarify", "needs_approval", "block"]
+    status: Literal["pass", "clarify", "needs_approval", "needs_info", "block"]
     response_fragments: list[ResponseFragment] = Field(default_factory=list)
     pending_action_id: str | None = Field(default=None, max_length=64)
     approval_id: str | None = Field(default=None, max_length=26)
@@ -399,7 +403,9 @@ class ExecutionResult(ContractModel):
 
 
 class MemoryDecision(ContractModel):
-    status: Literal["stored", "skipped", "degraded", "failed"] = "skipped"
+    # 注意：``persisted`` 表示「记忆写入已异步派发」(S7 派发 persist_and_extract 后)，
+    # 与 ``stored``(已落库) 区分；s7_persist_state 派发即置 ``persisted``。
+    status: Literal["stored", "skipped", "degraded", "failed", "persisted"] = "skipped"
     reason_codes: list[str] = Field(default_factory=list)
     producer_stage: Literal[StageId.S7] = StageId.S7
     input_version: str = SCHEMA_VERSION

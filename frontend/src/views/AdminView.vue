@@ -294,10 +294,19 @@ function qcLabel(d: string): string {
   return (QC_DIM_LABELS as Record<string, string>)[d] || d
 }
 
+// LLM 调用类型 purpose -> 中文标签(语义分析 / 结果总结 / 实际任务 等)
+function llmPurposeLabel(p: string): string {
+  const m: Record<string, string> = {
+    intent: '语义分析', extract: '记忆/QC 提取', reply: '实际任务回复', health: '探活', other: '其他',
+  }
+  return m[p] || p
+}
+
 // ---- 回放(③-a) ----
 interface TraceItem {
-  id: number; trace_id: string; user_id: number; model_id: string | null
+  id: number; trace_id: string; turn_id: string; user_id: number; model_id: string | null
   status: string; total_tokens: number; started_at: string | null; finished_at: string | null
+  conversation_id: number | null; project_id: number | null
   qc_overall?: number | null
   feedback_rating?: number | null
 }
@@ -327,11 +336,21 @@ interface TraceDetail {
 const traces = ref<TraceItem[]>([])
 const tracesLoading = ref(false)
 const selectedTrace = ref<TraceDetail | null>(null)
+// 回放按 id 搜索(用户/项目/会话/trace·turn)
+const traceFilters = ref<{ user_id: string; project_id: string; conversation_id: string; trace_id: string }>({
+  user_id: '', project_id: '', conversation_id: '', trace_id: '',
+})
 
 async function fetchTraces() {
   tracesLoading.value = true
   try {
-    traces.value = await get('/admin/traces?limit=50')
+    const params = new URLSearchParams()
+    params.set('limit', '50')
+    if (traceFilters.value.user_id.trim()) params.set('user_id', traceFilters.value.user_id.trim())
+    if (traceFilters.value.project_id.trim()) params.set('project_id', traceFilters.value.project_id.trim())
+    if (traceFilters.value.conversation_id.trim()) params.set('conversation_id', traceFilters.value.conversation_id.trim())
+    if (traceFilters.value.trace_id.trim()) params.set('trace_id', traceFilters.value.trace_id.trim())
+    traces.value = await get(`/admin/traces?${params.toString()}`)
   } catch { /* ignore */ }
   finally { tracesLoading.value = false }
 }
@@ -374,7 +393,8 @@ interface AiCoreReviewerSkill { passed: number; failed: number; total: number; p
 interface AiCoreReviewer { total: number; per_skill: Record<string, AiCoreReviewerSkill>; needs_review: number; needs_review_rate: number; reason_dist: Record<string, number>; dimensions: Record<string, LatencyBucket> }
 interface AiCoreSafety { total: number; risk_dist: Record<string, number>; outcome_dist: Record<string, number>; reason_dist: Record<string, number> }
 interface AiCoreLlmModel { total: number; ok: number; fail: number; success_rate: number; err_dist: Record<string, number>; duration_ms: LatencyBucket; tokens_in: number; tokens_out: number }
-interface AiCoreLlm { total: number; models: Record<string, AiCoreLlmModel> }
+interface AiCoreLlmPurpose { total: number; ok: number; fail: number; success_rate: number; tokens_in: number; tokens_out: number }
+interface AiCoreLlm { total: number; models: Record<string, AiCoreLlmModel>; purposes?: Record<string, AiCoreLlmPurpose> }
 interface AiCoreMultiIntent {
   total: number
   path_dist: Record<string, number>
@@ -1149,6 +1169,23 @@ function fmtMeta(meta: Record<string, any> | undefined): string {
             </tbody>
           </table>
         </div>
+        <!-- AI 核心 · LLM 调用类型分布(语义分析 / 结果总结 / 实际任务) -->
+        <div class="block" v-if="al.ai_core && al.ai_core.llm && al.ai_core.llm.purposes && Object.keys(al.ai_core.llm.purposes).length">
+          <h4>LLM 调用类型分布</h4>
+          <table class="atable">
+            <thead><tr><th>类型</th><th>次数</th><th>成功</th><th>失败</th><th>成功率</th><th>Token(in/out)</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, k) in al.ai_core.llm.purposes" :key="k">
+                <td>{{ llmPurposeLabel(k) }}</td>
+                <td>{{ v.total }}</td>
+                <td>{{ v.ok }}</td>
+                <td>{{ v.fail }}</td>
+                <td>{{ (v.success_rate * 100).toFixed(0) }}%</td>
+                <td>{{ (v.tokens_in || 0).toLocaleString() }} / {{ (v.tokens_out || 0).toLocaleString() }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
         <!-- AI 核心 · 编排成功率 -->
         <div class="block" v-if="al.orchestration && al.orchestration.total">
           <h4>AI 核心 · 多意图编排</h4>
@@ -1170,37 +1207,49 @@ function fmtMeta(meta: Record<string, any> | undefined): string {
         <h3>生成回放</h3>
         <button class="refresh" :disabled="tracesLoading" @click="fetchTraces">刷新</button>
       </div>
+      <div v-if="!selectedTrace" class="trace-filters">
+        <input v-model="traceFilters.user_id" class="vinput small" placeholder="user_id" @keyup.enter="fetchTraces" />
+        <input v-model="traceFilters.project_id" class="vinput small" placeholder="project_id" @keyup.enter="fetchTraces" />
+        <input v-model="traceFilters.conversation_id" class="vinput small" placeholder="conversation_id" @keyup.enter="fetchTraces" />
+        <input v-model="traceFilters.trace_id" class="vinput" placeholder="trace_id / turn_id" @keyup.enter="fetchTraces" />
+        <button class="refresh" :disabled="tracesLoading" @click="fetchTraces">搜索</button>
+        <button class="mini-btn" @click="traceFilters = { user_id: '', project_id: '', conversation_id: '', trace_id: '' }; fetchTraces()">重置</button>
+      </div>
       <div v-if="selectedTrace" class="block">
         <button class="back" @click="selectedTrace = null">← 返回列表</button>
-        <p class="hint">Trace: {{ selectedTrace.trace.trace_id }} | 模型: {{ selectedTrace.trace.model_id || '-' }} | 状态: {{ statusLabel(selectedTrace.trace.status) }} | Token: ~{{ selectedTrace.trace.total_tokens }}</p>
+        <p class="hint">
+          Trace/turn: {{ selectedTrace.trace.trace_id }}
+          | 用户: {{ selectedTrace.trace.user_id }}
+          | 项目: {{ selectedTrace.trace.project_id ?? '-' }}
+          | 会话: {{ selectedTrace.trace.conversation_id ?? '-' }}
+          | 状态: {{ statusLabel(selectedTrace.trace.status) }}
+          | 开始: {{ selectedTrace.trace.started_at?.slice(0, 19) || '-' }}
+          | 结束: {{ (selectedTrace.trace.finished_at as string)?.slice(0, 19) || '-' }}
+        </p>
 
-        <!-- 后置 QC 单裁判详情 -->
-        <div v-if="selectedTrace.qc && selectedTrace.qc.result?.dimensions" class="block">
+        <!-- 后置 QC 单裁判详情(新 schema: result.scores = {dim: int(0-100)}) -->
+        <div v-if="selectedTrace.qc && selectedTrace.qc.result?.scores && Object.keys(selectedTrace.qc.result.scores).length" class="block">
           <h3>
             后置 QC 单裁判
-            <span class="pill">模型 {{ selectedTrace.qc.judges?.[0]?.model || '—' }}</span>
             <span class="pill">整体 {{ selectedTrace.qc.overall.toFixed(2) }}</span>
             <span v-if="selectedTrace.qc.needs_review" class="pill warn">需复核</span>
             <span v-if="selectedTrace.qc.partial" class="pill gray">评分失败</span>
             <span v-if="selectedTrace.qc.safety_risk && selectedTrace.qc.safety_risk !== 'low'" class="pill danger">{{ selectedTrace.qc.safety_risk }}</span>
           </h3>
           <table class="qctable">
-            <thead>
-              <tr>
-                <th>维度</th><th>均值</th>
-                <th v-for="(jdg, ji) in (selectedTrace.qc.judges || [])" :key="ji">{{ jdg.model }}</th>
-              </tr>
-            </thead>
+            <thead><tr><th>维度</th><th>评分(0-100)</th></tr></thead>
             <tbody>
-              <tr v-for="d in Object.keys(selectedTrace.qc.result.dimensions)" :key="d">
+              <tr v-for="(v, d) in selectedTrace.qc.result.scores" :key="d">
                 <td>{{ qcLabel(d) }}</td>
-                <td>{{ selectedTrace.qc.result.dimensions[d].mean.toFixed(1) }}</td>
-                <td v-for="(_, ji) in (selectedTrace.qc.judges || [])" :key="ji">
-                  {{ selectedTrace.qc.result.dimensions[d].scores?.[ji] || '-' }}
-                </td>
+                <td>{{ v }}</td>
               </tr>
             </tbody>
           </table>
+          <p v-if="selectedTrace.qc.result.rationale" class="hint">评语: {{ selectedTrace.qc.result.rationale }}</p>
+        </div>
+        <div v-else-if="selectedTrace.qc" class="block muted">
+          <h3>后置 QC 单裁判</h3>
+          <p>该 trace 暂无六维打分（仅整体分 {{ selectedTrace.qc.overall.toFixed(2) }}）。</p>
         </div>
 
         <!-- 用户反馈 -->
@@ -1269,17 +1318,23 @@ function fmtMeta(meta: Record<string, any> | undefined): string {
       </div>
       <table v-else class="utable">
         <thead>
-          <tr><th>Trace ID</th><th>用户输入</th><th>模型</th><th>状态</th><th>QC</th><th>评分</th><th>时间</th></tr>
+          <tr>
+            <th>Trace/turn ID</th><th>用户</th><th>项目</th><th>会话</th>
+            <th>用户输入</th><th>状态</th><th>QC</th><th>评分</th><th>开始</th><th>结束</th>
+          </tr>
         </thead>
         <tbody>
           <tr v-for="t in traces" :key="t.id" style="cursor:pointer;" @click="viewTrace(t.trace_id)">
             <td>{{ t.trace_id.slice(0, 12) }}</td>
+            <td>{{ t.user_id }}</td>
+            <td>{{ t.project_id ?? '-' }}</td>
+            <td>{{ t.conversation_id ?? '-' }}</td>
             <td class="user-input">{{ (t as any).user_input || '-' }}</td>
-            <td>{{ t.model_id || '-' }}</td>
             <td>{{ statusLabel(t.status) }}</td>
             <td>{{ t.qc_overall != null ? t.qc_overall.toFixed(1) : '-' }}</td>
             <td>{{ t.feedback_rating != null ? t.feedback_rating : '-' }}</td>
             <td>{{ t.started_at?.slice(0, 19) || '-' }}</td>
+            <td>{{ (t.finished_at as string)?.slice(0, 19) || '-' }}</td>
           </tr>
         </tbody>
       </table>
@@ -1809,6 +1864,9 @@ function fmtMeta(meta: Record<string, any> | undefined): string {
 .dfill { display: block; height: 100%; background: var(--brand); }
 .dcnt { color: var(--muted); }
 .events { max-height: 520px; overflow: auto; }
+.trace-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.trace-filters .vinput { flex: 1 1 160px; min-width: 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text-1); font-size: 13px; }
+.trace-filters .vinput.small { flex: 0 0 120px; width: 120px; }
 .events-toolbar { display: flex; justify-content: flex-end; margin-bottom: 6px; }
 .mini-btn { border: 1px solid var(--border); background: var(--panel); color: var(--text-2); border-radius: 6px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
 .mini-btn:hover { border-color: var(--brand); color: var(--brand); }

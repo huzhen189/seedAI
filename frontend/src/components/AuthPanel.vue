@@ -19,6 +19,10 @@ async function submit() {
     err.value = '请输入账号和密码'
     return
   }
+  if (mode.value === 'register' && password.value.length < 6) {
+    err.value = '密码至少 6 位'
+    return
+  }
   busy.value = true
   try {
     if (mode.value === 'login') {

@@ -52,14 +52,22 @@ class SlotDef(BaseModel):
 
 # -------------------------------------------------------------------------------- L0 全局通用
 # 必填只放用户明确指定的 4 项；联系/邮箱/语言一律不进通用层。
+# ⚠️ 命名空间对齐（方案 A）：
+#   - key 一律使用 ``site.*`` SIR 命名空间，与 ``domains/site/workflow.build_spec``
+#     实际消费的 SIR 槽位一一对应（``site.theme``/``site.brief``/``site.deploy_target``），
+#     以及 ``Project.name``（站点名，对应 ``site.name``）。
+#   - 此前用裸 key（site_name/style/primary_goal/deploy_target）与 SIR 的 ``site.*`` 永远对不上，
+#     导致"信息收集"的硬闸门永远失效、建站直接执行。现统一命名空间后闸门才能成立。
+#   - ``site.theme`` 兼容旧抽取：``_extract_slots`` 命中风/深色/科技感等即写 ``site.theme``，
+#     与本条"样式风格"必填语义等价；``site.brief`` 对应"内容主题/主要目的"。
 L0_REQUIRED: list[SlotDef] = [
-    SlotDef(key="site_name", label="网站名称", layer=LayerKind.L0, kind=SlotKind.REQUIRED,
+    SlotDef(key="site.name", label="网站名称", layer=LayerKind.L0, kind=SlotKind.REQUIRED,
             prompt_hint="询问用户这个网站叫什么名字", example="花间集"),
-    SlotDef(key="style", label="样式风格", layer=LayerKind.L0, kind=SlotKind.REQUIRED,
+    SlotDef(key="site.theme", label="样式风格", layer=LayerKind.L0, kind=SlotKind.REQUIRED,
             prompt_hint="确认整体视觉风格（如简约 / 商务 / 活泼 / 科技感）", example="简约商务"),
-    SlotDef(key="primary_goal", label="内容主题 / 主要目的", layer=LayerKind.L0, kind=SlotKind.REQUIRED,
+    SlotDef(key="site.brief", label="内容主题 / 主要目的", layer=LayerKind.L0, kind=SlotKind.REQUIRED,
             prompt_hint="网站主要展示什么内容或想达成什么目的", example="展示烘焙教程与食谱"),
-    SlotDef(key="deploy_target", label="部署目标", layer=LayerKind.L0, kind=SlotKind.REQUIRED,
+    SlotDef(key="site.deploy_target", label="部署目标", layer=LayerKind.L0, kind=SlotKind.REQUIRED,
             prompt_hint="网站打算部署到哪里（如自有域名 / 平台托管 / 本地预览）", example="平台托管"),
 ]
 L0_OPTIONAL: list[SlotDef] = [
@@ -83,21 +91,21 @@ L0_IMPLICIT: list[SlotDef] = [
 L1_BUCKETS: dict[str, list[SlotDef]] = {
     "content_showcase": [  # 内容展示类：作品集/博客/资讯/官网/个人
         SlotDef(key="showcase_sections", label="展示板块", layer=LayerKind.L1, kind=SlotKind.OPTIONAL,
-                inherits=["site_name"], prompt_hint="想展示哪些板块（如关于/作品/文章）", example="关于、作品、联系方式"),
+                inherits=["site.name"], prompt_hint="想展示哪些板块（如关于/作品/文章）", example="关于、作品、联系方式"),
         SlotDef(key="update_frequency", label="更新频率", layer=LayerKind.L1, kind=SlotKind.OPTIONAL,
-                inherits=["site_name"], prompt_hint="内容大概多久更新一次", example="每周"),
+                inherits=["site.name"], prompt_hint="内容大概多久更新一次", example="每周"),
     ],
     "ecommerce_service": [  # 电商服务类：商城/餐饮/零售/教育/医疗/预约
         SlotDef(key="payment_methods", label="收款 / 支付方式", layer=LayerKind.L1, kind=SlotKind.OPTIONAL,
-                inherits=["site_name"], prompt_hint="需要支持哪些支付方式", example="微信 / 支付宝"),
+                inherits=["site.name"], prompt_hint="需要支持哪些支付方式", example="微信 / 支付宝"),
         SlotDef(key="business_hours", label="营业 / 服务时间", layer=LayerKind.L1, kind=SlotKind.OPTIONAL,
-                inherits=["site_name"], prompt_hint="营业或服务时间", example="9:00-21:00"),
+                inherits=["site.name"], prompt_hint="营业或服务时间", example="9:00-21:00"),
     ],
     "interactive_platform": [  # 交互平台类：社区/后台/工具/SaaS/会员
         SlotDef(key="user_auth_mode", label="用户登录方式", layer=LayerKind.L1, kind=SlotKind.OPTIONAL,
-                inherits=["site_name"], prompt_hint="用户如何登录（手机号/邮箱/第三方）", example="手机号"),
+                inherits=["site.name"], prompt_hint="用户如何登录（手机号/邮箱/第三方）", example="手机号"),
         SlotDef(key="core_interactions", label="核心交互", layer=LayerKind.L1, kind=SlotKind.OPTIONAL,
-                inherits=["site_name"], prompt_hint="平台最核心的几种交互行为", example="发帖 / 评论 / 下单"),
+                inherits=["site.name"], prompt_hint="平台最核心的几种交互行为", example="发帖 / 评论 / 下单"),
     ],
 }
 
@@ -109,11 +117,11 @@ L2_TYPES: dict[str, dict] = {
     "personal": {"bucket": "content_showcase", "extra": []},
     "blog": {"bucket": "content_showcase", "extra": [
         SlotDef(key="blog_categories", label="博客分类", layer=LayerKind.L2, kind=SlotKind.OPTIONAL,
-                inherits=["site_name"], prompt_hint="博客想分哪些类目", example="技术 / 生活"),
+                inherits=["site.name"], prompt_hint="博客想分哪些类目", example="技术 / 生活"),
     ]},
     "commerce": {"bucket": "ecommerce_service", "extra": [
         SlotDef(key="product_categories", label="商品类目", layer=LayerKind.L2, kind=SlotKind.OPTIONAL,
-                inherits=["site_name"], prompt_hint="主要卖哪些类目的商品", example="服装 / 数码"),
+                inherits=["site.name"], prompt_hint="主要卖哪些类目的商品", example="服装 / 数码"),
     ]},
     "landing": {"bucket": "content_showcase", "extra": []},
 }

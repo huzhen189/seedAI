@@ -20,6 +20,10 @@ from app.llm import LLMError, chat_completion
 
 logger = logging.getLogger("app.llm.extract")
 
+# 聊天级 QC 的规范 6 维(必须与 backend/app/admin.py 的 QC_DIMENSIONS 完全一致,
+# 否则管理系统雷达图/明细无法按维度聚合)。顺序用于把 LLM 可能返回的数组型 scores 映射回字典。
+QC_DIMS = ["correctness", "completeness", "compliance", "efficiency", "readability", "safety"]
+
 # LLM 输出契约（非 DB 模型）。所有字段可空/可空列表，解析层做防御。
 EXTRACTION_SCHEMA: dict[str, Any] = {
     "user_facts": [
@@ -39,13 +43,25 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
         "body": str,
         "highlights": [str],
     },
+    # 聊天级 QC：本轮「用户消息 + 助手回复」的质量自评（不干涉主链路，仅审计/展示）。
+    # 维度键与 backend/app/admin.py 的 QC_DIMENSIONS 严格对齐:
+    #   correctness/completeness/compliance/efficiency/readability/safety（0-100 整数）。
+    # 注意：必须是「对象」(键=维度名)，不能是数组；否则后端聚合雷达图无法按维度取值。
+    "qc": {
+        "scores": {"correctness": int, "completeness": int, "compliance": int,
+                   "efficiency": int, "readability": int, "safety": int},
+        "overall": float,
+        "needs_review": bool,
+        "safety_risk": str,  # low|medium|high
+        "rationale": str,
+    },
 }
 
 _SYSTEM = (
     "你是记忆提取器。阅读本轮对话（用户消息 + 助手回复），提炼为结构化记忆 JSON。\n"
     "严格要求：\n"
     "1. 只输出一个 JSON 对象，字段固定为 user_facts / user_prefs / project_facts / "
-    "project_exps / session_summary；不要输出任何解释、不要使用 Markdown 代码块包裹。\n"
+    "project_exps / session_summary / qc；不要输出任何解释、不要使用 Markdown 代码块包裹。\n"
     "2. user_facts：用户强事实（城市/禁忌/偏好/权限等确定性信息），零容错；"
     "category ∈ {preference,taboo,permission,geo}，key_name 简短键名，value 具体值，confidence 0-100。\n"
     "3. project_facts：项目强事实（技术栈/版本/域名/约束/状态）；"
@@ -57,7 +73,17 @@ _SYSTEM = (
     "6. session_summary：本轮会话摘要；title 为≤40字精简标题（将作为向量索引），"
     "body 为压缩正文（承接相邻轮次的要点，200字内）。\n"
     "7. 没有对应内容时该字段给空列表/空对象，不要编造。\n"
-    "8. 不要在 summary/body 里复述原始长文，必须压缩。"
+    "8. 不要在 summary/body 里复述原始长文，必须压缩。\n"
+    "9. qc：对本轮「用户消息 + 助手回复」做**聊天级质量自评**（与生成站点代码的质量无关），"
+    "用于事后审计与展示，不干涉本次回复。必须输出如下对象：\n"
+    "   - scores：6 维 0-100 整数字典，键严格为 correctness(是否正确)/completeness(是否答全)/"
+    "compliance(是否合规)/efficiency(是否简洁不啰嗦)/readability(是否易读清晰)/safety(是否安全无害)；"
+    "每个键都必须有值，不要省略任何键，也不要用数组替代对象；\n"
+    "   - overall：整体分(0-10 浮点)；\n"
+    "   - needs_review：布尔(是否需人工复核)；\n"
+    "   - safety_risk：枚举 low|medium|high；\n"
+    "   - rationale：简短中文评语(≤80字)。\n"
+    "闲聊/自我介绍等无害轮次给正常中高分即可，不必故意压低。"
 )
 
 
@@ -68,6 +94,17 @@ def _empty_extraction() -> dict[str, Any]:
         "project_facts": [],
         "project_exps": [],
         "session_summary": {"title": "", "body": "", "highlights": []},
+        "qc": _empty_qc(),
+    }
+
+
+def _empty_qc() -> dict[str, Any]:
+    return {
+        "scores": {},
+        "overall": 0.0,
+        "needs_review": False,
+        "safety_risk": "low",
+        "rationale": "",
     }
 
 
@@ -86,6 +123,27 @@ def _coerce(raw: Any) -> dict[str, Any]:
             "title": str(ss.get("title") or ""),
             "body": str(ss.get("body") or ""),
             "highlights": ss.get("highlights") or [],
+        }
+    qc = raw.get("qc") or {}
+    if isinstance(qc, dict):
+        scores_raw = qc.get("scores")
+        if isinstance(scores_raw, dict):
+            scores = {k: int(v) for k, v in scores_raw.items() if isinstance(v, (int, float))}
+        elif isinstance(scores_raw, list):
+            # 兜底：LLM 偶尔把 scores 输出成数组 → 按 QC_DIMS 顺序映射回字典。
+            scores = {
+                QC_DIMS[i]: int(x)
+                for i, x in enumerate(scores_raw)
+                if isinstance(x, (int, float)) and i < len(QC_DIMS)
+            }
+        else:
+            scores = {}
+        out["qc"] = {
+            "scores": scores,
+            "overall": float(qc.get("overall") or 0.0),
+            "needs_review": bool(qc.get("needs_review", False)),
+            "safety_risk": str(qc.get("safety_risk") or "low"),
+            "rationale": str(qc.get("rationale") or ""),
         }
     return out
 
@@ -127,7 +185,7 @@ async def llm_extract(
         {"role": "user", "content": user_block + assistant_block + "\n请输出记忆 JSON。"},
     ]
     try:
-        raw_text = await chat_completion(messages, temperature=0.2, max_tokens=1024, timeout=30.0)
+        raw_text = await chat_completion(messages, temperature=0.2, max_tokens=1024, timeout=30.0, purpose="extract")
     except LLMError as exc:
         logger.warning("[extract] LLM 调用失败，跳过记忆提取: %s", exc)
         return _empty_extraction()

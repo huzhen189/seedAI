@@ -19,10 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.contracts import Domain, ErrorEnvelope, RiskLevel
 from app.core.turn_context import TurnContext
+from app.domains.site.workflow import SiteWorkflow
 from app.models import Artifact, Deployment, Project
 from app.tools._registry import ToolMeta
 from app.tools.base import BaseTool, ToolContext, ToolResult, ToolStatus
-from app.domains.site import workflow as site_wf
 
 import logging
 
@@ -177,11 +177,13 @@ class HtmlValidateTool(BaseTool):
     async def run(self, ctx: ToolContext, *, html: str) -> ToolResult:
         """HTML 结构完整性与注入安全校验(§9.2 html_validate, low)。
 
-        委托 ``site_wf._verify_html`` 执行 doctype/闭合/最小体积/危险 token 检查。
+        委托 ``SiteWorkflow.verify`` 执行 doctype/闭合/最小体积/危险 token 检查。
         通过返回 ok；失败携带具体失败 code(供上层定位是哪一项没过)。
         """
         logger.debug("[html_validate] 校验 %d bytes", len(html.encode("utf-8")))
-        ok, code = site_wf._verify_html(html)
+        # 委托 domain 的公开 API（权威校验逻辑在 SiteWorkflow.verify，工具只做薄封装，
+        # 依赖方向：tool → domain.workflow，单向、显式，杜绝私有函数耦合）。
+        ok, code = SiteWorkflow.verify(html)
         if ok:
             logger.info("[html_validate] 校验通过 user=%s project=%s", ctx.user_id, ctx.project_id)
             return ToolResult.ok({"passed": True, "code": code})
@@ -214,7 +216,7 @@ class SitePublishTool(BaseTool):
                   idempotency_key: str | None = None) -> ToolResult:
         """发布本地不可变预览(§9.2 site_publish, mid)。
 
-        委托 ``site_wf._publish_preview`` 原子写入版本目录 + 落 Artifact，
+        委托 ``SiteWorkflow.preview`` 原子写入版本目录 + 落 Artifact，
         幂等键缺省用 manifest_digest。注意：这只是生成一个本地 preview 版本，
         不代表生产发布(生产由 site_deploy 负责)。
 
@@ -226,7 +228,8 @@ class SitePublishTool(BaseTool):
         """
         logger.debug("[site_publish] project=%s 发布预览 (%d bytes)", project.id, len(html.encode("utf-8")))
         try:
-            artifact, message = await site_wf._publish_preview(session, project, turn_context, html)
+            # 委托 domain 的公开 API（权威发布逻辑在 SiteWorkflow.preview，工具只做薄封装）。
+            artifact, message = await SiteWorkflow.preview(session, project, turn_context, html)
             logger.info("[site_publish] 成功 project=%s artifact=%s v%d path=%s", project.id, artifact.id, artifact.version, artifact.preview_path)
             return ToolResult.ok(
                 {
@@ -366,6 +369,38 @@ class AssetImportTool(BaseTool):
         )
 
 
+def _probe_preview_health(artifact: Artifact) -> tuple[bool, str]:
+    """生产发布前的静态产物健康探针（返回 ``(是否健康, 失败原因)``）。
+
+    三级校验，任一不过即拒绝切换 active（保留旧版本，符合 CRITICAL 回滚语义）：
+
+    1. ``preview_path`` 非空，且拼出的绝对路径确实是一个**文件**（不是目录/不存在）；
+    2. 文件字节数 > 0（防写了个空壳就上线）；
+    3. 若 ``artifact.checksums["index.html"]`` 存在，则实际内容 sha256 必须匹配
+       （防产物被外部改写 / 半截写入，保证「不可变版本」名副其实）。
+
+    本地静态托管场景到此为止；接真实 host 时应在其后追加 HTTP 200 探针。
+    """
+    rel = (artifact.preview_path or "").strip()
+    if not rel:
+        return False, "artifact.preview_path 为空"
+    path = Path(settings.artifact_dir) / rel
+    if not path.is_file():
+        return False, f"预览产物文件不存在: {rel}"
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return False, f"预览产物不可读: {str(exc)[:120]}"
+    if not raw:
+        return False, f"预览产物为空文件: {rel}"
+    expected = (artifact.checksums or {}).get("index.html")
+    if expected:
+        actual = hashlib.sha256(raw).hexdigest()
+        if actual != expected:
+            return False, f"预览产物校验和不匹配 expected={expected[:12]}… actual={actual[:12]}…"
+    return True, ""
+
+
 class SiteDeployTool(BaseTool):
     """critical：生产发布，绑定 artifact+manifest、审批、健康检查、回滚（§9.2）。"""
 
@@ -419,15 +454,23 @@ class SiteDeployTool(BaseTool):
                               next="确认版本", retryable=False, retry_scope="none"),
                 idempotency_key=idempotency_key,
             )
-        # 健康检查（本地静态产物）：index.html 可读即视为通过；生产应替换为真实 host 探针。
-        health_ok = bool(artifact.preview_path and Path(settings.artifact_dir) / artifact.preview_path)
+        # 健康检查（本地静态产物）。
+        # 🔴 此前写成 `bool(a.preview_path and Path(dir) / a.preview_path)` —— `Path / str`
+        # 永远返回一个非空 Path 对象，恒为真，等于**健康检查从未生效**：产物文件被删、
+        # 写了 0 字节、内容被改写，都会照样切 active，CRITICAL 动作失去最后一道防线。
+        # 现改为真实三级探针：存在且是文件 → 非空 → 内容 sha256 与 checksums 一致。
+        health_ok, health_why = _probe_preview_health(artifact)
         if not health_ok:
+            logger.error("[site_deploy] 健康检查失败 project=%s artifact=%s why=%s",
+                         project.id, artifact.id, health_why)
             return ToolResult.fail(
                 ErrorEnvelope(code="site_deploy_health_fail", category="deploy",
-                              what="健康检查失败", why="预览产物缺失",
+                              what="健康检查失败", why=health_why,
                               next="保留旧 active，不切换", retryable=False, retry_scope="none"),
                 idempotency_key=idempotency_key,
             )
+        logger.info("[site_deploy] 健康检查通过 project=%s artifact=%s path=%s",
+                    project.id, artifact.id, artifact.preview_path)
         deployment = Deployment(
             project_id=project.id,
             artifact_id=artifact.id,

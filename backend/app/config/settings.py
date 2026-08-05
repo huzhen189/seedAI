@@ -345,6 +345,13 @@ class Settings(BaseSettings):
     qc_fix_enabled: bool = True
     qc_fix_max_rounds: int = Field(default=2, ge=0, le=5)
 
+    # ── 站点 ReAct 自主迭代（docs/06）──
+    # 子任务 ReAct 循环的双上限，Action(代码执行=produce/verify) 与 Thought(对话=LLM 升级) 各自独立：
+    # - code：每轮"生成代码→校验"的迭代次数上限（确定性修复）。
+    # - chat：升级调用 LLM 做推理修复的轮数上限（通路 B 未接入前仅作闸门 seam）。
+    site_react_max_rounds_code: int = Field(default=3, ge=0, le=5)
+    site_react_max_rounds_chat: int = Field(default=2, ge=0, le=5)
+
     cos_secret_id: str = ""
     cos_secret_key: str = ""
     cos_bucket: str = "seedhtml-1252059540"

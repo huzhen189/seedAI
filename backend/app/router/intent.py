@@ -56,6 +56,9 @@ from app.ragstore import (
     safe_upsert_bg as _rag_upsert_bg,
     format_hits_for_prompt as _fmt_hits,
 )
+# 治理判定真相源：S4 标 has_gated 必须与 S5 闸门同源，否则会出现
+# 「计划说不用审批、S5 却挂起」的口径分裂（前端执行计划与实际行为对不上）。
+from app.core.governance import action_requires_approval  # noqa: E402
 
 
 # 分段标点（直接切断）。
@@ -354,8 +357,8 @@ async def escalate_if_needed(message: str, current: UnderstandingResult) -> Unde
 
     触发条件（避免无谓 LLM 调用，保持确定性优先）：
       - resolved_intents 为空（零命中，纯无法归类），或
-      - 多候选且存在低置信（<0.7）且无明确可执行意图，或
-      - 句长超过阈值且命中 >1 个域（复合句歧义）。
+      - 多候选且存在低置信（<0.85）且无明确可执行意图，或
+      - 句长超过阈值且命中 >2 个意图（复合句歧义）。
     任何失败都安全降级回规则结果（current），绝不抛错中断 pipeline。
     """
     n = len(current.resolved_intents)
@@ -369,11 +372,29 @@ async def escalate_if_needed(message: str, current: UnderstandingResult) -> Unde
             next((r.intent_id for r in current.resolved_intents if r.executable), "?"),
         )
         return current
-    multi_low = n > 1 and not has_confident_executable
-    long_compound = len(message) > 24 and n > 1
-    if n >= 1 and not multi_low and not long_compound:
+    # 纯闲聊 / 纯疑问句保护：规则层把所有分句都归为 CHAT 兜底(无任何非 CHAT 域意图)时，
+    # 直接跳过 LLM 升级——否则「你是谁？干啥的？」被切两段→升级→LLM 返回 2 个 CHAT 意图
+    # → ambiguous(len>1)→误判 needs_clarification=True + 降置信到 0.6，把正常闲聊/自我介绍
+    # 当成"意图不清需澄清"。规则在此类场景下置信(0.6)与 executable=False 已准确表达"闲聊"，
+    # 无需 LLM 介入。仅当存在任一非 CHAT 域信号(可能需纠正/升级)才进入升级路径。
+    has_real_domain_signal = any(r.domain != Domain.CHAT for r in current.resolved_intents)
+    if not has_real_domain_signal:
+        logger.debug(
+            "[intent] 纯闲聊(全 CHAT 兜底, 无域信号), 跳过 LLM 升级 n=%d: %s",
+            n, next((r.intent_id for r in current.resolved_intents), "?"),
+        )
+        return current
+    # 升级触发条件（按用户要求收窄）：
+    #   ① 多候选 且 存在低置信(<0.85) 且 无明确可执行意图 → 规则层不确定，交 LLM 升级；
+    #   ② 句长超过阈值 且 命中 >2 个意图（复合句歧义）→ 交 LLM 升级。
+    # 注意：上方「纯闲聊全 CHAT」护栏(行380)仍先于本段生效，
+    # 否则 ① 会重新把「你是谁？干啥的？」这类纯闲聊复合句送进升级 → 误判 needs_clarification。
+    has_low_conf = any((r.confidence or 1.0) < 0.85 for r in current.resolved_intents)
+    multi_low = n > 1 and has_low_conf and not has_confident_executable
+    long_and_many = len(message) > 24 and n > 2
+    if not (multi_low or long_and_many):
         # 规则已能稳妥分解 → 不升级
-        logger.debug("[intent] 规则已稳妥分解, 跳过 LLM 升级 (n=%d multi_low=%s long_compound=%s)", n, multi_low, long_compound)
+        logger.debug("[intent] 规则已稳妥分解, 跳过 LLM 升级 (n=%d multi_low=%s long_and_many=%s)", n, multi_low, long_and_many)
         return current
 
     # 超时自适应：文字长短不一、处理耗时也不同。短文字给 30s，长文字给 120s，
@@ -394,6 +415,7 @@ async def escalate_if_needed(message: str, current: UnderstandingResult) -> Unde
         text = await chat_completion(
             [{"role": "user", "content": augmented + message}],
             temperature=0.2, max_tokens=512, timeout=escalation_timeout,
+            purpose="intent",
         )
     except LLMError as exc:
         logger.warning("[intent] LLM 升级调用失败，降级规则结果: %s", exc)
@@ -458,6 +480,8 @@ async def escalate_if_needed(message: str, current: UnderstandingResult) -> Unde
                                   for r in resolved],
             "escalated": True,
             "needs_clarification": needs_clarify,
+            # 回填 LLM 升级原文，与 [S2] 日志整合（便于回放为什么升级 / 为什么澄清）。
+            "escalation_llm_response": text,
         })
     except (ValueError, KeyError, TypeError) as exc:
         logger.warning("[intent] LLM 返回无法解析，降级规则结果: %s", exc)
@@ -590,7 +614,9 @@ def classify(message: str, understanding: UnderstandingResult, prior_turn_id: st
             ))
         if it.risk_hint in (RiskLevel.HIGH, RiskLevel.CRITICAL):
             max_risk = RiskLevel.CRITICAL if it.risk_hint == RiskLevel.CRITICAL else RiskLevel.HIGH
-        if it.speech_act.value in {"publish", "purge", "trash"}:
+        # has_gated 判定收敛到 governance（这是同语义的第 4 份硬编码拷贝，现已消除）。
+        # 与 S5 共用 action_requires_approval，S4 计划标注与 S5 实际闸门永远一致。
+        if action_requires_approval(it.speech_act.value):
             has_gated = True
 
     # primary 取第一个可执行，否则第一个

@@ -144,7 +144,7 @@ class SimClient:
             if "401" in str(e) or "不存在" in str(e) or "404" in str(e):
                 _http("POST", "/auth/register",
                       json_body={"account": account, "password": password,
-                                 "nickname": "模拟小白12"})
+                                 "display_name": "模拟小白12"})
                 _do_login()
                 log(f"注册并登录 account={account}")
             else:

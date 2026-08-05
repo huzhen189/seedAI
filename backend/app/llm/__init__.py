@@ -5,6 +5,6 @@
 失败时抛 LLMError，由上层决定降级策略，绝不静默吞错。
 """
 
-from .client import LLMClient, LLMError, chat_completion, get_llm_client
+from .client import LLMClient, LLMError, chat_completion, chat_completion_stream, get_llm_client
 
-__all__ = ["LLMClient", "LLMError", "chat_completion", "get_llm_client"]
+__all__ = ["LLMClient", "LLMError", "chat_completion", "chat_completion_stream", "get_llm_client"]
