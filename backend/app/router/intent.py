@@ -150,8 +150,13 @@ def _classify_segment(seg: str) -> dict | None:
         if hit(CREATE_WORDS):
             return {"domain": Domain.SITE, "speech": SpeechAct.CREATE, "executable": True,
                     "risk": RiskLevel.LOW, "skill": "site"}
-        # 命中建站语境但无明确动词：视作对已落站的「细化/讨论」，至少可执行一次 EDIT。
-        return {"domain": Domain.SITE, "speech": SpeechAct.EDIT, "executable": True,
+        # 命中建站语境但无明确动词：首次出现建站意图时并无「可修改对象」，
+        # 按「新建站点」处理——标签展示「构建网站」比「修改网站」更准确
+        # （避免 thinking-trail 把首建站误标成修改，用户反馈 2026-08-06）。
+        # 真正的回溯改站由 S2 的 inherit_retro_domain（命中 prior_turn_id+prior_domain）
+        # 把 CHAT 兜底提升为 EDIT 负责，不走此兜底；speech_act 不影响 S6 实际建站行为
+        # （S6 只看 prior_project_id/session.project_id），故此处改为 CREATE 零风险。
+        return {"domain": Domain.SITE, "speech": SpeechAct.CREATE, "executable": True,
                 "risk": RiskLevel.LOW, "skill": "site"}
     if hit(TRASH_WORDS):
         return {"domain": Domain.PROJECT, "speech": SpeechAct.TRASH, "executable": True,
