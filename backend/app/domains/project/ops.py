@@ -28,7 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import transaction
 from app.db.repositories import outbox
-from app.models import Artifact, Deployment, OutboxEvent, Project, ProjectTombstone, PurgeJob
+from app.domains.project.guard import has_ready_artifact, load_project, project_blocked_reason
+from app.models import Deployment, OutboxEvent, Project, ProjectTombstone, PurgeJob
 
 logger = logging.getLogger("app.domains.project.ops")
 
@@ -188,15 +189,15 @@ class ProjectOpsService:
             ``OpsOutcome``(status/text/output_refs/error_code)。
         """
         logger.info("[ops] 执行项目动作 action=%s project=%s user=%s", action, project_id, user_id)
-        project = (
-            await session.execute(
-                select(Project).where(Project.id == project_id, Project.user_id == user_id).with_for_update()
-            )
-        ).scalar_one_or_none()
-        if project is None:
-            logger.warning("[ops] 项目不存在或越权 project=%s user=%s", project_id, user_id)
-            return OpsOutcome(status="failed", text="目标项目不存在或无权访问。", error_code="project_not_found")
-        if project.status == "purging":
+        # last-mile 防御：存在 / 鉴权 / 阻塞判定与 S5 闸门共用 guard 单一真相源。
+        # 此处仍保留（lock=True 取写锁防并发），是因为 ops 是实际执行器，需兜住
+        # “绕过 S5 直调 / 审批通过到执行之间项目状态已被他人篡改”的竞态。
+        project = await load_project(session, project_id, user_id, lock=True)
+        blocked = project_blocked_reason(project)
+        if blocked is not None:
+            if blocked == "project_not_found":
+                logger.warning("[ops] 项目不存在或越权 project=%s user=%s", project_id, user_id)
+                return OpsOutcome(status="failed", text="目标项目不存在或无权访问。", error_code="project_not_found")
             return OpsOutcome(status="failed", text="项目正在永久删除中，无法执行该操作。", error_code="project_purging")
 
         handlers = {
@@ -229,8 +230,7 @@ class ProjectOpsService:
         """
         if project.head_artifact_id is None:
             return OpsOutcome(status="failed", text="项目还没有可发布的网站版本，请先生成一版。", error_code="no_artifact")
-        artifact = await session.get(Artifact, project.head_artifact_id)
-        if artifact is None or artifact.status not in {"verified", "preview_ready"}:
+        if not await has_ready_artifact(session, project.id, states={"verified", "preview_ready"}):
             return OpsOutcome(status="failed", text="待发布的产物不可用，请重新生成网站。", error_code="artifact_not_publishable")
 
         # 增量发布: 校验文件清单全部存在于 artifact 的 manifest 中, 否则拒绝, 避免发布幽灵文件。

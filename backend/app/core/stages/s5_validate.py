@@ -7,9 +7,8 @@ from app.core.contracts import ResponseFragment, StageId, StageStatus, Validatio
 from app.core.governance import action_requires_approval, action_risk_label, governance_basis
 from app.core.turn_context import TurnContext
 from app.domains.project import project_service
+from app.domains.project.guard import targeted_action_guard
 from app.analytics import record_intent_decision
-from sqlalchemy import select
-from app.models import Artifact, Project
 from .base import BaseStage
 
 
@@ -35,6 +34,15 @@ class S5ValidateStage(BaseStage):
             context.validation = ValidationResult(status="pass")
             await record_intent_decision("route", skill="chat", risk="low")
             return self.result(StageStatus.NO_OP, "no_executable_action")
+
+        # ── 目标存在性/就绪校验（执行前前置闸门，必须早于审批卡创建与 S6 落地）────
+        # 指向既有资源的意图（edit/review/publish/trash/restore/purge）若目标项目不存在 /
+        # 已被清除 / 站点未建成，应在“让用户审批删除一个不存在的项目”之前就打回，
+        # 而不是等到审批通过进 ops 执行时才报 project_not_found。
+        # 判定规则由 app.domains.project.guard 统一提供（S5 与 ops 共用，单一真相源）。
+        reject = await self._verify_targets_ready(context)
+        if reject is not None:
+            return reject
 
         # 整轮闸门：任一高危动作即挂起审批，覆盖所有低风险兄弟动作。
         # 判定不再硬编码 {"publish","purge","trash"}，改由 app.core.governance 统一裁决
@@ -133,42 +141,38 @@ class S5ValidateStage(BaseStage):
             await record_intent_decision("clarify", skill="unknown", risk="low")
             return self.result(StageStatus.COMPLETED, "needs_clarification")
 
-        # ── 目标存在性/就绪校验（2026-08-06 整合）──────────────────────
-        # 所有「指向既有资源」的意图在放行前必须验明目标真实存在且就绪，否则 S6 会在
-        # 空 project / 未建成站点上硬执行、退化成模板或产生幽灵副作用。
-        # 此处集中一张配置表，覆盖 edit/review/publish/trash/restore/purge 等不只是
-        # 纯新建的意图；create/research/chat 不需要既有资源，直接放行。
-        reject = await self._verify_targets_ready(context)
-        if reject is not None:
-            return reject
-
         # 全为低风险动作：放行，S6 串行执行。
         context.validation = ValidationResult(status="pass")
         await record_intent_decision("route", skill="multi_action", risk="low")
         return self.result(StageStatus.COMPLETED, "validation_passed")
 
-    # 目标校验配置：domain.value + speech_act.value → 需要验什么。
-    #   "site_built"  : 目标 project 下须存在 verified/preview_ready 的站点 Artifact。
-    # 仅列入「低危、S5 直接放行进 S6」的指向既有资源的意图（edit/review）。
-    # 高危项目动作（publish/trash/restore/purge）在 S5 早期即被审批闸门 PAUSED，
-    # 执行期由 project_ops.execute 内部统一校验「项目存在 + 非 purging + head artifact 就绪」，
-    # 此处不再重复（避免依赖审批卡的完整 session），单一真相源在 ops 层。
-    _TARGET_REQUIREMENTS: "dict[tuple[str, str], str]" = {
-        ("site", "edit"): "site_built",
-        ("site", "review"): "site_built",
+    # 目标校验配置：domain.value + speech_act.value → 是否需要前置「目标存在/就绪」校验。
+    # 凡是“指向既有资源”的意图都要列进来；create/research/chat 不需要既有资源，放行。
+    #   - site/edit、site/review：除项目可操作外还需已建成站点；
+    #   - project/publish|trash|restore|purge：项目须存在且未处于 purging。
+    # 具体判定规则（状态白名单、鉴权、就绪）全部委托 app.domains.project.guard 单一真相源，
+    # 此处只是“哪些意图需要校验”的开关表，便于一眼看清覆盖。
+    _TARGET_REQUIREMENTS: "set[tuple[str, str]]" = {
+        ("site", "edit"),
+        ("site", "review"),
+        ("project", "publish"),
+        ("project", "trash"),
+        ("project", "restore"),
+        ("project", "purge"),
     }
 
     async def _verify_targets_ready(self, context: "TurnContext"):
-        """逐 action_item 校验目标存在性/就绪；任一不达标则打回 clarify。
+        """执行前前置闸门：逐 action_item 校验目标存在性/就绪；任一不达标则打回 clarify。
 
         返回 None 表示全部通过；返回 StageStatus 结果表示已打回（调用方直接 return）。
-        仅查 DB 的轻量校验，S5 本就持 session；无 session 时不校验（保持旧行为）。
+        规则来自 guard.targeted_action_guard（与 ops 执行期共用同一套），S5 本就持 session；
+        无 session 时不校验（保持旧行为，交由 ops 兜底）。
         """
         if self.session is None or context.plan is None:
             return None
+        uid = context.user.user_id
         for a in context.plan.action_items:
-            need = self._TARGET_REQUIREMENTS.get((a.domain.value, a.speech_act.value))
-            if need is None:
+            if (a.domain.value, a.speech_act.value) not in self._TARGET_REQUIREMENTS:
                 continue
             pid = self._resolve_project_id(context, a)
             if pid is None:
@@ -176,36 +180,18 @@ class S5ValidateStage(BaseStage):
                                a.domain.value, a.speech_act.value, context.turn_id)
                 return await self._clarify_missing(
                     context, "project_unresolved",
-                    "我没能确定要操作的项目，请先选择或指定一个项目。", skill=f"{a.domain.value}_{a.speech_act.value}",
+                    "我没能确定要操作的项目，请先选择或指定一个项目。",
+                    skill=f"{a.domain.value}_{a.speech_act.value}",
                 )
-            if need == "site_built":
-                ok = await self.session.scalar(
-                    select(Artifact.id).where(
-                        Artifact.project_id == pid,
-                        Artifact.status.in_(["verified", "preview_ready"]),
-                    ).limit(1)
+            ok, code, text = await targeted_action_guard(
+                self.session, pid, uid, a.speech_act.value
+            )
+            if not ok:
+                logger.warning("[S5] 意图 %s/%s 前置不满足 code=%s project=%s,打回 turn=%s",
+                               a.domain.value, a.speech_act.value, code, pid, context.turn_id)
+                return await self._clarify_missing(
+                    context, code, text, skill=f"{a.domain.value}_{a.speech_act.value}",
                 )
-                if ok is None:
-                    logger.warning("[S5] 意图 %s/%s 但 project=%s 无已建成站点，打回 turn=%s",
-                                   a.domain.value, a.speech_act.value, pid, context.turn_id)
-                    return await self._clarify_missing(
-                        context, "target_site_missing",
-                        "我没能找到可以操作的已生成网站（项目可能尚未建好或已被清除）。"
-                        "是要新建一个网站，还是切换/指定某个已有的项目？",
-                        skill=f"{a.domain.value}_{a.speech_act.value}",
-                    )
-            elif need == "project":
-                proj = await self.session.scalar(
-                    select(Project.id).where(Project.id == pid, Project.user_id == context.user.user_id).limit(1)
-                )
-                if proj is None:
-                    logger.warning("[S5] 意图 %s/%s 但 project=%s 不存在/越权，打回 turn=%s",
-                                   a.domain.value, a.speech_act.value, pid, context.turn_id)
-                    return await self._clarify_missing(
-                        context, "target_project_missing",
-                        "我没能找到要操作的项目（可能已被删除或无权访问）。",
-                        skill=f"{a.domain.value}_{a.speech_act.value}",
-                    )
         return None
 
     @staticmethod

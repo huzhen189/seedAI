@@ -19,21 +19,54 @@ from app.core.transition import RoundPlan
 from app.core.turn_context import TurnContext
 
 
-class _FakeSession:
-    """最小替身：模拟 S5 目标校验用到的 ``scalar`` 查询。
+class _FakeProject:
+    """标量返回为“存在”时，guard 需要的是带 .status 的 Project 替身。"""
 
-    ``scalar_return`` 统一作为本次查询的返回值：
-      - None        → 查不到目标（悬空 edit / 项目不存在）；
-      - 非 None     → 查到目标（已建成站点 / 项目在库）。
-    测试按场景构造对应的 plan（site_built 用 edit/review，project 用 publish/trash 等），
-    S5 每次只会触发其配置表要求的一类查询，故单一返回值足够。
+    def __init__(self, status="active"):
+        self.status = status
+
+
+class _FakeResult:
+    """guard 用 ``session.execute(stmt).scalar_one_or_none()``，这里包一层。"""
+
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+
+class _FakeSession:
+    """最小替身：模拟 S5/guard 目标校验用到的两类 DB 查询。
+
+      - load_project（execute().scalar_one_or_none）：按 project_exists 返回
+        _FakeProject（带 .status）或 None（项目不存在/越权）；
+      - has_ready_artifact（scalar）：直接返回 site_ready（已建成站点是否存在）。
+
+    两者独立，正好覆盖“项目在但站点未建成”这类 target_site_missing 场景。
     """
 
-    def __init__(self, *, scalar_return=None):
-        self._scalar = scalar_return
+    def __init__(self, *, project_exists: bool = True, project_status: str = "active",
+                 site_ready: bool = True):
+        self._project_exists = project_exists
+        self._project_status = project_status
+        self._site_ready = site_ready
+
+    async def execute(self, *args, **kwargs):
+        value = _FakeProject(self._project_status) if self._project_exists else None
+        return _FakeResult(value)
 
     async def scalar(self, *args, **kwargs):
-        return self._scalar
+        # 生产里 has_ready_artifact 用 scalar 取 artifact.id（int）或 None；
+        # 用 _site_ready 决定返回具体 id 还是 None。
+        return 1 if self._site_ready else None
+
+    def add(self, *args, **kwargs):
+        # 审批卡创建路径会调用；测试只验证到 PAUSED，无需真实落库。
+        return None
+
+    async def flush(self, *args, **kwargs):
+        return None
 
 
 def _plan(kind: str, domain: Domain, speech: SpeechAct, *, target_id: str | None = None) -> BoundedPlan:
@@ -78,9 +111,9 @@ def _run(ctx: TurnContext, session) -> StageStatus:
     return asyncio.run(stage.run(ctx)).status
 
 
-# ── site/edit：目标 project 无已建成站点 → 打回 ─────────────────────────
+# ── site/edit：项目在但无已建成站点 → 打回 target_site_missing ─────────
 def test_s5_edit_missing_site_is_clarified():
-    session = _FakeSession(scalar_return=None)
+    session = _FakeSession(project_exists=True, site_ready=False)
     ctx = _ctx(_round("site_edit", Domain.SITE), session=session)
     ctx.plan = _plan("site_edit", Domain.SITE, SpeechAct.EDIT)
     status = _run(ctx, session)
@@ -89,9 +122,9 @@ def test_s5_edit_missing_site_is_clarified():
     assert "target_site_missing" in ctx.validation.reason_codes
 
 
-# ── site/edit：目标站点存在 → 放行 ──────────────────────────────────────
+# ── site/edit：项目在且站点已建成 → 放行 ───────────────────────────────
 def test_s5_edit_existing_site_passes():
-    session = _FakeSession(scalar_return=42)
+    session = _FakeSession(project_exists=True, site_ready=True)
     ctx = _ctx(_round("site_edit", Domain.SITE), session=session)
     ctx.plan = _plan("site_edit", Domain.SITE, SpeechAct.EDIT)
     status = _run(ctx, session)
@@ -101,7 +134,7 @@ def test_s5_edit_existing_site_passes():
 
 # ── site/review：统一校验表覆盖，同样需已建成站点 ──────────────────────
 def test_s5_review_missing_site_is_clarified():
-    session = _FakeSession(scalar_return=None)
+    session = _FakeSession(project_exists=True, site_ready=False)
     ctx = _ctx(_round("site_build", Domain.SITE), session=session)
     ctx.plan = _plan("site_build", Domain.SITE, SpeechAct.REVIEW)
     status = _run(ctx, session)
@@ -110,13 +143,34 @@ def test_s5_review_missing_site_is_clarified():
     assert "target_site_missing" in ctx.validation.reason_codes
 
 
-# 注：project 类高危动作（publish/trash/restore/purge）在 S5 早期即被审批闸门 PAUSED，
-# 目标存在性由 project_ops.execute 执行期统一兜底，不在此校验表内（见 s5_validate.py 注释）。
+# ── project/publish：目标项目不存在 → 执行前（审批卡创建之前）即被打回 ──
+def test_s5_publish_missing_project_is_clarified():
+    session = _FakeSession(project_exists=False)
+    ctx = _ctx(_round("site_build", Domain.PROJECT), session=session)
+    ctx.plan = _plan("site_build", Domain.PROJECT, SpeechAct.PUBLISH)
+    status = _run(ctx, session)
+    assert status == StageStatus.COMPLETED
+    assert ctx.validation.status == "clarify"
+    assert "project_not_found" in ctx.validation.reason_codes
+
+
+# ── project/trash：目标项目存在 → 通过前置校验（后续进审批闸门 PAUSED）──
+def test_s5_trash_existing_project_passes_target_check():
+    session = _FakeSession(project_exists=True, site_ready=True)
+    ctx = _ctx(_round("site_build", Domain.PROJECT), session=session)
+    ctx.plan = _plan("site_build", Domain.PROJECT, SpeechAct.TRASH)
+    status = _run(ctx, session)
+    # 前置满足后继续往下走：trash 高危 → 进入审批闸门（PAUSED），
+    # 无论哪种，都不会带 project_not_found / target_* 打回。
+    assert status in (StageStatus.PAUSED, StageStatus.COMPLETED)
+    assert ctx.validation is not None
+    assert ctx.validation.status not in ("clarify",)
+    assert not any(c.startswith("project_not_found") or c.startswith("target_") for c in (ctx.validation.reason_codes or []))
 
 
 # ── site/create：纯新建，不需要既有资源 → 直接放行 ─────────────────────
 def test_s5_create_needs_no_target():
-    session = _FakeSession(scalar_return=None)
+    session = _FakeSession(project_exists=False, site_ready=False)
     ctx = _ctx(_round("site_build", Domain.SITE), session=session)
     ctx.plan = _plan("site_build", Domain.SITE, SpeechAct.CREATE)
     status = _run(ctx, session)
