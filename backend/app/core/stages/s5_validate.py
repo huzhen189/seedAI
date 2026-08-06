@@ -131,6 +131,49 @@ class S5ValidateStage(BaseStage):
             await record_intent_decision("clarify", skill="unknown", risk="low")
             return self.result(StageStatus.COMPLETED, "needs_clarification")
 
+        # ── edit 真实性兜底（2026-08-06 增补）──────────────────────────
+        # 上游 S3.edit_mode 短路只在「意图含 SITE+EDIT 且存在可改 project」时判 edit，
+        # 但仍可能指向「无已建成 artifact 的空 project」（首建站失败/占位/被软删）。
+        # 这种悬空 edit 若放行，S6 会在错对象上改建或直接退化模板，用户侧即「页面还是组件库」。
+        # 故 S5 作为最后一道闸门补验：被判 site_edit 但目标 project 查不到已建成 site
+        # （verified / preview_ready）→ 打回澄清，让 S2 下一轮重新判断
+        # （用户实际意图通常是不含 EDIT 触发词的新建，_is_edit_mode 会回落收集闸门）。
+        target_kind = getattr(getattr(context.round_plan, "task", None), "kind", None)
+        if target_kind == "site_edit" and self.session is not None:
+            pid = context.prior_project_id or getattr(context.session, "project_id", None)
+            if pid is not None:
+                from sqlalchemy import select
+
+                from app.models import Artifact
+
+                exists = await self.session.scalar(
+                    select(Artifact.id)
+                    .where(
+                        Artifact.project_id == pid,
+                        Artifact.status.in_(["verified", "preview_ready"]),
+                    )
+                    .limit(1)
+                )
+                if exists is None:
+                    logger.warning(
+                        "[S5] 被判 site_edit 但 project=%s 无已建成 site，打回澄清 turn=%s",
+                        pid, context.turn_id,
+                    )
+                    frag = ResponseFragment(
+                        status="clarify",
+                        text=("我没能找到可以修改的已生成网站（项目可能尚未建好或已被清除）。"
+                              "是要新建一个网站，还是切换/指定某个已有的项目？"),
+                        producer_stage=StageId.S5,
+                    )
+                    context.validation = ValidationResult(
+                        status="clarify",
+                        reason_codes=["edit_target_missing"],
+                        response_fragments=[frag],
+                    )
+                    context.response_fragments.append(frag)
+                    await record_intent_decision("clarify", skill="site_edit", risk="low")
+                    return self.result(StageStatus.COMPLETED, "edit_target_missing")
+
         # 全为低风险动作：放行，S6 串行执行。
         context.validation = ValidationResult(status="pass")
         await record_intent_decision("route", skill="multi_action", risk="low")
