@@ -18,6 +18,7 @@ import {
 } from '../api/chat'
 import { createProject, listArtifacts } from '../api/projects'
 import { useAuth } from '../composables/useAuth'
+import { useAuthStore } from '../stores/auth'
 import { useConversationStore } from '../stores/conversation'
 import { useProjectStore } from '../stores/project'
 import {
@@ -41,11 +42,13 @@ interface ResumeRef {
 
 const RESUME_KEY = 'seedai:stream-resume'
 const auth = useAuth()
+const authStore = useAuthStore()
 const projectStore = useProjectStore()
 const convStore = useConversationStore()
 const stream = reactive(createStreamUiState()) as StreamUiState
 const input = ref('')
-const model = ref('qwen')
+// 初始用服务端偏好(user_id 绑定); App.vue 已提前 init auth, 此处 preferredModel 已就绪。
+const model = ref(authStore.preferredModel || 'qwen')
 const models = ref<ModelInfo[]>([])
 const generating = ref(false)
 const stopping = ref(false)
@@ -493,9 +496,15 @@ async function fetchModels(): Promise<void> {
   }
 }
 
-onMounted(async () => {
-  await auth.init()
-  if (!auth.user.value) return
+// 登录态就绪后才能做的初始化(项目/会话/产物/模型列表等, 均需鉴权)。
+// 幂等锁: onMounted 与「弹窗登录成功」两条路径都会触发, 只真正跑一次。
+let authedInitDone = false
+async function initAfterAuth(): Promise<void> {
+  if (authedInitDone) return
+  authedInitDone = true
+  // 登录态就绪后, 用服务端偏好(若有)覆盖当前选中模型(优先级: 服务端偏好 > 默认值)。
+  const pref = authStore.preferredModel
+  if (pref) model.value = pref
   await projectStore.load()
   if (projectStore.currentProjectId != null) await convStore.loadConversations(projectStore.currentProjectId)
   await loadArtifacts()
@@ -503,10 +512,35 @@ onMounted(async () => {
   await replaySavedStream()
   await fetchModels()
   scrollToBottom()
-  // M9c: 联网恢复时按 client_msg_id 串行、幂等补发离线队列。
-  unregisterOnline = onOnline(() => void flushOfflineQueue())
-  // 若挂载时已在线但存在上次离线遗留的待发消息(如离线期间刷新了页面), 立即补发。
+  // 若已在线但存在上次离线遗留的待发消息(如离线期间刷新了页面), 立即补发。
   if (isOnline() && (await offlineQueue.count()) > 0) void flushOfflineQueue()
+}
+
+onMounted(async () => {
+  // M9c: 联网恢复时按 client_msg_id 串行、幂等补发离线队列。
+  // 与登录态无关, 必须在 return 前注册, 否则未登录首屏进来的用户永远收不到补发。
+  unregisterOnline = onOnline(() => void flushOfflineQueue())
+  // 模型列表为准静态公开数据(后端 /api/models 已免登录): 首屏即预拉取,
+  // 即使未登录也能渲染 3 张模型卡片, 避免「只有登录才显示1个」的落差。
+  void fetchModels()
+  await auth.init()
+  // 首屏未登录时直接返回: 后续由下方 watch(auth.user) 在弹窗登录成功后补跑初始化。
+  // 弹窗登录不会重新挂载本组件, onMounted 不会二次触发, 故不能只依赖这里。
+  if (!auth.user.value) return
+  await initAfterAuth()
+})
+
+// 弹窗登录成功后补跑初始化。此前该逻辑只在 onMounted 里跑, 未登录首屏会 early return,
+// 导致登录后模型列表(/api/models)等始终未拉取, 模型选择器只剩写死的默认项。
+watch(() => auth.user.value, async (user) => {
+  if (!user) return
+  await initAfterAuth()
+})
+
+// 模型选择(user_id 绑定偏好): 选择器每次切换都写回服务端, 下次登录/重载自动回显。
+// 即便此处未存成功, 后端 /api/chat 在 accept 时也会按 last-used 收敛(双保险)。
+watch(model, (m) => {
+  if (m) void authStore.setPreferredModel(m)
 })
 
 onUnmounted(() => {

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import re
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -175,16 +174,11 @@ def _schedule_site_writeback(context: TurnContext, project: Project, spec: dict,
     sections = spec.get("sections") or []
     styles = spec.get("styles") or []
 
-    # 1) 组件库：抽取 features 区块作为可复用组件片段。
-    m = re.search(r'<div class="grid">(.*?)</div>', html, re.S)
-    comp_snippet = m.group(1).strip() if m else ""
-    if comp_snippet:
-        asyncio.create_task(_rag_upsert_bg(
-            settings.chroma_collection_components,
-            [comp_snippet],
-            metadatas=[{"kind": "auto", "theme": theme, "type": site_type}],
-            id_prefix="auto",
-        ))
+    # 1) 组件库自增强回写已移除：
+    #    自动把建站产物回写 components 集合会造成跨用户/跨项目语义污染、
+    #    无质量门槛、集合无限膨胀，维护成本高而净收益低。
+    #    建站时的「组件灵感」区块改由 seed_rag_components 播的 curated 种子召回，
+    #    chroma_collection_components 集合保留（reset 时仍保留、仍播种），仅不再自动累积。
 
     # 2) 项目记忆：spec 摘要（文本，便于召回时语义检索）。
     summary = f"项目《{project.name}》类型={site_type} 主题={theme} 板块={sections} 风格={styles}"

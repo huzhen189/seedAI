@@ -6,8 +6,14 @@ export interface ChatMessage {
 export interface ModelInfo {
   id: string
   label: string
+  /** 真实模型版本号（取后端 settings *_model，如 qwen3.7-plus / deepseek-v4-flash / hy3） */
   version?: string
+  /** 速度档: 标准 | 快 | 极速 */
   speed?: string
+  /** 厂商 / 出品方 */
+  vendor?: string
+  /** 上下文窗口（token 量级，如 128K） */
+  context?: string
   desc?: string
 }
 
@@ -278,6 +284,8 @@ export interface AuthUser {
   email: string | null
   role: string
   plan: string
+  /** 用户级偏好执行模型(user_id 绑定, 后端 preferences.preferred_model)。 */
+  preferredModel?: string
 }
 
 /** 管理后台实时指标快照(/admin/metrics SSE)。 */

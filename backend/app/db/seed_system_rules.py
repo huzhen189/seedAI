@@ -174,6 +174,44 @@ CANONICAL_RULES: list[dict] = [
         "summary": "站点纯静态无后端，数据先用前端静态模拟，本地库仅用户确认升级后启用",
         "keywords": "静态|无后端|前端模拟|静态按钮|本地数据库|IndexedDB|localStorage|升级",
     },
+    # ── 域：site（建站）—— 这几条固化 v2 之后的前置校验与生成基线，避免重蹈空 spec 退化 ──
+    {
+        "rule_key": "domain:site.prebuild_slot_collection",
+        "scope": "domain", "scope_ref": "site",
+        "rule_type": "constraint", "priority": 82,
+        "title": "建站前必须收齐必填槽位",
+        "content": "生成或编辑网站前，必须先通过收集闸门收齐必填槽位（如站点主题 / 类型 / 板块）。即使用户上一轮刚建过站、SIR 状态机出现 edit_mode 信号，也不得跳过收集闸门——create 意图永远强制收槽，edit 意图仍需先确认存在已建成站点。不得退化成空 spec 模板站。",
+        "summary": "建站前必收齐必填槽位，create永远强制收槽，edit须先确认站存在",
+        "keywords": "必填槽位|收集闸门|edit_mode|空spec|模板站|收槽",
+    },
+    {
+        "rule_key": "domain:site.targeted_action_precheck",
+        "scope": "domain", "scope_ref": "site",
+        "rule_type": "constraint", "priority": 86,
+        "title": "指向既有资源的意图须先校验目标就绪",
+        "content": "对用户既有资源的操作（site 的 edit/review，project 的 publish/trash/restore/purge）必须在 S5 闸门、执行前校验目标真实存在且就绪：site 类需存在 status 为 verified 或 preview_ready 的已建成站点，否则 S5 直接打回并提示先新建或切换项目；project 类需目标项目存在且未被永久删除（purging）。前置条件不满足不允许进入执行或审批落地。",
+        "summary": "edit/review/publish/trash须先校验目标就绪，否则S5打回",
+        "keywords": "前置校验|打回|edit|review|publish|目标不存在|站点未建成|purging",
+    },
+    {
+        "rule_key": "domain:site.deterministic_baseline_with_rag",
+        "scope": "domain", "scope_ref": "site",
+        "rule_type": "policy", "priority": 61,
+        "title": "确定性模板为基线，RAG 仅增强不替换",
+        "content": "站点 HTML 生成以确定性模板为基线（标题 / 主题 / 板块经转义、无外部 CDN），RAG 检索（设计原则 / 组件灵感）只做增强、绝不替换基线；任一检索失败静默跳过（fail-soft），不改变确定性产出。修复轮（repair_round）跳过一切 RAG 增强，仅做确定性基线并在末尾统一 sanitize，防止危险片段注入。",
+        "summary": "站点生成以确定性模板为基线，RAG仅增强不替换，修复轮跳过增强",
+        "keywords": "确定性|模板|RAG|增强不替换|修复轮|sanitize|fail-soft",
+    },
+    # ── 全局策略：组件库知识底座治理（v2 已关停自增强回写）──
+    {
+        "rule_key": "global.no_component_autofeed",
+        "scope": "global", "scope_ref": None,
+        "rule_type": "policy", "priority": 58,
+        "title": "组件库停止自动回写",
+        "content": "系统组件库（RAG components 集合）仅由管理员维护的 curated 种子构成，不再把每次建站产物自动回写进组件库。禁止任何「建站后抽取片段喂回组件库」的自增强闭环（会造成跨用户 / 跨项目语义污染、集合无上限膨胀、维护成本高）。建站时的「组件灵感」区块只从 curated 种子召回。",
+        "summary": "组件库只保留curated种子，禁止建站产物自动回写避免污染膨胀",
+        "keywords": "组件库|自增强|回写|自动喂养|curated|污染|膨胀",
+    },
 ]
 
 

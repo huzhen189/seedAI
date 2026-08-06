@@ -54,6 +54,7 @@ _DEPLOY_MAP: Final[tuple[tuple[tuple[str, ...], str], ...]] = tuple(
     (tuple(e["words"]), e["value"]) for e in _slot.get("deploy_target", [])
 )
 _STYLE_WORDS: Final[tuple[str, ...]] = tuple(_raw["style_words"])
+CONTENT_VERBS: Final[tuple[str, ...]] = tuple(_raw.get("content_verbs", []))
 
 
 def reload_intent_config() -> None:
@@ -82,6 +83,7 @@ def reload_intent_config() -> None:
         _SECTION_MAP = tuple((tuple(e["words"]), e["value"]) for e in slot["section"])
         _DEPLOY_MAP = tuple((tuple(e["words"]), e["value"]) for e in slot.get("deploy_target", []))
         _STYLE_WORDS = tuple(raw["style_words"])
+        CONTENT_VERBS = tuple(raw.get("content_verbs", []))
         logger.info("[intent_config] 热更新成功：%d 组触发词 + %d 类槽位映射",
                     len(tw), len(slot))
     except Exception as exc:  # noqa: BLE001 — 配置错误不能中断识别链路
@@ -90,7 +92,7 @@ def reload_intent_config() -> None:
 
 __all__ = [
     "SITE_WORDS", "RESEARCH_WORDS", "PUBLISH_WORDS", "PURGE_WORDS", "RESTORE_WORDS",
-    "TRASH_WORDS", "EDIT_WORDS", "CREATE_WORDS", "SOCIAL_WORDS",
-    "_THEME_MAP", "_SITE_TYPE_MAP", "_SECTION_MAP", "_DEPLOY_MAP", "_STYLE_WORDS",
+    "TRASH_WORDS", "EDIT_WORDS", "CREATE_WORDS",     "SOCIAL_WORDS",
+    "_THEME_MAP", "_SITE_TYPE_MAP", "_SECTION_MAP", "_DEPLOY_MAP", "_STYLE_WORDS", "CONTENT_VERBS",
     "reload_intent_config",
 ]

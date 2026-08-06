@@ -8,15 +8,23 @@ export const useAuthStore = defineStore('auth', () => {
   // 全局登录弹窗开关:任意请求遇到 401 / "Missing authentication" 时置 true,
   // 主动弹出登录框(文档 §2.1 / 前端鉴权约定)。
   const loginOpen = ref(false)
+  // 用户级偏好执行模型(user_id 绑定)。独立于 user 对象, 便于选择器即时写入而不改整份 user。
+  const preferredModel = ref<string>('qwen')
   // init 幂等锁:首屏与路由守卫都会触发, 仅真正跑一次 fetchMe, 避免重复请求。
   let initialized = false
+
+  function syncPreferred(u: AuthUser | null) {
+    if (u?.preferredModel) preferredModel.value = u.preferredModel
+  }
 
   async function init() {
     // 已在 App.vue 提前 init 过则直接复用, 不重复发请求。
     if (initialized) return
     initialized = true
     try {
-      user.value = await authApi.fetchMe()
+      const u = await authApi.fetchMe()
+      user.value = u
+      syncPreferred(u)
     } catch {
       user.value = null
     }
@@ -24,6 +32,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function login(account: string, password: string): Promise<AuthUser> {
     const u = await authApi.login(account, password)
     user.value = u
+    syncPreferred(u)
     loginOpen.value = false // 登录成功自动关闭弹窗
     return u
   }
@@ -35,8 +44,18 @@ export const useAuthStore = defineStore('auth', () => {
   ): Promise<AuthUser> {
     const u = await authApi.register(account, password, email, displayName)
     user.value = u
+    syncPreferred(u)
     loginOpen.value = false
     return u
+  }
+  /** 选择器切换时调用: 写入后端(携带 user_id)并同步本地回显。 */
+  async function setPreferredModel(model: string) {
+    preferredModel.value = model
+    try {
+      await authApi.setPreferredModel(model)
+    } catch {
+      /* 静默: 后端兜底会在下次发消息时收敛, 见后端 accept() */
+    }
   }
   async function logout() {
     // 退出即整页刷新: 先等后端清 Cookie 的 Set-Cookie 真正落盘(await 响应体),
@@ -73,10 +92,12 @@ export const useAuthStore = defineStore('auth', () => {
   return {
     user,
     loginOpen,
+    preferredModel,
     init,
     login,
     register,
     logout,
+    setPreferredModel,
     openLogin,
     closeLogin,
     requireLogin,

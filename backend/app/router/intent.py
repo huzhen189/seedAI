@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 from .intent_config import (  # noqa: E402
     SITE_WORDS, RESEARCH_WORDS, PUBLISH_WORDS, PURGE_WORDS, RESTORE_WORDS,
     TRASH_WORDS, EDIT_WORDS, CREATE_WORDS, SOCIAL_WORDS,
-    _THEME_MAP, _SITE_TYPE_MAP, _SECTION_MAP, _DEPLOY_MAP, _STYLE_WORDS,
+    _THEME_MAP, _SITE_TYPE_MAP, _SECTION_MAP, _DEPLOY_MAP, _STYLE_WORDS, CONTENT_VERBS,
 )
 from app.prompts import INTENT_ESCALATION_PROMPT as _ESCALATION_PROMPT  # 提示词集中于 app/prompts
 from app.config import settings
@@ -371,6 +371,107 @@ async def fill_await_slots(
         return {}
 
 
+def _merge_redundant_site_intents(message: str, resolved: list[IntentItem]) -> list[IntentItem]:
+    """站点意图收束（防同轮「一个建站任务」被规则分词误拆成多意图）。
+
+    真实日志（16:01:33 turn=01KZB1F1CMC36V7X54EBKCC987）现象：原话被 ``.``/``然后``/
+    ``网站`` 等切断成 **segments=3 -> resolved=3 = [site_create, chat_ask, site_create]**：
+      - 首段「个人主页…天气提醒」 -> site_create；
+      - 二段「介绍一下个人前端能力」无域触发词 -> chat_ask（CHAT 兜底）；
+      - 三段「风格卡通像素…网站平台托管」末句含「网站」 -> 又切出一个 site_create。
+
+    而 S4 把 CHAT 兜底与所有 site 都强制生成 action => 前端显示「建站+闲聊+建站」3 子任务。
+    **关键事实**（之前误述已纠正）：本轮回 LLM *有*调用，但只调了 ``_FILL_SYSTEM``
+    （续答抽槽填 ``site.theme``）；真正的意图升级 ``escalate_if_needed`` 因 site_create
+    置信 0.9≥0.7 被 ``has_confident_executable`` 守卫**提前 return 未触发**——不论句子多长，
+    规则层直接定生死，这正是用户「这么多字数按理应升级 LLM」落空的根因（length 升级分支
+    对 site 句实际不可达）。
+
+    修复（确定性、零 LLM、零额外延迟）：
+      ① 内容从句收束：若存在可执行 SITE 意图，任何命中 ``CONTENT_VERBS`` 的 CHAT 兜底从句
+         （介绍/展示/呈现/能力/作品/功能/板块…）并入首个建站意图并丢弃——内容描述是站点的一部分；
+      ② 冗余建站收束：同轮出现 ≥2 个「可执行 SITE 且 speech 相同」且**未引入不同 site_type**
+         的意图（如首段 site_create + 末段又因「网站」切出的 site_create）-> 合并入首个，
+         丢弃冗余项。保证同一句话描述的仍是「一个建站任务」。
+
+    不合并、保真的情形：不同 speech（CREATE+TRASH 删旧建新）、明显不同 site_type
+    （建博客再建商城）仍为多意图；不命中 CONTENT_VERBS 的 genuine 闲聊（推荐书/你是谁）
+    仍独立 action（满足「多个 genuine 子任务分别显示 token 流」需求）；纯闲聊轮整轮不收束，
+    交给下游 ``_collapse_chat_only``。
+
+    返回收束后 resolved；无变化则原样返回。
+    """
+    has_site_exec = any(r.domain == Domain.SITE and r.executable for r in resolved)
+    if not has_site_exec:
+        return resolved
+
+    def _site_type_of(seg: str):
+        text = (seg or "").lower()
+        for words, canonical in _SITE_TYPE_MAP:
+            if any(w in text for w in words):
+                return canonical
+        return None
+
+    kept: list[IntentItem] = []
+    merged_parts: list[str] = []
+    changed = False
+    base_site_idx: int | None = None
+    base_speech = None
+    base_type = None
+
+    for r in resolved:
+        # CASE A：CHAT 兜底 + 内容动词 -> 并入首个建站意图
+        if r.domain == Domain.CHAT and not r.executable:
+            text = (r.raw_segment or "").strip()
+            if text and any(v in text for v in CONTENT_VERBS):
+                if base_site_idx is not None:
+                    merged_parts.append(text)
+                    changed = True
+                    logger.debug("[intent] 站点内容从句收束: 并入建站意图 seg=%.40s", text)
+                    continue
+                # 罕见：内容从句先于建站意图出现 -> 暂留，落回 kept 末尾
+        # CASE B：冗余可执行 SITE 合并
+        if r.domain == Domain.SITE and r.executable:
+            if base_site_idx is None:
+                base_site_idx = len(kept)
+                base_speech = r.speech_act
+                base_type = _site_type_of(r.raw_segment)
+                kept.append(r)
+                continue
+            # 已存在建站意图：不同 speech 或明显不同 site_type -> 保真保留（真多意图）
+            if r.speech_act != base_speech:
+                kept.append(r)
+                continue
+            rtype = _site_type_of(r.raw_segment)
+            if rtype is not None and base_type is not None and rtype != base_type:
+                kept.append(r)  # 不同站点类型（建博客再建商城）-> 保留
+                continue
+            # 同 speech + 未引入不同 site_type -> 合并入 base
+            if r.raw_segment:
+                merged_parts.append(r.raw_segment.strip())
+                changed = True
+                logger.debug("[intent] 冗余建站意图收束: 并入 base seg=%.40s", r.raw_segment)
+                continue
+        # 其余原样保留（genuine 闲聊 / 不同 speech 的 site / CASE A 中先于建站的 CHAT 等）
+        kept.append(r)
+
+    if not changed:
+        return resolved
+
+    # 把合并片段拼回 base 建站意图
+    if base_site_idx is not None and merged_parts:
+        base = kept[base_site_idx].model_copy()
+        base_msg = (base.arguments or {}).get("message") or base.raw_segment or ""
+        merged_text = "。".join([base_msg.rstrip("。"), *merged_parts]).strip("。")
+        kept[base_site_idx] = base.model_copy(update={
+            "arguments": {**(base.arguments or {}), "message": merged_text},
+            "raw_segment": merged_text[:2048],
+        })
+        logger.info("[intent] 站点意图收束完成: 合并 %d 个从句/冗余项, 最终站点意图 i%d",
+                    len(merged_parts), base_site_idx + 1)
+    return kept
+
+
 def understand(message: str) -> UnderstandingResult:
     """确定性优先的多意图理解（方案①+②）。
 
@@ -414,6 +515,11 @@ def understand(message: str) -> UnderstandingResult:
             raw_segment=message[:2048],
         ))
 
+    # 站点意图收束（先于 primary/candidates 计算）：把同轮"一个建站任务"被规则分词
+    # 误拆的 site_create + chat_ask + site_create 合并回单个建站意图，
+    # 避免前端显示多余"闲聊/重复建站"子任务（真实 case 见 turn=...987）。
+    resolved = _merge_redundant_site_intents(message, resolved)
+
     # primary：优先取第一个可执行意图，否则第一个。
     primary = next((r for r in resolved if r.executable), resolved[0])
 
@@ -456,28 +562,19 @@ def understand(message: str) -> UnderstandingResult:
 async def escalate_if_needed(message: str, current: UnderstandingResult) -> UnderstandingResult:
     """方案③：当规则无法稳妥分解时，单次 LLM 全局推理升级。
 
-    触发条件（避免无谓 LLM 调用，保持确定性优先）：
-      - resolved_intents 为空（零命中，纯无法归类），或
-      - 多候选且存在低置信（<0.85）且无明确可执行意图，或
-      - 句长超过阈值且命中 >2 个意图（复合句歧义）。
+    触发顺序（用户要求"长度判断放最前"）：
+      1. 长度判断：``is_long = len(message) > 24``（最先）。
+      2. 纯闲聊护栏（安全优先）：全 CHAT 兜底直接跳过。
+      3. 其余判断：低置信多候选（multi_low）。触发条件为 is_long 或 many 或 multi_low 任一成立。
     任何失败都安全降级回规则结果（current），绝不抛错中断 pipeline。
     """
     n = len(current.resolved_intents)
-    # 优化: 规则已识别出高置信可执行意图 → 直接采用, 不跑 LLM。
-    # 避免无谓的 30~42s 延迟(实测长句被连词切出闲聊段致 n>1 误触发升级),
-    # 也避免 LLM 把明确意图过度纠正成闲聊(16:53 case)。下游域继承/回溯仍会兜底。
-    has_confident_executable = any(r.executable and (r.confidence or 0) >= 0.7 for r in current.resolved_intents)
-    if has_confident_executable:
-        logger.debug(
-            "[intent] 高置信可执行意图已识别, 跳过 LLM 升级: primary=%s",
-            next((r.intent_id for r in current.resolved_intents if r.executable), "?"),
-        )
-        return current
-    # 纯闲聊 / 纯疑问句保护：规则层把所有分句都归为 CHAT 兜底(无任何非 CHAT 域意图)时，
-    # 直接跳过 LLM 升级——否则「你是谁？干啥的？」被切两段→升级→LLM 返回 2 个 CHAT 意图
-    # → ambiguous(len>1)→误判 needs_clarification=True + 降置信到 0.6，把正常闲聊/自我介绍
-    # 当成"意图不清需澄清"。规则在此类场景下置信(0.6)与 executable=False 已准确表达"闲聊"，
-    # 无需 LLM 介入。仅当存在任一非 CHAT 域信号(可能需纠正/升级)才进入升级路径。
+    # 长度判断：句长够长即触发 LLM 升级（用户要求前置且独立，不与其他条件合并）。
+    is_long = len(message) > 24
+    # 多意图判断：收束后仍 >2 个意图即触发 LLM 升级（真复合句歧义），独立判断。
+    many = n > 2
+
+    # 纯闲聊护栏（安全优先）：全归 CHAT 兜底时直接跳过，避免长闲聊误升级→误判澄清。
     has_real_domain_signal = any(r.domain != Domain.CHAT for r in current.resolved_intents)
     if not has_real_domain_signal:
         logger.debug(
@@ -485,17 +582,16 @@ async def escalate_if_needed(message: str, current: UnderstandingResult) -> Unde
             n, next((r.intent_id for r in current.resolved_intents), "?"),
         )
         return current
-    # 升级触发条件（按用户要求收窄）：
-    #   ① 多候选 且 存在低置信(<0.85) 且 无明确可执行意图 → 规则层不确定，交 LLM 升级；
-    #   ② 句长超过阈值 且 命中 >2 个意图（复合句歧义）→ 交 LLM 升级。
-    # 注意：上方「纯闲聊全 CHAT」护栏(行380)仍先于本段生效，
-    # 否则 ① 会重新把「你是谁？干啥的？」这类纯闲聊复合句送进升级 → 误判 needs_clarification。
+
+    # 低置信多候选 → 升级（原 ①）。
     has_low_conf = any((r.confidence or 1.0) < 0.85 for r in current.resolved_intents)
-    multi_low = n > 1 and has_low_conf and not has_confident_executable
-    long_and_many = len(message) > 24 and n > 2
-    if not (multi_low or long_and_many):
+    multi_low = n > 1 and has_low_conf
+
+    # 触发：长句 或 多意图 或 低置信多候选 → 升级（is_long / many 各自独立，无需合并）。
+    if not (is_long or many or multi_low):
         # 规则已能稳妥分解 → 不升级
-        logger.debug("[intent] 规则已稳妥分解, 跳过 LLM 升级 (n=%d multi_low=%s long_and_many=%s)", n, multi_low, long_and_many)
+        logger.debug("[intent] 规则已稳妥分解, 跳过 LLM 升级 (n=%d is_long=%s many=%s multi_low=%s)",
+                     n, is_long, many, multi_low)
         return current
 
     # 超时自适应：文字长短不一、处理耗时也不同。短文字给 30s，长文字给 120s，
@@ -503,8 +599,8 @@ async def escalate_if_needed(message: str, current: UnderstandingResult) -> Unde
     # 过短的超时只会白白触发 deepseek 兜底重算（既慢又丢规则层已识别好的意图）。
     char_count = len(message)
     escalation_timeout = 30.0 if char_count <= 80 else 120.0
-    logger.info("[intent] 触发 LLM 升级: n=%d multi_low=%s long_compound=%s msg_len=%d timeout=%.0fs",
-                n, multi_low, long_compound, len(message), escalation_timeout)
+    logger.info("[intent] 触发 LLM 升级: n=%d is_long=%s many=%s multi_low=%s msg_len=%d timeout=%.0fs",
+                n, is_long, many, multi_low, len(message), escalation_timeout)
     try:
         # RAG 增强：检索 intents 知识库中语义相近的既有意图示例，注入升级提示词，
         # 让 LLM 兜底分类时对齐"系统既有的意图语义"，减少漂移（fail-soft：无结果不注入）。

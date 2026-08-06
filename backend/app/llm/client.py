@@ -21,11 +21,39 @@ from app.analytics import record_ai_llm, record_model_detail
 
 logger = logging.getLogger("app.llm")
 
+@dataclass
+class _ModelMeta:
+    """选择器展示用元数据（静态描述；真实版本号/可用性由 settings 与 has_provider 决定）。"""
+    label: str
+    vendor: str
+    speed: str     # 速度档: 标准 | 快 | 极速
+    context: str   # 上下文窗口表述（token 量级）
+    desc: str
+
+
 # 可被前端选择器枚举的模型元数据（仅展示用；可用性由 has_provider 决定）。
-_MODEL_META: dict[str, tuple[str, str]] = {
-    "qwen": ("通义千问", "阿里通义千问，综合能力均衡，默认模型"),
-    "deepseek": ("DeepSeek", "深度求索，推理能力强，作为默认兜底"),
-    "hy3": ("混元 Hunyuan", "腾讯混元大模型，代码生成能力强"),
+_MODEL_META: dict[str, _ModelMeta] = {
+    "qwen": _ModelMeta(
+        label="通义千问",
+        vendor="阿里云 · 通义千问",
+        speed="标准",
+        context="128K",
+        desc="综合能力均衡，支持思考模式，默认执行模型",
+    ),
+    "deepseek": _ModelMeta(
+        label="DeepSeek",
+        vendor="深度求索",
+        speed="快",
+        context="64K",
+        desc="推理能力强，作为默认故障转移链的兜底模型",
+    ),
+    "hy3": _ModelMeta(
+        label="混元 Hunyuan",
+        vendor="腾讯 · 混元",
+        speed="极速",
+        context="32K",
+        desc="腾讯自研大模型，代码生成与中文表达突出",
+    ),
 }
 
 
@@ -315,11 +343,31 @@ class LLMClient:
             yield chunk
 
     def list_providers(self) -> list[dict[str, str]]:
-        """返回已配置可用的模型列表（供前端选择器枚举）。"""
+        """返回已配置可用的模型列表（供前端选择器枚举），含版本/厂商/速度/上下文等展示信息。
+
+        版本号从 settings 中对应的 *_model 字段动态取，保证展示与真实调用一致。
+        """
         result: list[dict[str, str]] = []
-        for pid, (label, desc) in _MODEL_META.items():
-            if self.has_provider(pid):
-                result.append({"id": pid, "label": label, "desc": desc})
+        for pid, meta in _MODEL_META.items():
+            if not self.has_provider(pid):
+                continue
+            if pid == "qwen":
+                version = settings.qwen_model
+            elif pid == "deepseek":
+                version = settings.deepseek_model
+            elif pid == "hy3":
+                version = settings.hy3_model
+            else:
+                version = ""
+            result.append({
+                "id": pid,
+                "label": meta.label,
+                "version": version,
+                "vendor": meta.vendor,
+                "speed": meta.speed,
+                "context": meta.context,
+                "desc": meta.desc,
+            })
         return result
 
     async def health(self) -> bool:

@@ -172,6 +172,42 @@ async def cache_delete(key: str) -> None:
         logger.warning("cache_delete failed key=%s: %s", key, e)
 
 
+# ---------- 模型列表缓存(准静态, 高频读) ----------
+# /api/models 暴露的可用模型枚举(版本/厂商/速度/上下文窗口等)。数据来自 settings,
+# 极稳定; 走 Cache-Aside: 先读 Redis, miss 时回源 list_models() 并回填。TTL 10min,
+# 配置变更后最长 10min 内可见。detail 字段不参与缓存键, 因此任意模型增改都需清此键。
+CFG_MODELS_KEY = "cfg:models"
+CFG_MODELS_TTL = 600  # 10 分钟
+
+
+async def cache_models_get() -> str | None:
+    """读模型列表缓存(JSON 串);miss 或 Redis 异常返回 None, 由调用方回源。"""
+    try:
+        r = await get_redis()
+        return await r.get(CFG_MODELS_KEY)
+    except Exception as e:
+        logger.warning("cache_models_get failed: %s", e)
+        return None
+
+
+async def cache_models_set(payload: str) -> None:
+    """回填模型列表缓存(JSON 串), 10min TTL。"""
+    try:
+        r = await get_redis()
+        await r.set(CFG_MODELS_KEY, payload, ex=CFG_MODELS_TTL)
+    except Exception as e:
+        logger.warning("cache_models_set failed: %s", e)
+
+
+async def cache_models_invalidate() -> None:
+    """显式失效模型列表缓存(配置变更后调用, 使其下次回源拿新值)。"""
+    try:
+        r = await get_redis()
+        await r.delete(CFG_MODELS_KEY)
+    except Exception as e:
+        logger.warning("cache_models_invalidate failed: %s", e)
+
+
 async def cache_invalidate(pattern: str) -> None:
     """按 pattern 批量清缓存(用 SCAN 替代 KEYS, 避免阻塞 Redis)。"""
     try:

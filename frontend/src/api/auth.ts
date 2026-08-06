@@ -8,6 +8,8 @@ export interface AuthUser {
   email: string | null
   role: string
   plan: string
+  /** 用户级偏好执行模型(user_id 绑定, 后端 preferences.preferred_model)。 */
+  preferredModel?: string
 }
 
 /**
@@ -79,6 +81,25 @@ function normalizeUser(raw: any): AuthUser {
     email: u.email ?? null,
     role: u.role ?? 'user',
     plan: u.plan ?? u.tier ?? 'free',
+    preferredModel: u.preferred_model ?? u.preferredModel ?? 'qwen',
+  }
+}
+
+/** 保存当前用户的偏好执行模型(仅写自己, 后端白名单校验)。
+ * 失败静默:偏好保存是体验增强, 不应阻断发消息等主流程。 */
+export async function setPreferredModel(model: string): Promise<void> {
+  try {
+    const r = await fetch('/auth/me/preferred-model', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+    })
+    if (!r.ok) {
+      // 401/400 等: 仅告警, 不影响后续。
+      console.warn('[auth] 保存偏好模型失败', r.status)
+    }
+  } catch (err) {
+    console.warn('[auth] 保存偏好模型异常', err)
   }
 }
 

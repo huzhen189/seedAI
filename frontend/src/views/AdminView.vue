@@ -317,7 +317,13 @@ interface TraceEventItem {
 interface QcJudgeDetail { model: string; valid: boolean; comment: string }
 interface QcDetail {
   overall: number
-  result: { dimensions?: Record<string, { mean: number; variance: number; scores: number[] }> }
+  // 新单裁判 schema: result.scores = {维度: 0-100 整数}, result.rationale = 评语。
+  // dimensions 为旧多裁判 schema 的遗留字段, 保留可选以兼容历史 trace 数据。
+  result: {
+    scores?: Record<string, number>
+    rationale?: string
+    dimensions?: Record<string, { mean: number; variance: number; scores: number[] }>
+  }
   judges?: QcJudgeDetail[]
   needs_review: boolean
   safety_risk: string
@@ -1240,7 +1246,7 @@ function fmtMeta(meta: Record<string, any> | undefined): string {
             <thead><tr><th>维度</th><th>评分(0-100)</th></tr></thead>
             <tbody>
               <tr v-for="(v, d) in selectedTrace.qc.result.scores" :key="d">
-                <td>{{ qcLabel(d) }}</td>
+                <td>{{ qcLabel(String(d)) }}</td>
                 <td>{{ v }}</td>
               </tr>
             </tbody>

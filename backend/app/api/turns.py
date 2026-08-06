@@ -442,13 +442,38 @@ def _spawn(context: TurnContext) -> None:
 
 
 @router.get("/models")
-async def list_models_endpoint(
-    user: CurrentUser = Depends(get_current_user),
-) -> list[dict[str, str]]:
-    """返回当前已配置的可用模型列表（供前端模型选择器枚举）。"""
+async def list_models_endpoint() -> list[dict[str, str]]:
+    """返回当前已配置的可用模型列表（供前端模型选择器枚举）。
+
+    公开端点: 仅暴露「有哪些模型可选」的元数据(版本/厂商/速度/上下文窗口),
+    不含任何密钥或用户数据, 未登录亦可枚举(首屏即可渲染模型卡片)。
+    走 Redis Cache-Aside: 命中直接返回, miss 回源 list_models() 并回填 10min。
+    """
+    from app.cache import cache_models_get, cache_models_set
     from app.llm import list_models
 
-    return list_models()
+    # 1) Cache-Aside: 先读 Redis
+    try:
+        cached = await cache_models_get()
+    except Exception:
+        cached = None
+    if cached:
+        import json
+
+        try:
+            return json.loads(cached)
+        except Exception:
+            cached = None
+
+    # 2) miss: 回源配置并回填缓存(失败则不缓存, 直接返回原值)
+    models = list_models()
+    try:
+        import json
+
+        await cache_models_set(json.dumps(models, ensure_ascii=False))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[models] 回填 Redis 缓存失败(已降级直出): %s", e)
+    return models
 
 
 @router.post("/chat")
@@ -461,8 +486,8 @@ async def create_turn(
     幂等：同一 client_msg_id 重复提交不会重复执行，只重新挂接已有流。
     """
     logger.info(
-        "[chat] 受理 Turn: user=%s conv=%s msg_len=%d client_msg_id=%s meg=%s",
-        user.id, payload.conversation_id, len(payload.message), payload.client_msg_id, payload.message,
+        "[chat] 受理 Turn: user=%s conv=%s msg_len=%d client_msg_id=%s requested_model=%s",
+        user.id, payload.conversation_id, len(payload.message), payload.client_msg_id, payload.model,
     )
     async with transaction() as session:
         # 同会话续聊：取上一条 turn 作为 prior_turn_id，供 S1 加载其 SIR 快照 /

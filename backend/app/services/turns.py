@@ -15,7 +15,7 @@ from app.core.contracts import ExecutionBudget, SessionInfo, TrustFlags, UserIde
 from app.core.ids import new_ulid
 from app.core.turn_context import TurnContext
 from app.db.repositories import conversations, outbox, turns, usage_ledger
-from app.models import Conversation, Message, Turn
+from app.models import Conversation, Message, Turn, User
 from app.security import CurrentUser
 
 import logging
@@ -120,6 +120,30 @@ class TurnService:
         )
         conversation.version += 1
         await usage_ledger.insert(session, turn_id=turn_id, user_id=user.id, kind="model_calls", reserved_units=1, status="reserved")
+
+        # 用户级模型偏好(user_id 绑定):
+        # ① 前端漏传 model 时, 按该用户 preferences.preferred_model 兜底(全链路偏好一致);
+        # ② 实际使用的模型回写 preferences, 使「偏好」始终收敛到「上次实际用的」,
+        #    无论选择器切换即时存还是仅随消息透传, 都能落到 user_id 维度。
+        resolved_model = model
+        user_row = await session.get(User, user.id)
+        model_source = "explicit"  # 记录来源, 便于排查「为何用了某个模型」
+        if user_row is not None:
+            prefs = user_row.preferences if isinstance(user_row.preferences, dict) else {}
+            if not resolved_model:
+                # 前端未指定 -> 回退到该用户持久化偏好(默认 qwen)
+                resolved_model = prefs.get("preferred_model")
+                model_source = "user_preference"
+            if resolved_model and resolved_model != prefs.get("preferred_model"):
+                prefs = dict(prefs)
+                prefs["preferred_model"] = resolved_model
+                user_row.preferences = prefs
+        model_for_context = resolved_model
+        logger.info(
+            "[turn] 解析执行模型: turn=%s user=%s model=%s source=%s",
+            turn_id, user.id, model_for_context, model_source,
+        )
+
         await outbox.insert(
             session,
             event_key=f"turn:{turn_id}:accepted",
@@ -144,7 +168,7 @@ class TurnService:
                 clean_message=clean,
                 trust=trust,
                 prior_turn_id=prior_turn_id,
-                model=model,
+                model=model_for_context,
                 budget=ExecutionBudget(max_model_calls=1, reserved_model_calls=1),
             ),
             existing=False,

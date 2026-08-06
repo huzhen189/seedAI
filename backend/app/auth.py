@@ -68,5 +68,48 @@ async def logout(response: Response, request: Request) -> None:
 
 
 @router.get("/me")
-async def me(current: CurrentUser = Depends(get_current_user)) -> dict[str, object]:
-    return {"id": current.id, "account": current.account, "role": current.role, "tier": current.tier}
+async def me(
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """返回当前登录用户信息;含用户级偏好(目前为偏好执行模型)。"""
+    user = await db.get(User, current.id)
+    prefs = user.preferences if user and isinstance(user.preferences, dict) else {}
+    return {
+        "id": current.id,
+        "account": current.account,
+        "role": current.role,
+        "tier": current.tier,
+        "preferred_model": prefs.get("preferred_model", "qwen"),
+    }
+
+
+class PreferredModelRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=32)
+
+
+@router.put("/me/preferred-model")
+async def set_preferred_model(
+    body: PreferredModelRequest,
+    current: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """保存当前用户的偏好执行模型(user_id 绑定, 仅写自己)。
+
+    值须经 list_models() 白名单校验(只接受后端确实枚举到的可用模型), 拒绝无效/越权值。
+    """
+    from app.llm import list_models
+
+    allowed = {m["id"] for m in list_models()}
+    if body.model not in allowed:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_MODEL", "allowed": sorted(allowed)})
+
+    user = await db.get(User, current.id)
+    if user is None:
+        raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"})
+    prefs = user.preferences if isinstance(user.preferences, dict) else {}
+    prefs = dict(prefs)  # 复制, 避免原地改 JSON 列 mutation 未刷新的坑
+    prefs["preferred_model"] = body.model
+    user.preferences = prefs
+    await db.commit()
+    return {"preferred_model": body.model}
