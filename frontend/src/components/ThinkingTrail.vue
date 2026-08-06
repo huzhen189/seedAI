@@ -31,6 +31,10 @@ const props = defineProps<{
   intents: IntentInfo[]
   /** 本轮执行计划 + 子任务实时状态 */
   plan: PlanItem[]
+  /** 建站专有流式输出 token 累计（来自 gen_token 事件），用于「构建网站」上方小窗 */
+  siteToken: string
+  /** 建站专有流式推理累计（来自 gen_think 事件） */
+  siteThink: string
   capabilityNotices: CapabilityNotice[]
   usage: Record<string, unknown> | null
   generating: boolean
@@ -107,11 +111,24 @@ function streamTextOf(kind: GroupKind): string {
   return props.thinking || props.response
 }
 
+/** 建站专有流内容：gen_think 优先（看模型推理），再退回 gen_token 正文。 */
+function siteStreamText(): string {
+  return props.siteThink || props.siteToken
+}
+
+/** 建站小窗是否可见：仅建站上下文 + 有建站流内容 + 尚在生成中（构建网站段未完成则已收起）。 */
+function showSiteStream(status: GroupStatus): boolean {
+  if (!props.isSiteBuild) return false
+  if (status === 'completed' || status === 'pending') return false
+  return siteStreamText().length > 0
+}
+
 /**
- * token 框可见性：有内容 + 所属段尚未完成。
+ * 聊天 token 框可见性：有内容 + 所属段(执行段)尚未完成。
  * 段一旦 completed 立刻收起，避免终态还残留一个空转的流框（用户明确要求「流结束框消失」）。
  */
 function showStreamBox(kind: GroupKind, status: GroupStatus): boolean {
+  if (kind !== 'execute') return false
   if (status === 'completed' || status === 'pending') return false
   return streamTextOf(kind).length > 0
 }
@@ -133,8 +150,12 @@ function bindStreamBox(kind: string, el: unknown): void {
   if (el instanceof HTMLElement) streamBoxes.set(kind, el)
   else streamBoxes.delete(kind)
 }
+function bindSiteStreamBox(el: unknown): void {
+  if (el instanceof HTMLElement) streamBoxes.set('site-stream', el)
+  else streamBoxes.delete('site-stream')
+}
 watch(
-  () => [props.thinking, props.response],
+  () => [props.thinking, props.response, props.siteThink, props.siteToken],
   async () => {
     await nextTick()
     streamBoxes.forEach((el) => {
@@ -204,6 +225,17 @@ function compact(value: unknown): string {
       >
         <span class="tt-marker">{{ g.status === 'completed' ? '✓' : g.status === 'active' ? '●' : (i + 1) }}</span>
         <div class="tt-group-body">
+          <!-- 建站专有流式小窗：位于「构建网站」分组上方(即"正在为你生成网站…"文案之上)，
+               固定高度内滚动，实时展示 LLM 真实生成的 token 流。仅在建站流有内容且未收尾时显示。 -->
+          <div
+            v-if="g.id === 'execute' && showSiteStream(g.status)"
+            class="tt-stream site-stream"
+            :ref="(el) => bindSiteStreamBox(el)"
+          >
+            <div class="tt-stream-head">大模型正在生成站点…</div>
+            <pre class="tt-stream-text">{{ siteStreamText() }}</pre>
+          </div>
+
           <div class="tt-group-label">
             {{ g.label }}
             <span v-if="g.status === 'active' && generating" class="tt-pulse">
@@ -352,6 +384,21 @@ function compact(value: unknown): string {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: inherit;
+}
+/* 建站专有小窗：在「构建网站」上方，强调"正在生成"，与聊天 token 框区分色调 */
+.tt-stream.site-stream {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--brand) 12%, var(--surface-1)), var(--surface-2));
+  border-color: var(--brand);
+}
+.tt-stream-head {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--brand);
+  margin-bottom: 4px;
+  position: sticky;
+  top: -8px;
+  background: var(--surface-1);
+  padding: 2px 0;
 }
 
 /* ---- 列表（意图 / 执行计划共用骨架，保持风格统一）---- */

@@ -58,6 +58,13 @@ export interface StreamUiState {
   response: string
   /** LLM 思考过程实时累计(来自 think 事件), 前端折叠展示 */
   thinking: string
+  /**
+   * 建站专有流（区别于聊天流）：来自独立事件 gen_token/gen_think。
+   * LLM 真实生成站点时的逐块输出，用于「构建网站」分组上方的小窗实时滚动展示。
+   * 刻意与聊天 response/thinking 隔离，避免建站正文污染助手回复气泡。
+   */
+  siteToken: string
+  siteThink: string
   attemptOutputs: string[]
   state: Record<string, unknown>
   stateVersion: number
@@ -113,6 +120,8 @@ export function createStreamUiState(): StreamUiState {
     activities: [],
     response: '',
     thinking: '',
+    siteToken: '',
+    siteThink: '',
     attemptOutputs: [],
     state: {},
     stateVersion: 0,
@@ -183,6 +192,14 @@ function applyEvent(state: StreamUiState, event: StreamEvent): void {
       break
     case 'think':
       state.thinking += textFrom(event.data)
+      break
+    case 'gen_token':
+      // 建站正文逐块输出（独立于聊天 token，避免污染回复气泡）。
+      state.siteToken += textFrom(event.data)
+      break
+    case 'gen_think':
+      // 建站推理过程（独立于聊天 think）。
+      state.siteThink += textFrom(event.data)
       break
     case 'state_diff':
       applyStateDiff(state, event.data)

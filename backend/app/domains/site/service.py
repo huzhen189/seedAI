@@ -21,7 +21,13 @@ logger = logging.getLogger("app.domains.site.service")
 
 
 class SiteService:
-    async def create_or_edit(self, session: AsyncSession, context: TurnContext) -> tuple[Artifact, str]:
+    async def create_or_edit(
+        self,
+        session: AsyncSession,
+        context: TurnContext,
+        *,
+        on_chunk: "callable[[str, str], None] | None" = None,
+    ) -> tuple[Artifact, str]:
         """建站/改站主入口(S6 调用)。
 
         流程：取项目 → build_spec(合并需求) → produce(生成 HTML) → verify(校验/最多一次修复)
@@ -34,6 +40,9 @@ class SiteService:
         Args:
             session: 数据库会话(本方法内所有写操作在同一事务,提交由调用方控制)。
             context: 本轮 TurnContext(含 project_id / user_id)。
+            on_chunk: 可选流式回调 ``(kind, text)``，kind ∈ {"think","token"}，
+                来自 LLM 真实生成站点时的逐块输出；S6 接成 SSE 帧让前端「构建网站」上方
+                小窗实时滚动展示。不传则无流式(纯模板/修复轮)。
         Returns:
             ``(Artifact, 文本摘要)``。
         """
@@ -68,7 +77,7 @@ class SiteService:
         max_code = settings.site_react_max_rounds_code
         max_chat = settings.site_react_max_rounds_chat
 
-        html = await site_workflow.produce(spec, model=context.model)
+        html = await site_workflow.produce(spec, model=context.model, on_chunk=on_chunk)
         ok, reason = site_workflow.verify(html)
         round_no = 0
         chat_rounds = 0
@@ -77,7 +86,7 @@ class SiteService:
             round_no += 1
             logger.warning("[site] 第%d轮代码执行(produce/verify)未过 reason=%s,定向修复", round_no, last_reason)
             repair_spec = {**spec, "_repair_round": round_no, "_repair_reason": last_reason}
-            html = await site_workflow.produce(repair_spec, model=context.model)
+            html = await site_workflow.produce(repair_spec, model=context.model, on_chunk=on_chunk)
             ok, reason = site_workflow.verify(html)
             if ok:
                 break

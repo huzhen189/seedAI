@@ -204,15 +204,21 @@ class S3DstStage(BaseStage):
     def _is_edit_mode(context: TurnContext) -> bool:
         """本轮是否是对**既有站点**的受控编辑。
 
-        两个充分条件：
-          - S1 已按事实产物锁定上一轮项目（回溯控制 correct/supplement，
-            典型是「改成浅色风格」——无域触发词、靠域继承提升上来的那类）；
-          - 意图集合里有 EDIT 且会话已绑定项目。
+        判定收紧（2026-08-05 修复）：
+          旧逻辑仅凭「上一轮有产物(prior_project_id 非空)」就返回 True，而 prior_project_id
+          在首建站后由 S1 回填、且普通 /chat 续聊也会回填 prior_turn_id——于是「上个建的站
+          还在」就足以让下轮「我想做个网站」被误判成 edit_mode，整段跳过必填收集闸门，
+          导致 spec 为空、页面退化为模板/组件库（用户实测反馈）。
+
+        新的充分条件（二者必须同时成立）：
+          1. 本轮意图集合里确有 ``SITE + EDIT``（真·改站）；
+          2. 存在一个可改的既有站点（prior_project_id 或会话已绑定 project）。
+          真正的回溯改站（如「改成浅色风格」无域触发词）由 S2 的 ``inherit_retro_domain``
+          把 CHAT 兜底提升为 ``SITE + EDIT`` 覆盖，故第 1 条仍能命中，不误伤。
+
         编辑模式下必填闸门整段跳过，见 ``transition.plan_round(edit_mode=...)``。
         """
-        if context.prior_turn_id is not None and context.prior_project_id is not None:
-            return True
-        if not getattr(context.session, "project_id", None):
+        if not getattr(context.session, "project_id", None) and context.prior_project_id is None:
             return False
         if context.understanding is None:
             return False

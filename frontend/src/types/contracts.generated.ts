@@ -30,6 +30,6 @@ export interface StreamEvent {
   event_id: string;
   seq: number;
   timestamp: string;
-  type: "stage" | "task" | "tool" | "token" | "retract" | "think" | "state_diff" | "approval" | "attempt_output" | "suspended" | "usage" | "capability_notice" | "error" | "reconnect" | "done";
+  type: "stage" | "task" | "tool" | "token" | "retract" | "think" | "gen_token" | "gen_think" | "state_diff" | "approval" | "attempt_output" | "suspended" | "usage" | "capability_notice" | "error" | "reconnect" | "done";
   data: Record<string, unknown>;
 }

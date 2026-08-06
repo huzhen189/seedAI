@@ -196,7 +196,17 @@ class S6ExecuteStage(BaseStage):
         if self.session is None:
             raise RuntimeError("S6 site action requires a database session")
         t0 = time.time()
-        artifact, text = await site_service.create_or_edit(self.session, context)
+        # 建站流式透传：把 LLM 逐块输出转成独立 SSE 事件(gen_token/gen_think)，
+        # 让前端「正在为你生成网站…」上方小窗实时滚动展示。刻意**不复用**聊天用的
+        # token/think 事件——否则建站正文会混进助手回复气泡(state.response)，污染最终答案。
+        # fail-soft：emit 失败不得反噬建站主链路。
+        async def _on_site_chunk(kind: str, text: str) -> None:
+            event_type = "gen_think" if kind == "think" else "gen_token"
+            try:
+                await context.emit(event_type, {"text": text})
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[S6] 建站 token 帧下发失败(忽略): %s", exc)
+        artifact, text = await site_service.create_or_edit(self.session, context, on_chunk=_on_site_chunk)
         elapsed = (time.time() - t0) * 1000
         logger.info("[S6] site 动作产物 artifact_id=%s v=%s 文本首120=%r",
                      artifact.id, getattr(artifact, "version", "?"), text[:120])

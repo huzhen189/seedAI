@@ -336,7 +336,13 @@ class SiteWorkflow:
         return spec
 
     # ---------------------------------------------------------- Produce
-    async def produce(self, spec: dict, model: str | None = None) -> str:
+    async def produce(
+        self,
+        spec: dict,
+        model: str | None = None,
+        *,
+        on_chunk: "callable[[str, str], None] | None" = None,
+    ) -> str:
         """按 SiteSpec 确定性生成一份 premium 质感的完整静态站点 HTML（§8.2 Produce）。
 
         纯函数(无副作用)，从 ``title/prompt/theme`` 推导 hero/feature/about 区块，
@@ -347,6 +353,9 @@ class SiteWorkflow:
 
         Args:
             spec: SiteSpec dict(至少含 ``title/prompt/theme``)。
+            on_chunk: 可选流式回调。签名 ``(kind, text)``，kind ∈ {"think","token"}，
+                把 LLM 真实生成站点的推理/正文逐块透传给调用方(用于 SSE 实时展示)。
+                不传则退化为一次性取全文，保持旧行为。
         Returns:
             完整 HTML 文档字符串(以 ``<!doctype html>`` 开头)。
         """
@@ -379,7 +388,9 @@ class SiteWorkflow:
         # 模型遵循前端选择器(model)；未指定或不可用则回落 settings.site_llm_codegen_provider（默认 hy3）。
         codegen_model = model if (model and get_llm_client().has_provider(model)) else settings.site_llm_codegen_provider
         if (not repair_round) and self._llm_codegen_enabled(codegen_model):
-            llm_html = await self._generate_with_llm(spec, title, features, safe_theme, provider=codegen_model)
+            llm_html = await self._generate_with_llm(
+                spec, title, features, safe_theme, provider=codegen_model, on_chunk=on_chunk,
+            )
             if llm_html:
                 ok, reason = self.verify(llm_html)
                 if ok:
@@ -601,27 +612,69 @@ footer.foot {{ border-top:1px solid var(--line); margin-top:40px; }}
             return False
 
     async def _generate_with_llm(
-        self, spec: dict, title: str, features: list[dict[str, str]], safe_theme: str, provider: str | None = None
+        self,
+        spec: dict,
+        title: str,
+        features: list[dict[str, str]],
+        safe_theme: str,
+        provider: str | None = None,
+        *,
+        on_chunk: "callable[[str, str], None] | None" = None,
     ) -> str | None:
         """用指定模型真实生成站点 HTML；任何失败返回 None（由调用方回落模板）。
 
         不在此处抛异常——建站流水线绝不能因代码生成失败而中断。
+
+        Args:
+            on_chunk: 可选流式回调。签名 ``(kind, text)``，kind ∈ {"think","token"}，
+                用于把模型推理/正文逐块推给 SSE（前端「构建网站」上方的小型滚动窗实时展示）。
+                不传则退化为一次性返回全文（保持旧行为，fail-soft 不破坏既有调用方）。
         """
         try:
             provider = provider or settings.site_llm_codegen_provider
             prompt = _build_codegen_prompt(spec, title, features, safe_theme)
-            text = await get_llm_client().complete_with(
-                provider,
-                [
-                    {"role": "system", "content": _CODEGEN_SYSTEM},
-                    {"role": "user", "content": prompt},
-                ],
+            messages = [
+                {"role": "system", "content": _CODEGEN_SYSTEM},
+                {"role": "user", "content": prompt},
+            ]
+            if on_chunk is None:
+                # 非流式回落（保留原路径，确保不强制要求调用方接流）。
+                text = await get_llm_client().complete_with(
+                    provider, messages,
+                    temperature=0.85,
+                    max_tokens=settings.site_llm_codegen_max_tokens,
+                    timeout=settings.site_llm_codegen_timeout,
+                    purpose="site_codegen",
+                )
+                html = _extract_html(text)
+                if not html:
+                    return None
+                return _sanitize_llm_html(html)
+
+            # 流式：逐块回调 + 末尾整体抽取。任何单块异常不影响整体接入。
+            buf = ""
+            async for chunk in get_llm_client().chat_stream_with(
+                provider, messages,
                 temperature=0.85,
                 max_tokens=settings.site_llm_codegen_max_tokens,
                 timeout=settings.site_llm_codegen_timeout,
+                enable_thinking=True,
                 purpose="site_codegen",
-            )
-            html = _extract_html(text)
+            ):
+                kind = chunk.get("kind")
+                text = chunk.get("text") or ""
+                if not text:
+                    continue
+                # on_chunk 可能跨 await，包裹异常不反噬建站主流程。
+                try:
+                    if kind == "think":
+                        on_chunk("think", text)
+                    elif kind == "token":
+                        buf += text
+                        on_chunk("token", text)
+                except Exception as cb_exc:  # noqa: BLE001
+                    logger.warning("[produce] 建站 token 回调异常(忽略): %s", cb_exc)
+            html = _extract_html(buf)
             if not html:
                 return None
             return _sanitize_llm_html(html)
