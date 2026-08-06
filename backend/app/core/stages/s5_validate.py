@@ -8,6 +8,8 @@ from app.core.governance import action_requires_approval, action_risk_label, gov
 from app.core.turn_context import TurnContext
 from app.domains.project import project_service
 from app.analytics import record_intent_decision
+from sqlalchemy import select
+from app.models import Artifact, Project
 from .base import BaseStage
 
 
@@ -131,50 +133,96 @@ class S5ValidateStage(BaseStage):
             await record_intent_decision("clarify", skill="unknown", risk="low")
             return self.result(StageStatus.COMPLETED, "needs_clarification")
 
-        # ── edit 真实性兜底（2026-08-06 增补）──────────────────────────
-        # 上游 S3.edit_mode 短路只在「意图含 SITE+EDIT 且存在可改 project」时判 edit，
-        # 但仍可能指向「无已建成 artifact 的空 project」（首建站失败/占位/被软删）。
-        # 这种悬空 edit 若放行，S6 会在错对象上改建或直接退化模板，用户侧即「页面还是组件库」。
-        # 故 S5 作为最后一道闸门补验：被判 site_edit 但目标 project 查不到已建成 site
-        # （verified / preview_ready）→ 打回澄清，让 S2 下一轮重新判断
-        # （用户实际意图通常是不含 EDIT 触发词的新建，_is_edit_mode 会回落收集闸门）。
-        target_kind = getattr(getattr(context.round_plan, "task", None), "kind", None)
-        if target_kind == "site_edit" and self.session is not None:
-            pid = context.prior_project_id or getattr(context.session, "project_id", None)
-            if pid is not None:
-                from sqlalchemy import select
-
-                from app.models import Artifact
-
-                exists = await self.session.scalar(
-                    select(Artifact.id)
-                    .where(
-                        Artifact.project_id == pid,
-                        Artifact.status.in_(["verified", "preview_ready"]),
-                    )
-                    .limit(1)
-                )
-                if exists is None:
-                    logger.warning(
-                        "[S5] 被判 site_edit 但 project=%s 无已建成 site，打回澄清 turn=%s",
-                        pid, context.turn_id,
-                    )
-                    frag = ResponseFragment(
-                        status="clarify",
-                        text=("我没能找到可以修改的已生成网站（项目可能尚未建好或已被清除）。"
-                              "是要新建一个网站，还是切换/指定某个已有的项目？"),
-                        producer_stage=StageId.S5,
-                    )
-                    context.validation = ValidationResult(
-                        status="clarify",
-                        reason_codes=["edit_target_missing"],
-                        response_fragments=[frag],
-                    )
-                    context.response_fragments.append(frag)
-                    await record_intent_decision("clarify", skill="site_edit", risk="low")
-                    return self.result(StageStatus.COMPLETED, "edit_target_missing")
+        # ── 目标存在性/就绪校验（2026-08-06 整合）──────────────────────
+        # 所有「指向既有资源」的意图在放行前必须验明目标真实存在且就绪，否则 S6 会在
+        # 空 project / 未建成站点上硬执行、退化成模板或产生幽灵副作用。
+        # 此处集中一张配置表，覆盖 edit/review/publish/trash/restore/purge 等不只是
+        # 纯新建的意图；create/research/chat 不需要既有资源，直接放行。
+        reject = await self._verify_targets_ready(context)
+        if reject is not None:
+            return reject
 
         # 全为低风险动作：放行，S6 串行执行。
         context.validation = ValidationResult(status="pass")
         await record_intent_decision("route", skill="multi_action", risk="low")
         return self.result(StageStatus.COMPLETED, "validation_passed")
+
+    # 目标校验配置：domain.value + speech_act.value → 需要验什么。
+    #   "site_built"  : 目标 project 下须存在 verified/preview_ready 的站点 Artifact。
+    # 仅列入「低危、S5 直接放行进 S6」的指向既有资源的意图（edit/review）。
+    # 高危项目动作（publish/trash/restore/purge）在 S5 早期即被审批闸门 PAUSED，
+    # 执行期由 project_ops.execute 内部统一校验「项目存在 + 非 purging + head artifact 就绪」，
+    # 此处不再重复（避免依赖审批卡的完整 session），单一真相源在 ops 层。
+    _TARGET_REQUIREMENTS: "dict[tuple[str, str], str]" = {
+        ("site", "edit"): "site_built",
+        ("site", "review"): "site_built",
+    }
+
+    async def _verify_targets_ready(self, context: "TurnContext"):
+        """逐 action_item 校验目标存在性/就绪；任一不达标则打回 clarify。
+
+        返回 None 表示全部通过；返回 StageStatus 结果表示已打回（调用方直接 return）。
+        仅查 DB 的轻量校验，S5 本就持 session；无 session 时不校验（保持旧行为）。
+        """
+        if self.session is None or context.plan is None:
+            return None
+        for a in context.plan.action_items:
+            need = self._TARGET_REQUIREMENTS.get((a.domain.value, a.speech_act.value))
+            if need is None:
+                continue
+            pid = self._resolve_project_id(context, a)
+            if pid is None:
+                logger.warning("[S5] 意图 %s/%s 无法解析目标 project，打回 turn=%s",
+                               a.domain.value, a.speech_act.value, context.turn_id)
+                return await self._clarify_missing(
+                    context, "project_unresolved",
+                    "我没能确定要操作的项目，请先选择或指定一个项目。", skill=f"{a.domain.value}_{a.speech_act.value}",
+                )
+            if need == "site_built":
+                ok = await self.session.scalar(
+                    select(Artifact.id).where(
+                        Artifact.project_id == pid,
+                        Artifact.status.in_(["verified", "preview_ready"]),
+                    ).limit(1)
+                )
+                if ok is None:
+                    logger.warning("[S5] 意图 %s/%s 但 project=%s 无已建成站点，打回 turn=%s",
+                                   a.domain.value, a.speech_act.value, pid, context.turn_id)
+                    return await self._clarify_missing(
+                        context, "target_site_missing",
+                        "我没能找到可以操作的已生成网站（项目可能尚未建好或已被清除）。"
+                        "是要新建一个网站，还是切换/指定某个已有的项目？",
+                        skill=f"{a.domain.value}_{a.speech_act.value}",
+                    )
+            elif need == "project":
+                proj = await self.session.scalar(
+                    select(Project.id).where(Project.id == pid, Project.user_id == context.user.user_id).limit(1)
+                )
+                if proj is None:
+                    logger.warning("[S5] 意图 %s/%s 但 project=%s 不存在/越权，打回 turn=%s",
+                                   a.domain.value, a.speech_act.value, pid, context.turn_id)
+                    return await self._clarify_missing(
+                        context, "target_project_missing",
+                        "我没能找到要操作的项目（可能已被删除或无权访问）。",
+                        skill=f"{a.domain.value}_{a.speech_act.value}",
+                    )
+        return None
+
+    @staticmethod
+    def _resolve_project_id(context: "TurnContext", action) -> "int | None":
+        """解析某 action 的目标 project_id：优先用 action.target.id（若为整数），
+        否则回落 prior_project_id / session.project_id。"""
+        tid = getattr(getattr(action, "target", None), "id", None)
+        if tid is not None and str(tid).isdigit():
+            return int(tid)
+        pid = context.prior_project_id or getattr(getattr(context, "session", None), "project_id", None)
+        return pid
+
+    async def _clarify_missing(self, context: "TurnContext", reason: str, text: str, *, skill: str):
+        frag = ResponseFragment(status="clarify", text=text, producer_stage=StageId.S5)
+        context.validation = ValidationResult(
+            status="clarify", reason_codes=[reason], response_fragments=[frag],
+        )
+        context.response_fragments.append(frag)
+        await record_intent_decision("clarify", skill=skill, risk="low")
+        return self.result(StageStatus.COMPLETED, reason)
