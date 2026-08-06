@@ -256,6 +256,13 @@ artifact, text = await site_workflow.preview(session, project, context, html)  #
 ## 6. 风险
 
 - `_repair` 死标志修复是 ReAct 成立前提，优先级高于加循环。
+
+---
+
+## 7. 后续增补（2026-08-05 ~ 08-06）
+
+- **hy3 代码生成接入 `produce()`（`07bbfc6`，2026-08-05）**：`site/workflow.py` 在 `produce()` 内新增 hy3 分支，混合主模型代码生成；修复前端生成后需手动刷新（产物落地自动刷新预览）。
+- **S5 统一目标校验（`45ed084`，2026-08-06）**：目标存在性/就绪校验从分散的 site 校验前移到 S5 闸门前，抽 `domains/project/guard.py` 为单一真相源，覆盖 edit+review 等动作；新增 edit 真实性兜底防止悬空 edit 放行。详见《AI 核心端细节》§4 S5。
 - 模型预算放宽（`max_model_calls`）须与 `ExecutionBudget` 校验（`reserved<=max`、`settled<=reserved`）对齐，避免超支。
 - 通路 B（LLM 产 HTML）的安全复检不可省；否则注入风险绕过 `_esc`。
 - `preview` 必须终态化（仅落最终版），否则每轮迭代污染版本号与 `head_artifact_id`。
